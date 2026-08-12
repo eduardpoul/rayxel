@@ -48,34 +48,53 @@ The shape of the trap is now visible: MJPEG reaches rates that no uncompressed f
 — 4K60 against 4K30, 1440p144 against 1440p60, 1080p240 against 1080p120. Every one of
 those is a rate Windows also offers as "NV12", and cannot be.
 
-## The uncomfortable part
+## The cross-check, and the wrong question that nearly sank it
 
-Cross-checking every classified mode against the hardware's own frame lists, matched on
-resolution **and** rate:
+The first version of this cross-check asked *"does this resolution and rate exist
+uncompressed in hardware?"* and reported **39 of 44 flags are false positives**. That was
+wrong, and the fault was in the question. Of course 1440p60 exists uncompressed — the card
+offers it both as NV12 and as MJPEG. Proving it exists proves nothing.
+
+The question that has an answer is **how many times**. Where the card offers a resolution
+both ways, Windows publishes three types: the real NV12, the MJPEG, and the MJPEG decoded
+back into NV12. Two NV12 entries where the hardware declares one. The surplus *is* the
+invention.
+
+Counting per fourcc, resolution and rate — all three, because the card's I420 stream is no
+excuse for a second NV12, and comparing sizes alone would wave 4K60 through:
 
 ```
-44 mode(s) flagged as secretly compressed
-   39 DO exist uncompressed in hardware: 3840x2160@30, 3840x2160@25,
-      2560x1440@60, 2560x1440@50, 2560x1440@30, 2560x1440@25 ...
-43 mode(s) called genuinely raw
-   all of them exist uncompressed in hardware - no mode was let through wrongly
+69 uncompressed-looking mode(s) published by Windows
+35 of them the hardware actually declares - 34 must be invented
+the app flagged 34
+  the count matches everywhere - every flag is accounted for by a real invention
 ```
 
-Read carefully:
+Not one rate is over-flagged or under-flagged. Two shapes of invention, both caught:
 
-- **No false negatives.** Nothing the app calls raw is compressed in hardware. The `raw`
-  label can be trusted.
-- **Many false positives.** 39 of 44 `mjpeg?` flags are on modes the device really does
-  offer uncompressed at exactly that resolution and rate.
+1. **Rates nothing uncompressed reaches.** 4K@60, 4K@50, 1440p@144, 1440p@120, 1080p@240.
+   The hardware's NV12 stops at 4K30, 1440p60 and 1080p120. Everything above is MJPEG
+   wearing an NV12 label, and that is provable outright.
+2. **Rates the hardware does reach.** 4K30, 1440p60/50/30, 1080p120/60/50/30 and the
+   smaller sizes. Hardware declares one NV12 stream, Windows shows two, so exactly one of
+   the pair is a decode.
 
-The cause is structural. The card offers *both* NV12 and MJPEG at, say, 2560×1440@60, so
-Windows lists three entries: the genuine NV12, the MJPEG, and the decoded-MJPEG-as-NV12.
-The adjacency rule flags whichever NV12 precedes the MJPEG — and it has no way to tell
-which of the two NV12 entries that is.
+P010 is the clean case and a useful control: 1080p and 720p, one stream in hardware, one
+entry in Windows, no MJPEG twin, nothing flagged. Nothing is being invented there.
 
-So `mjpeg?` should be read as **"one of the NV12 entries at this rate is fake"**, not
-"this one is". The app is right that something is being invented; it is not reliable about
-which entry.
+And the other direction: no mode labelled `raw` sits at a rate the hardware cannot do
+uncompressed. Nothing was let through wrongly.
+
+### What is still not provable
+
+**Which** entry of a pair is the fake one. The adjacency rule flags whichever NV12 precedes
+the MJPEG, and either could be the genuine one. The count is proven; the identity is not.
+Getting it backwards costs a CPU JPEG decode and JPEG artefacts on a mode that could have
+been clean — not a broken picture, but exactly the latency this app exists to remove.
+
+No descriptor can settle it, because the invention happens on the host, not the device.
+Telling them apart means opening both and looking: a decoded stream shows 8×8 ringing a raw
+one does not, and it burns CPU that a raw one does not.
 
 ## Settled: the link really is SuperSpeed
 
@@ -129,10 +148,14 @@ the structural reason those modes cannot be what Windows claims they are.
 
 ## What is worth doing next
 
-1. **Use the descriptors to correct the labelling** rather than only to check it: for each
-   resolution, the highest uncompressed rate the hardware declares is the truth, and any
-   Windows "uncompressed" entry above it is provably synthesized. That turns two inferences
-   into one fact, and would clear the 39 false positives above.
+1. **Tell the pair apart.** The count is settled; the identity is not. Open both NV12
+   entries at one rate and compare — the decoded one costs CPU and carries 8×8 ringing.
+   That is the only remaining gap in the classification, and it needs a measurement rather
+   than a descriptor.
+2. **Feed the descriptors back into the app**, not just into this report. The highest
+   uncompressed rate the hardware declares is the truth for a resolution, so any Windows
+   entry above it can be marked synthesized with certainty instead of inference — turning
+   the app's two indirect detectors into one fact wherever a device answers these IOCTLs.
 2. Nothing to do about the bandwidth ceiling. There is no declared figure to read — this
    card moves video over **bulk** transfers, and bulk endpoints reserve no bandwidth, so
    they state no rate the way isochronous ones do. The inferred value has now been checked

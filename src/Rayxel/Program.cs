@@ -428,46 +428,151 @@ void CrossCheckUsb(CaptureDeviceInfo device, DeviceProbe probe)
             : "    it exceeds the link - something in the mode list cannot be real");
     }
 
-    // The point of the exercise. The comparison has to be on geometry *and* rate: this
-    // card really does offer NV12 at 3840x2160, but only to 30 fps, while MJPEG reaches
-    // 60 there. Comparing sizes alone would call the 4K60 "NV12" mode genuine when it is
-    // exactly the invention being hunted.
-    bool HardwareHas(int w, int h, double fps, bool uncompressedOnly) =>
-        usb.Formats.Where(f => !uncompressedOnly || !f.Compressed)
+    CrossCheckCounts(usb, probe);
+    ReportByResolution(usb, probe);
+}
+
+/// <summary>
+/// The point of the exercise: is the app flagging the right <em>number</em> of invented
+/// media types?
+/// <para>
+/// Asking whether a flagged mode exists uncompressed in hardware is the wrong question, and
+/// answering it produced a badly misleading "39 false positives". Of course it exists — the
+/// card offers 1440p60 as NV12 <em>and</em> as MJPEG, so Windows publishes the real NV12,
+/// the MJPEG, and the MJPEG decoded back into NV12. Two NV12 entries where the hardware has
+/// one. The right question is the surplus: hardware declares one NV12 stream at that
+/// resolution and rate, Windows shows two, so exactly one is invented — and the app should
+/// flag exactly one.
+/// </para>
+/// <para>
+/// The comparison has to be on fourcc, geometry <em>and</em> rate. Comparing sizes alone
+/// would call the 4K60 "NV12" mode genuine when it is exactly the invention being hunted,
+/// and lumping the formats together would let the card's I420 stream excuse a second NV12.
+/// </para>
+/// </summary>
+void CrossCheckCounts(UsbVideoInfo usb, DeviceProbe probe)
+{
+    Log.Info("  cross-check against the hardware's own frame lists:");
+
+    int totalWindows = 0, totalGenuine = 0, totalFlagged = 0;
+    var over = new List<string>();
+    var under = new List<string>();
+
+    foreach (var group in probe.Modes.Where(m => m.IsOfferable)
+                                     .GroupBy(m => (m.Format.Name, m.Width, m.Height, Fps: Math.Round(m.MaxFps, 1))))
+    {
+        var (name, w, h, fps) = group.Key;
+
+        // How many streams of this exact fourcc the hardware declares at this size and rate.
+        // Normally one; zero means nothing uncompressed runs this fast.
+        int genuine = usb.Formats.Count(f => !f.Compressed &&
+                                             string.Equals(f.Name, name, StringComparison.OrdinalIgnoreCase) &&
+                                             f.Frames.Any(fr => fr.Width == w && fr.Height == h &&
+                                                                fr.Rates.Any(r => Math.Abs(r - fps) < 0.6)));
+
+        int windows = group.Count();
+        int invented = Math.Max(0, windows - genuine);
+        int flagged = group.Count(m => m.Transport == WireTransport.CompressedDecoded);
+
+        totalWindows += windows;
+        totalGenuine += Math.Min(windows, genuine);
+        totalFlagged += flagged;
+
+        if (flagged > invented) over.Add($"{w}x{h}@{fps:0.##} {name}");
+        if (flagged < invented) under.Add($"{w}x{h}@{fps:0.##} {name}");
+    }
+
+    Log.Info($"    {totalWindows} uncompressed-looking mode(s) published by Windows");
+    Log.Info($"    {totalGenuine} of them the hardware actually declares - " +
+             $"{totalWindows - totalGenuine} must be invented");
+    Log.Info($"    the app flagged {totalFlagged}");
+
+    if (over.Count == 0 && under.Count == 0)
+        Log.Info("      the count matches everywhere - every flag is accounted for by a real invention");
+    if (over.Count > 0)
+        Log.Warn($"      over-flagged at {over.Count} rate(s): {string.Join(", ", over.Take(6))}");
+    if (under.Count > 0)
+        Log.Warn($"      under-flagged at {under.Count} rate(s): {string.Join(", ", under.Take(6))}");
+
+    // What the counting still cannot do. Where hardware has one NV12 and Windows shows two,
+    // the surplus is proven but its identity is not: the adjacency rule flags whichever
+    // entry precedes the MJPEG, and either of the pair could be the real one.
+    Log.Info("    note: where hardware declares one stream and Windows shows two, the count is " +
+             "provable but which entry is the fake one is not");
+}
+
+/// <summary>
+/// The same comparison laid out one resolution at a time, which is the only form in which
+/// the "false positive" story can be checked by eye.
+/// <para>
+/// Counting matters as much as rate here. Where the hardware offers a resolution both
+/// uncompressed and as MJPEG, Windows publishes <em>three</em> entries — the real
+/// uncompressed one, the MJPEG, and the MJPEG decoded back into an uncompressed subtype.
+/// At most one of the two uncompressed-looking entries can be genuine, so a surplus is
+/// proof of invention even when the rate itself is honest.
+/// </para>
+/// </summary>
+void ReportByResolution(UsbVideoInfo usb, DeviceProbe probe)
+{
+    Log.Info("  resolution by resolution:");
+
+    double MaxRate(bool compressed, int w, int h) =>
+        usb.Formats.Where(f => f.Compressed == compressed)
                    .SelectMany(f => f.Frames)
-                   .Any(fr => fr.Width == w && fr.Height == h &&
-                              fr.Rates.Any(r => Math.Abs(r - fps) < 0.6));
+                   .Where(fr => fr.Width == w && fr.Height == h)
+                   .SelectMany(fr => fr.Rates)
+                   .DefaultIfEmpty(0)
+                   .Max();
 
-    var flagged = probe.Modes
-        .Where(m => m.Transport == WireTransport.CompressedDecoded && m.IsRenderable)
-        .Select(m => (m.Width, m.Height, Fps: m.MaxFps))
+    // How many streams of this exact fourcc the hardware declares at this size and rate —
+    // the most genuine entries Windows could possibly be showing. Matching on the fourcc is
+    // what makes it an answer: the card's I420 stream is not an excuse for a second NV12.
+    int HardwareCount(string name, int w, int h, double fps) =>
+        usb.Formats.Count(f => !f.Compressed &&
+                               string.Equals(f.Name, name, StringComparison.OrdinalIgnoreCase) &&
+                               f.Frames.Any(fr => fr.Width == w && fr.Height == h &&
+                                                  fr.Rates.Any(r => Math.Abs(r - fps) < 0.6)));
+
+    var resolutions = probe.Modes
+        .Where(m => m.IsOfferable)
+        .Select(m => (m.Width, m.Height))
         .Distinct()
+        .OrderByDescending(r => r.Width * (long)r.Height)
         .ToList();
 
-    var raw = probe.Modes
-        .Where(m => m.Transport == WireTransport.Raw && m.IsRenderable)
-        .Select(m => (m.Width, m.Height, Fps: m.MaxFps))
-        .Distinct()
-        .ToList();
+    foreach (var (w, h) in resolutions)
+    {
+        double rawMax = MaxRate(compressed: false, w, h);
+        double jpegMax = MaxRate(compressed: true, w, h);
 
-    Log.Info($"  cross-check against the hardware's own frame lists:");
+        Log.Info($"    {w}x{h}   hardware: uncompressed to {rawMax:0.##} fps, mjpeg to {jpegMax:0.##} fps");
 
-    var falseAlarms = flagged.Where(m => HardwareHas(m.Width, m.Height, m.Fps, uncompressedOnly: true)).ToList();
-    Log.Info($"    {flagged.Count} mode(s) flagged as secretly compressed");
-    if (falseAlarms.Count == 0)
-        Log.Info("      none exist uncompressed in hardware - every flag was correct");
-    else
-        Log.Warn($"      {falseAlarms.Count} DO exist uncompressed: " +
-                 string.Join(", ", falseAlarms.Take(6).Select(m => $"{m.Width}x{m.Height}@{m.Fps:0}")));
+        var offered = probe.Modes
+            .Where(m => m.IsOfferable && m.Width == w && m.Height == h)
+            .GroupBy(m => Math.Round(m.MaxFps, 1))
+            .OrderByDescending(g => g.Key);
 
-    // And the other direction: everything called raw should be there uncompressed.
-    var missed = raw.Where(m => !HardwareHas(m.Width, m.Height, m.Fps, uncompressedOnly: true)).ToList();
-    Log.Info($"    {raw.Count} mode(s) called genuinely raw");
-    if (missed.Count == 0)
-        Log.Info("      all of them exist uncompressed in hardware - no mode was let through wrongly");
-    else
-        Log.Warn($"      {missed.Count} are NOT uncompressed in hardware: " +
-                 string.Join(", ", missed.Take(6).Select(m => $"{m.Width}x{m.Height}@{m.Fps:0}")));
+        foreach (var group in offered)
+        {
+            double fps = group.Key;
+            foreach (var byFormat in group.GroupBy(m => m.Format.Name).OrderBy(g => g.Key))
+            {
+                int windows = byFormat.Count();
+                int genuine = HardwareCount(byFormat.Key, w, h, fps);
+                int invented = Math.Max(0, windows - genuine);
+                int flagged = byFormat.Count(m => m.Transport == WireTransport.CompressedDecoded);
+                string tags = string.Join(" + ", byFormat.Select(m => m.WireTag));
+
+                string verdict = genuine == 0
+                    ? $"hardware has no {byFormat.Key} this fast - all {windows} are decoded MJPEG"
+                    : invented == 0
+                        ? "hardware has one, Windows shows one - genuine"
+                        : $"hardware has {genuine}, Windows shows {windows} - {invented} invented";
+
+                Log.Info($"      @{fps,-5:0.##} {byFormat.Key,-5} [{tags,-20}] flagged {flagged}/{invented}  {verdict}");
+            }
+        }
+    }
 }
 
 /// <summary>Everything one device turned out to be, in the log and on stdout.</summary>
