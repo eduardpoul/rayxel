@@ -1,0 +1,472 @@
+﻿using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+using Rayxel.Diagnostics;
+
+namespace Rayxel.Capture;
+
+/// <summary>One format the device itself declares, from its own descriptors.</summary>
+public sealed record UsbFormat(int Index, string Name, bool Compressed)
+{
+    public List<UsbFrame> Frames { get; } = [];
+}
+
+/// <summary>A resolution and the frame intervals the device says it supports for it.</summary>
+public sealed record UsbFrame(int Index, int Width, int Height, List<double> Rates)
+{
+    /// <summary>Bytes the device reserves for one frame — the size it will actually send.</summary>
+    public uint MaxFrameBytes { get; init; }
+}
+
+/// <summary>
+/// What the hardware says about itself, read straight from its USB descriptors.
+/// </summary>
+public sealed record UsbVideoInfo(
+    int VendorId,
+    int ProductId,
+    string Speed,
+    string UsbVersion,
+    List<UsbFormat> Formats,
+    double CeilingBytesPerSecond,
+    string CeilingSource);
+
+/// <summary>
+/// Reads a UVC device's descriptors through its USB hub, without touching the driver.
+/// <para>
+/// Everything else in this app learns about the card through Media Foundation, which
+/// helpfully invents extra media types — an NV12 entry that is really JPEG on the wire.
+/// The hub IOCTLs go around that: they hand back the configuration descriptor the device
+/// itself published, so the format list is first-hand and the isochronous endpoints state
+/// the real bandwidth rather than leaving it to be inferred.
+/// </para>
+/// <para>
+/// This is read-only. It does not open the video stream, does not rebind the driver, and
+/// does not stop any other application from using the camera. Displacing usbvideo.sys with
+/// WinUSB would allow capturing frames this way too — and would take the device away from
+/// every other program on the machine, which is why this stops at reading.
+/// </para>
+/// </summary>
+public static class UsbDescriptors
+{
+    // CTL_CODE(FILE_DEVICE_USB=0x22, function, METHOD_BUFFERED, FILE_ANY_ACCESS)
+    private const uint IoctlGetNodeInformation = 0x220408;                 // function 258
+    private const uint IoctlGetDescriptorFromNodeConnection = 0x220410;    // function 260
+    private const uint IoctlGetNodeConnectionInformationEx = 0x220448;     // function 274
+    private const uint IoctlGetNodeConnectionInformationExV2 = 0x22045C;   // function 279
+
+    private static readonly Guid UsbHubInterface = new("f18a0e88-c30c-11d0-8815-00a0c906bed8");
+
+    /// <summary>
+    /// Finds the port this capture device is plugged into and reads its descriptors.
+    /// Returns null when the device cannot be located or the hub refuses — this is a
+    /// diagnostic, and nothing in the app depends on it succeeding.
+    /// </summary>
+    public static UsbVideoInfo? Read(CaptureDeviceInfo device)
+    {
+        if (!device.Hardware.HasUsbId)
+        {
+            Log.Debug($"'{device.FriendlyName}' has no USB id; nothing to read");
+            return null;
+        }
+
+        try
+        {
+            // A USB 3 device shows up on both the SuperSpeed hub and its USB 2 companion,
+            // and the companion answers first. Taking the first match reported a 480 Mbit
+            // link for a card demonstrably moving 3 Gbit — so every match is collected and
+            // the fastest wins.
+            UsbVideoInfo? best = null;
+            int bestSpeed = -1;
+
+            foreach (var hubPath in EnumerateHubs())
+            {
+                using var hub = CreateFile(hubPath, 0x40000000 /* GENERIC_WRITE */, 0x00000002 /* FILE_SHARE_WRITE */,
+                                           IntPtr.Zero, 3 /* OPEN_EXISTING */, 0, IntPtr.Zero);
+                if (hub.IsInvalid) continue;
+
+                int ports = ReadPortCount(hub);
+                for (int port = 1; port <= ports; port++)
+                {
+                    if (!ReadConnection(hub, port, out int vid, out int pid, out int speedCode, out int bcdUsb)) continue;
+                    if (vid != device.Hardware.VendorId || pid != device.Hardware.ProductId) continue;
+
+                    var config = ReadConfigurationDescriptor(hub, port);
+                    if (config is null) continue;
+
+                    var (formats, ceiling, source) = ParseVideoStreaming(config);
+                    Log.Debug($"port match on {SpeedName(speedCode)}: {formats.Count} formats, " +
+                              $"{ceiling / (1024 * 1024):0} MiB/s declared");
+
+                    if (speedCode > bestSpeed)
+                    {
+                        bestSpeed = speedCode;
+                        best = new UsbVideoInfo(vid, pid, SpeedName(speedCode), Version(bcdUsb), formats, ceiling, source);
+                    }
+                }
+            }
+
+            if (best is null)
+                Log.Debug($"no USB port reports {device.Hardware.VendorId:x4}:{device.Hardware.ProductId:x4}");
+            return best;
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"USB descriptor read failed: {ex.Message}");
+            return null;
+        }
+    }
+
+    // ── hub enumeration ──────────────────────────────────────────────────────────
+
+    private static IEnumerable<string> EnumerateHubs()
+    {
+        var guid = UsbHubInterface;
+        var set = SetupDiGetClassDevs(ref guid, null, IntPtr.Zero, 0x12 /* PRESENT | DEVICEINTERFACE */);
+        if (set == IntPtr.Zero || set == new IntPtr(-1)) yield break;
+
+        try
+        {
+            var data = new SpDeviceInterfaceData { cbSize = (uint)Marshal.SizeOf<SpDeviceInterfaceData>() };
+            for (uint i = 0; SetupDiEnumDeviceInterfaces(set, IntPtr.Zero, ref guid, i, ref data); i++)
+            {
+                SetupDiGetDeviceInterfaceDetail(set, ref data, IntPtr.Zero, 0, out uint needed, IntPtr.Zero);
+                if (needed == 0) continue;
+
+                var buffer = Marshal.AllocHGlobal((int)needed);
+                try
+                {
+                    // cbSize is the size of the fixed part only: 8 on 64-bit, not the
+                    // buffer length. Getting this wrong is the classic way this call fails.
+                    Marshal.WriteInt32(buffer, IntPtr.Size == 8 ? 8 : 6);
+                    if (SetupDiGetDeviceInterfaceDetail(set, ref data, buffer, needed, out _, IntPtr.Zero))
+                    {
+                        var path = Marshal.PtrToStringUni(buffer + 4);
+                        if (!string.IsNullOrEmpty(path)) yield return path;
+                    }
+                }
+                finally { Marshal.FreeHGlobal(buffer); }
+            }
+        }
+        finally { SetupDiDestroyDeviceInfoList(set); }
+    }
+
+    private static int ReadPortCount(SafeFileHandle hub)
+    {
+        // USB_NODE_INFORMATION: ULONG NodeType, then USB_HUB_DESCRIPTOR. Packed, so
+        // bNumberOfPorts lands at offset 6.
+        var buffer = new byte[96];
+        if (!DeviceIoControl(hub, IoctlGetNodeInformation, buffer, buffer.Length, buffer, buffer.Length, out _, IntPtr.Zero))
+            return 0;
+        return buffer[6];
+    }
+
+    private static string SpeedName(int code) => code switch
+    {
+        0 => "low (1.5 Mbit/s)",
+        1 => "full (12 Mbit/s)",
+        2 => "high (480 Mbit/s)",
+        3 => "SuperSpeed (5 Gbit/s)",
+        4 => "SuperSpeed+ (10 Gbit/s or better)",
+        _ => $"unknown ({code})"
+    };
+
+    /// <summary>bcdUSB says what the device *is*; the port speed says how it is *running*.</summary>
+    private static string Version(int bcd) => $"USB {(bcd >> 8) & 0xFF}.{(bcd >> 4) & 0x0F}";
+
+    private static bool ReadConnection(SafeFileHandle hub, int port, out int vid, out int pid,
+                                       out int speed, out int bcdUsb)
+    {
+        vid = pid = 0;
+        speed = -1;
+        bcdUsb = 0;
+
+        // Base struct is 35 bytes plus a pipe array; a generous buffer avoids caring.
+        var buffer = new byte[2048];
+        BitConverter.GetBytes(port).CopyTo(buffer, 0);
+
+        if (!DeviceIoControl(hub, IoctlGetNodeConnectionInformationEx, buffer, buffer.Length,
+                             buffer, buffer.Length, out _, IntPtr.Zero))
+            return false;
+
+        // ConnectionStatus at offset 31; 1 = DeviceConnected.
+        if (BitConverter.ToUInt32(buffer, 31) != 1) return false;
+
+        // USB_DEVICE_DESCRIPTOR starts at 4: idVendor at +8, idProduct at +10.
+        bcdUsb = BitConverter.ToUInt16(buffer, 4 + 2);
+        bcdUsb = BitConverter.ToUInt16(buffer, 4 + 2);
+        vid = BitConverter.ToUInt16(buffer, 4 + 8);
+        pid = BitConverter.ToUInt16(buffer, 4 + 10);
+        speed = buffer[23];
+
+        // The V1 structure has no way to say "SuperSpeed" — it reports high speed for
+        // every USB 3 device, which is exactly why V2 exists. Without this the card looks
+        // like it is running at 480 Mbit/s when it is not.
+        if (speed == 2 && ReadSuperSpeed(hub, port) is { } upgraded) speed = upgraded;
+
+        return true;
+    }
+
+    /// <summary>
+    /// Asks the V2 interface whether the port is actually operating above high speed.
+    /// Returns null when the hub does not support the request — pre-xHCI stacks do not.
+    /// </summary>
+    private static int? ReadSuperSpeed(SafeFileHandle hub, int port)
+    {
+        // USB_NODE_CONNECTION_INFORMATION_EX_V2: ConnectionIndex, Length, SupportedProtocols, Flags.
+        var buffer = new byte[16];
+        BitConverter.GetBytes(port).CopyTo(buffer, 0);
+        BitConverter.GetBytes(16).CopyTo(buffer, 4);
+
+        if (!DeviceIoControl(hub, IoctlGetNodeConnectionInformationExV2, buffer, buffer.Length,
+                             buffer, buffer.Length, out _, IntPtr.Zero))
+        {
+            Log.Debug($"  port {port}: V2 speed query unsupported (win32 {Marshal.GetLastWin32Error()})");
+            return null;
+        }
+
+        uint protocols = BitConverter.ToUInt32(buffer, 8);
+        uint flags = BitConverter.ToUInt32(buffer, 12);
+        Log.Debug($"  port {port}: V2 protocols=0x{protocols:X} flags=0x{flags:X}");
+        bool superSpeed = (flags & 0x01) != 0;        // operating at SuperSpeed or higher
+        bool superSpeedPlus = (flags & 0x04) != 0;    // operating at SuperSpeed+ or higher
+
+        return superSpeedPlus ? 4 : superSpeed ? 3 : null;
+    }
+
+    private static byte[]? ReadConfigurationDescriptor(SafeFileHandle hub, int port)
+    {
+        // Nine bytes first, only to learn wTotalLength, then the whole thing.
+        var head = Request(hub, port, 9);
+        if (head is null || head.Length < 9) return null;
+
+        int total = BitConverter.ToUInt16(head, 2);
+        if (total is <= 9 or > 65535) return null;
+
+        return Request(hub, port, total);
+    }
+
+    private static byte[]? Request(SafeFileHandle hub, int port, int dataLength)
+    {
+        const int header = 12;  // ULONG ConnectionIndex + the 8-byte setup packet
+        var buffer = new byte[header + dataLength];
+
+        BitConverter.GetBytes(port).CopyTo(buffer, 0);
+        buffer[4] = 0x80;                                    // device-to-host, standard, device
+        buffer[5] = 0x06;                                    // GET_DESCRIPTOR
+        BitConverter.GetBytes((ushort)(0x02 << 8)).CopyTo(buffer, 6);   // configuration, index 0
+        BitConverter.GetBytes((ushort)0).CopyTo(buffer, 8);             // wIndex
+        BitConverter.GetBytes((ushort)dataLength).CopyTo(buffer, 10);   // wLength
+
+        if (!DeviceIoControl(hub, IoctlGetDescriptorFromNodeConnection, buffer, buffer.Length,
+                             buffer, buffer.Length, out uint returned, IntPtr.Zero))
+            return null;
+
+        int payload = (int)returned - header;
+        if (payload <= 0) return null;
+
+        return buffer.AsSpan(header, Math.Min(payload, dataLength)).ToArray();
+    }
+
+    // ── UVC parsing ──────────────────────────────────────────────────────────────
+
+    private const byte DescriptorInterface = 0x04;
+    private const byte DescriptorEndpoint = 0x05;
+    private const byte DescriptorCsInterface = 0x24;
+    private const byte DescriptorSsCompanion = 0x30;
+
+    private const byte ClassVideo = 0x0E;
+    private const byte SubclassVideoStreaming = 0x02;
+
+    /// <summary>
+    /// Walks the configuration descriptor and picks out what the VideoStreaming interface
+    /// declares: its formats, their frames, and the bandwidth its isochronous endpoints
+    /// are willing to carry.
+    /// </summary>
+    private static (List<UsbFormat> Formats, double Ceiling, string Source) ParseVideoStreaming(byte[] config)
+    {
+        var formats = new List<UsbFormat>();
+        UsbFormat? current = null;
+        bool inVideoStreaming = false;
+        double ceiling = 0;
+        string source = "no isochronous endpoint found";
+
+        int i = 0;
+        while (i + 1 < config.Length)
+        {
+            int length = config[i];
+            byte type = config[i + 1];
+            if (length < 2 || i + length > config.Length) break;
+
+            var d = config.AsSpan(i, length);
+
+            switch (type)
+            {
+                case DescriptorInterface:
+                    inVideoStreaming = length >= 8 && d[5] == ClassVideo && d[6] == SubclassVideoStreaming;
+                    break;
+
+                case DescriptorCsInterface when inVideoStreaming && length >= 3:
+                    ParseClassSpecific(d, formats, ref current);
+                    break;
+
+                case DescriptorEndpoint when inVideoStreaming && length >= 7:
+                {
+                    // bmAttributes bits 0-1: 1 = isochronous.
+                    if ((d[3] & 0x03) != 1) break;
+
+                    ushort maxPacket = BitConverter.ToUInt16(d[4..6]);
+                    int size = maxPacket & 0x7FF;
+                    int extra = (maxPacket >> 11) & 0x03;      // additional transactions
+                    byte interval = d[6];
+
+                    // High speed: one service interval every 125 us, so 8000 a second,
+                    // divided down by bInterval.
+                    double perSecond = 8000.0 / Math.Pow(2, Math.Max(0, interval - 1));
+                    double bytes = size * (1 + extra) * perSecond;
+                    if (bytes > ceiling)
+                    {
+                        ceiling = bytes;
+                        source = $"isochronous endpoint, {size} bytes x{1 + extra} every " +
+                                 $"{Math.Pow(2, Math.Max(0, interval - 1)) * 125:0} us";
+                    }
+                    break;
+                }
+
+                case DescriptorSsCompanion when inVideoStreaming && length >= 6:
+                {
+                    // SuperSpeed states the real figure directly, and it supersedes the
+                    // high-speed arithmetic above for the same endpoint.
+                    ushort perInterval = BitConverter.ToUInt16(d[4..6]);
+                    if (perInterval > 0)
+                    {
+                        double bytes = perInterval * 8000.0;
+                        if (bytes > ceiling)
+                        {
+                            ceiling = bytes;
+                            source = $"SuperSpeed companion, {perInterval} bytes per 125 us interval";
+                        }
+                    }
+                    break;
+                }
+            }
+
+            i += length;
+        }
+
+        return (formats, ceiling, source);
+    }
+
+    private static void ParseClassSpecific(ReadOnlySpan<byte> d, List<UsbFormat> formats, ref UsbFormat? current)
+    {
+        const byte FormatUncompressed = 0x04, FrameUncompressed = 0x05;
+        const byte FormatMjpeg = 0x06, FrameMjpeg = 0x07;
+        const byte FormatFrameBased = 0x10, FrameFrameBased = 0x11;
+
+        switch (d[2])
+        {
+            case FormatUncompressed when d.Length >= 21:
+                // The first four bytes of the format GUID are the FOURCC in ASCII.
+                current = new UsbFormat(d[3], Fourcc(d.Slice(5, 4)), Compressed: false);
+                formats.Add(current);
+                break;
+
+            case FormatFrameBased when d.Length >= 21:
+                current = new UsbFormat(d[3], Fourcc(d.Slice(5, 4)), Compressed: true);
+                formats.Add(current);
+                break;
+
+            case FormatMjpeg when d.Length >= 7:
+                current = new UsbFormat(d[3], "MJPEG", Compressed: true);
+                formats.Add(current);
+                break;
+
+            case FrameUncompressed or FrameMjpeg when d.Length >= 26:
+                current?.Frames.Add(ReadFrame(d, intervalsAt: 26, hasBufferSize: true));
+                break;
+
+            case FrameFrameBased when d.Length >= 22:
+                // Frame-based drops dwMaxVideoFrameBufferSize and gains dwBytesPerLine,
+                // so its interval list starts elsewhere.
+                current?.Frames.Add(ReadFrame(d, intervalsAt: 26, hasBufferSize: false));
+                break;
+        }
+    }
+
+    private static UsbFrame ReadFrame(ReadOnlySpan<byte> d, int intervalsAt, bool hasBufferSize)
+    {
+        int width = BitConverter.ToUInt16(d[5..7]);
+        int height = BitConverter.ToUInt16(d[7..9]);
+        uint bufferSize = hasBufferSize && d.Length >= 21 ? BitConverter.ToUInt32(d[17..21]) : 0;
+        byte intervalType = d[25];
+
+        var rates = new List<double>();
+        if (intervalType == 0)
+        {
+            // Continuous: min, max, step — all in 100 ns units.
+            if (d.Length >= intervalsAt + 12)
+            {
+                uint min = BitConverter.ToUInt32(d[intervalsAt..(intervalsAt + 4)]);
+                uint max = BitConverter.ToUInt32(d[(intervalsAt + 4)..(intervalsAt + 8)]);
+                if (min > 0) rates.Add(1e7 / min);
+                if (max > 0 && max != min) rates.Add(1e7 / max);
+            }
+        }
+        else
+        {
+            for (int n = 0; n < intervalType; n++)
+            {
+                int at = intervalsAt + n * 4;
+                if (at + 4 > d.Length) break;
+                uint interval = BitConverter.ToUInt32(d[at..(at + 4)]);
+                if (interval > 0) rates.Add(1e7 / interval);
+            }
+        }
+
+        rates.Sort((a, b) => b.CompareTo(a));
+        return new UsbFrame(d[3], width, height, rates) { MaxFrameBytes = bufferSize };
+    }
+
+    private static string Fourcc(ReadOnlySpan<byte> b)
+    {
+        Span<char> c = stackalloc char[4];
+        for (int i = 0; i < 4; i++)
+        {
+            char ch = (char)b[i];
+            if (ch is < ' ' or > '~') return "?";
+            c[i] = ch;
+        }
+        return new string(c);
+    }
+
+    // ── interop ──────────────────────────────────────────────────────────────────
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SpDeviceInterfaceData
+    {
+        public uint cbSize;
+        public Guid InterfaceClassGuid;
+        public uint Flags;
+        public IntPtr Reserved;
+    }
+
+    [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr SetupDiGetClassDevs(ref Guid classGuid, string? enumerator, IntPtr parent, uint flags);
+
+    [DllImport("setupapi.dll", SetLastError = true)]
+    private static extern bool SetupDiEnumDeviceInterfaces(IntPtr set, IntPtr deviceInfo, ref Guid interfaceClass,
+                                                           uint index, ref SpDeviceInterfaceData data);
+
+    [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool SetupDiGetDeviceInterfaceDetail(IntPtr set, ref SpDeviceInterfaceData data,
+        IntPtr detail, uint detailSize, out uint required, IntPtr deviceInfoData);
+
+    [DllImport("setupapi.dll")]
+    private static extern bool SetupDiDestroyDeviceInfoList(IntPtr set);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern SafeFileHandle CreateFile(string name, uint access, uint share, IntPtr security,
+                                                    uint disposition, uint flags, IntPtr template);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool DeviceIoControl(SafeFileHandle device, uint code,
+        byte[] input, int inputSize, byte[] output, int outputSize, out uint returned, IntPtr overlapped);
+}

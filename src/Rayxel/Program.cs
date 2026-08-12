@@ -26,12 +26,16 @@ string? deviceSelector = null;
 string? shotPath = null;
 string? forcedScreen = null;
 bool listOnly = false;
+bool usbCheck = false;
 bool startWithTelemetry = false;
 bool noAutoHdr = false;
 bool startBorderless = false;
 foreach (var arg in args)
 {
     if (arg is "--list" or "-l") listOnly = true;
+    // Reads the card's own USB descriptors and checks them against what this app
+    // concluded from the Windows media types. Read-only; touches no driver.
+    else if (arg is "--usb") usbCheck = true;
     else if (arg.StartsWith("--device=", StringComparison.OrdinalIgnoreCase)) deviceSelector = arg[9..];
     else if (arg.StartsWith("--lang=", StringComparison.OrdinalIgnoreCase)) Strings.Use(arg[7..]);
     // Diagnostic: run for a few seconds, write what was rendered to a PNG, exit. Captures
@@ -89,6 +93,13 @@ try
     if (listOnly)
     {
         foreach (var d in allDevices) Report(Remember(CaptureDevice.Probe(d)));
+        return 0;
+    }
+
+    if (usbCheck)
+    {
+        foreach (var d in allDevices.Where(x => !x.IsVirtual))
+            CrossCheckUsb(d, Remember(CaptureDevice.Probe(d)));
         return 0;
     }
 
@@ -324,6 +335,100 @@ DeviceProbe Remember(DeviceProbe p)
 {
     probed[p.Device.SymbolicLink] = p;
     return p;
+}
+
+/// <summary>
+/// Puts the device's own descriptors beside what this app concluded from the Windows media
+/// types, and says where the two disagree.
+/// <para>
+/// The whole "this mode claims NV12 but carries JPEG" finding rests on two indirect tests.
+/// This is the direct one: the hardware's own format list, which Windows never shows.
+/// </para>
+/// </summary>
+void CrossCheckUsb(CaptureDeviceInfo device, DeviceProbe probe)
+{
+    Log.Section($"USB descriptors — {device.FriendlyName}");
+
+    var usb = UsbDescriptors.Read(device);
+    if (usb is null)
+    {
+        Log.Warn("  could not read the descriptors for this device");
+        return;
+    }
+
+    Log.Info($"  {usb.VendorId:x4}:{usb.ProductId:x4}   device is {usb.UsbVersion}, running at {usb.Speed}");
+    Log.Info($"  {usb.Formats.Count} format(s) declared by the hardware:");
+
+    foreach (var f in usb.Formats)
+    {
+        var sizes = f.Frames
+            .OrderByDescending(fr => fr.Width * fr.Height)
+            .Select(fr => $"{fr.Width}x{fr.Height}@{(fr.Rates.Count > 0 ? fr.Rates[0].ToString("0.##") : "?")}")
+            .Take(6);
+        Log.Info($"    [{f.Index}] {f.Name,-8} {(f.Compressed ? "compressed" : "uncompressed"),-12} " +
+                 $"{f.Frames.Count} frame sizes: {string.Join("  ", sizes)}");
+    }
+
+    if (usb.CeilingBytesPerSecond > 0)
+    {
+        double mib = usb.CeilingBytesPerSecond / (1024 * 1024);
+        Log.Info($"  declared ceiling  {mib:0} MiB/s  ({usb.CeilingBytesPerSecond * 8 / 1e9:0.00} Gbit/s)");
+        Log.Info($"    from: {usb.CeilingSource}");
+        Log.Info($"  measured ceiling  {probe.Link.CeilingMiBs:0} MiB/s  (inferred from the mode list)");
+
+        // The declared figure is what the endpoint can carry, the measured one is the
+        // fastest thing actually offered. They should be close; a large gap means one of
+        // the two is being read wrong and is worth knowing about.
+        double ratio = probe.Link.CeilingMiBs > 0 ? mib / probe.Link.CeilingMiBs : 0;
+        Log.Info(ratio is > 0.75 and < 1.35
+            ? "    the two agree"
+            : $"    they disagree by {ratio:0.00}x - one of the readings is wrong");
+    }
+    else
+    {
+        Log.Warn("  no isochronous endpoint found; the device may use bulk transfers");
+    }
+
+    // The point of the exercise. The comparison has to be on geometry *and* rate: this
+    // card really does offer NV12 at 3840x2160, but only to 30 fps, while MJPEG reaches
+    // 60 there. Comparing sizes alone would call the 4K60 "NV12" mode genuine when it is
+    // exactly the invention being hunted.
+    bool HardwareHas(int w, int h, double fps, bool uncompressedOnly) =>
+        usb.Formats.Where(f => !uncompressedOnly || !f.Compressed)
+                   .SelectMany(f => f.Frames)
+                   .Any(fr => fr.Width == w && fr.Height == h &&
+                              fr.Rates.Any(r => Math.Abs(r - fps) < 0.6));
+
+    var flagged = probe.Modes
+        .Where(m => m.Transport == WireTransport.CompressedDecoded && m.IsRenderable)
+        .Select(m => (m.Width, m.Height, Fps: m.MaxFps))
+        .Distinct()
+        .ToList();
+
+    var raw = probe.Modes
+        .Where(m => m.Transport == WireTransport.Raw && m.IsRenderable)
+        .Select(m => (m.Width, m.Height, Fps: m.MaxFps))
+        .Distinct()
+        .ToList();
+
+    Log.Info($"  cross-check against the hardware's own frame lists:");
+
+    var falseAlarms = flagged.Where(m => HardwareHas(m.Width, m.Height, m.Fps, uncompressedOnly: true)).ToList();
+    Log.Info($"    {flagged.Count} mode(s) flagged as secretly compressed");
+    if (falseAlarms.Count == 0)
+        Log.Info("      none exist uncompressed in hardware - every flag was correct");
+    else
+        Log.Warn($"      {falseAlarms.Count} DO exist uncompressed: " +
+                 string.Join(", ", falseAlarms.Take(6).Select(m => $"{m.Width}x{m.Height}@{m.Fps:0}")));
+
+    // And the other direction: everything called raw should be there uncompressed.
+    var missed = raw.Where(m => !HardwareHas(m.Width, m.Height, m.Fps, uncompressedOnly: true)).ToList();
+    Log.Info($"    {raw.Count} mode(s) called genuinely raw");
+    if (missed.Count == 0)
+        Log.Info("      all of them exist uncompressed in hardware - no mode was let through wrongly");
+    else
+        Log.Warn($"      {missed.Count} are NOT uncompressed in hardware: " +
+                 string.Join(", ", missed.Take(6).Select(m => $"{m.Width}x{m.Height}@{m.Fps:0}")));
 }
 
 /// <summary>Everything one device turned out to be, in the log and on stdout.</summary>
