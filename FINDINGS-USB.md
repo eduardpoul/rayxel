@@ -23,7 +23,8 @@ Windows never shows it.
 | IOCTL | For |
 |---|---|
 | `USB_GET_NODE_INFORMATION` | how many ports the hub has |
-| `USB_GET_NODE_CONNECTION_INFORMATION_EX` | vendor/product id, link speed, device descriptor |
+| `USB_GET_NODE_CONNECTION_INFORMATION_EX` | vendor/product id, device descriptor, and a link speed that cannot say SuperSpeed |
+| `USB_GET_NODE_CONNECTION_INFORMATION_EX_V2` | the link speed that can — see below for the flag that makes it answer |
 | `USB_GET_DESCRIPTOR_FROM_NODE_CONNECTION` | the full configuration descriptor |
 
 The configuration descriptor is then walked for the VideoStreaming interface: format
@@ -76,41 +77,66 @@ So `mjpeg?` should be read as **"one of the NV12 entries at this rate is fake"**
 "this one is". The app is right that something is being invented; it is not reliable about
 which entry.
 
-## Open question: the link speed
+## Settled: the link really is SuperSpeed
 
-`USB_GET_NODE_CONNECTION_INFORMATION_EX` reports **high speed, 480 Mbit/s**, while the
-device descriptor says the card itself is **USB 3.0**. That matters: 480 Mbit/s is about
-60 MB/s, and 1920×1080 NV12 at 120 fps needs 373 MB/s. Both cannot be true.
+An earlier version of this file left the link speed open, because
+`USB_GET_NODE_CONNECTION_INFORMATION_EX` reported **high speed, 480 Mbit/s** for a card
+visibly moving several gigabits, and the V2 query that would have settled it returned
+`ERROR_INVALID_PARAMETER` on every port.
 
-Three possibilities, none yet eliminated:
+The V2 request was malformed. `SupportedUsbProtocols` is an **input**: the caller has to say
+which protocols it understands, and the hub rejects the call outright when it is left empty.
+Setting bit 2 (`Usb300`) makes it answer. An error that reads like "not supported" was
+nothing but a missing flag.
 
-1. The card is genuinely negotiated down to USB 2 — a cable or port limitation. Then
-   1080p120 "raw" is not raw at all, and the app's inferred 356 MiB/s ceiling is an
-   artefact of believing the synthesized types.
-2. The V1 structure simply cannot express SuperSpeed. It has no value for it, which is why
-   `..._EX_V2` exists.
-3. The matched port is the USB 2 companion of a SuperSpeed connection.
+Four independent sources now agree, and only the first was ever wrong:
 
-The V2 query was attempted and returns `ERROR_INVALID_PARAMETER` (87) on every port, so the
-request is malformed rather than unsupported — **this is unfinished, not answered.** Until
-it is, no claim is being made about the cable.
+| Source | Says |
+|---|---|
+| V1 connection query | high speed — **and is documented to say this for SuperSpeed devices** |
+| Device descriptor, `bMaxPacketSize0` | **9** (512 bytes), a value only legal at SuperSpeed |
+| Configuration descriptor | carries SuperSpeed endpoint companions, which the hub returns only for a device enumerated on the SuperSpeed bus |
+| Bulk endpoint `0x83` | `wMaxPacketSize` **1024**, the SuperSpeed value; 512 would mean high speed |
+| V2 connection query | flags `0x03` — operating at SuperSpeed, capable of SuperSpeed |
 
-Independent evidence that does not settle it either way: Windows reports the device's parent
-chain as `USB Composite Device → USB\ROOT_HUB30 → USB Root Hub (USB 3.0)`, but an xHCI root
-hub hosts both buses, so that only proves the controller is USB 3.
+So: **SuperSpeed, 5 Gbit/s, on port 2 of `root_hub30`.** Nothing is being throttled. The V2
+flags also separate *operating* from *capable*, and the card reports capable of SuperSpeed
+but not SuperSpeed+ — the 5 Gbit/s limit is the card's own, not the port's, so a faster port
+or cable would change nothing.
+
+The single streaming endpoint is `0x83 in, bulk, 1024 bytes per packet, burst 16`.
+
+### What that does to the inferred ceiling
+
+A 5 Gbit/s link carries roughly **405 MiB/s** of payload after 8b/10b coding and bulk
+protocol overhead. The app's bandwidth detector, which never asks the wire and works purely
+from the shape of the mode list, inferred **356 MiB/s**. It fits.
+
+Better than fits — the hardware's own numbers show the detector found the right value for
+the right reason. Its rule is "two different geometries at the same byte rate means the wire
+is running out", and the two top uncompressed modes the card declares are:
+
+```
+3840x2160 NV12 @ 30  =  12 441 600 x 30  =  373 248 000 B/s  =  356 MiB/s
+1920x1080 NV12 @ 120 =   3 110 400 x 120 =  373 248 000 B/s  =  356 MiB/s
+```
+
+Identical to the byte. That is exactly the corroboration the detector looks for, and the
+ceiling it inferred is the real one.
+
+Meanwhile MJPEG's 4K60 would need 712 MiB/s uncompressed — well past the link — which is
+the structural reason those modes cannot be what Windows claims they are.
 
 ## What is worth doing next
 
-1. **Fix the V2 request** and settle the link speed. If the card really is on USB 2, that
-   is the single most valuable thing this whole exercise produced — a cable change would
-   unlock genuinely uncompressed capture.
-2. **Use the descriptors to correct the labelling** rather than only to check it: for each
+1. **Use the descriptors to correct the labelling** rather than only to check it: for each
    resolution, the highest uncompressed rate the hardware declares is the truth, and any
-   Windows "uncompressed" entry above it is provably synthesized. That turns two
-   inferences into one fact.
-3. Leave the bandwidth ceiling inferred until (1) is settled — the descriptor route found
-   no isochronous endpoint, which means this card moves video over **bulk** transfers, and
-   bulk endpoints do not declare a reserved rate the way isochronous ones do.
+   Windows "uncompressed" entry above it is provably synthesized. That turns two inferences
+   into one fact, and would clear the 39 false positives above.
+2. Nothing to do about the bandwidth ceiling. There is no declared figure to read — this
+   card moves video over **bulk** transfers, and bulk endpoints reserve no bandwidth, so
+   they state no rate the way isochronous ones do. The inferred value has now been checked
+   against the link and against the hardware's own frame list, and both agree with it.
 
 ## What this does not do
 

@@ -17,6 +17,21 @@ public sealed record UsbFrame(int Index, int Width, int Height, List<double> Rat
     public uint MaxFrameBytes { get; init; }
 }
 
+/// <summary>One endpoint of the VideoStreaming interface, as the device declares it.</summary>
+public sealed record UsbEndpoint(int Address, string Kind, int MaxPacketSize, int Interval)
+{
+    /// <summary>Extra transactions per microframe. High speed only; 0 for a plain endpoint.</summary>
+    public int AdditionalTransactions { get; init; }
+
+    /// <summary>Burst from the SuperSpeed companion, or -1 when there is no companion.</summary>
+    public int Burst { get; init; } = -1;
+
+    /// <summary>Bytes per service interval from the SuperSpeed companion. Isochronous only.</summary>
+    public uint BytesPerInterval { get; init; }
+
+    public bool In => (Address & 0x80) != 0;
+}
+
 /// <summary>
 /// What the hardware says about itself, read straight from its USB descriptors.
 /// </summary>
@@ -27,7 +42,39 @@ public sealed record UsbVideoInfo(
     string UsbVersion,
     List<UsbFormat> Formats,
     double CeilingBytesPerSecond,
-    string CeilingSource);
+    string CeilingSource)
+{
+    /// <summary>
+    /// What each independent check said about the negotiated link speed. Three sources
+    /// disagree often enough that only listing them all is honest: the V1 connection
+    /// query, the device descriptor's bMaxPacketSize0, and the endpoint descriptors.
+    /// </summary>
+    public List<string> SpeedEvidence { get; init; } = [];
+
+    /// <summary>USB_DEVICE_SPEED: 2 high, 3 SuperSpeed, 4 SuperSpeed+.</summary>
+    public int SpeedCode { get; init; }
+
+    /// <summary>Set when the device says it can do SuperSpeed but is not running there.</summary>
+    public bool DowngradedLink { get; init; }
+
+    /// <summary>
+    /// Roughly what the negotiated link can carry in payload, after line coding and protocol
+    /// overhead. Deliberately approximate: the question it answers is whether a claimed mode
+    /// could physically fit, not what throughput to expect.
+    /// </summary>
+    public double PracticalBytesPerSecond => SpeedCode switch
+    {
+        2 => 480e6 / 8 * 0.80,             // high speed; the 480 figure is already post-coding
+        3 => 5e9 / 10 * 0.85,              // SuperSpeed, 8b/10b line coding
+        4 => 10e9 / 132 * 128 / 8 * 0.85,  // SuperSpeed+, 128b/132b
+        _ => 0
+    };
+
+    public List<UsbEndpoint> Endpoints { get; init; } = [];
+
+    /// <summary>Which hub and port answered, so it can be found in Device Manager.</summary>
+    public string Location { get; init; } = "";
+}
 
 /// <summary>
 /// Reads a UVC device's descriptors through its USB hub, without touching the driver.
@@ -86,20 +133,32 @@ public static class UsbDescriptors
                 int ports = ReadPortCount(hub);
                 for (int port = 1; port <= ports; port++)
                 {
-                    if (!ReadConnection(hub, port, out int vid, out int pid, out int speedCode, out int bcdUsb)) continue;
-                    if (vid != device.Hardware.VendorId || pid != device.Hardware.ProductId) continue;
+                    if (!ReadConnection(hub, port, out var conn)) continue;
+                    if (conn.VendorId != device.Hardware.VendorId ||
+                        conn.ProductId != device.Hardware.ProductId) continue;
 
                     var config = ReadConfigurationDescriptor(hub, port);
                     if (config is null) continue;
 
-                    var (formats, ceiling, source) = ParseVideoStreaming(config);
-                    Log.Debug($"port match on {SpeedName(speedCode)}: {formats.Count} formats, " +
-                              $"{ceiling / (1024 * 1024):0} MiB/s declared");
+                    var (formats, endpoints, ceiling, source) = ParseVideoStreaming(config);
+                    var link = ResolveSpeed(hub, port, conn, endpoints, config);
 
-                    if (speedCode > bestSpeed)
+                    Log.Debug($"port match on hub port {port}: {SpeedName(link.Code)}, {formats.Count} formats, " +
+                              $"{ceiling / (1024 * 1024):0} MiB/s declared");
+                    foreach (var line in link.Evidence) Log.Debug($"  {line}");
+
+                    if (link.Code > bestSpeed)
                     {
-                        bestSpeed = speedCode;
-                        best = new UsbVideoInfo(vid, pid, SpeedName(speedCode), Version(bcdUsb), formats, ceiling, source);
+                        bestSpeed = link.Code;
+                        best = new UsbVideoInfo(conn.VendorId, conn.ProductId, SpeedName(link.Code),
+                                                Version(conn.BcdUsb), formats, ceiling, source)
+                        {
+                            SpeedEvidence = link.Evidence,
+                            SpeedCode = link.Code,
+                            DowngradedLink = link.CapableOfSuperSpeed && link.Code < 3,
+                            Endpoints = endpoints,
+                            Location = $"port {port} of {ShortHubName(hubPath)}",
+                        };
                     }
                 }
             }
@@ -172,12 +231,20 @@ public static class UsbDescriptors
     /// <summary>bcdUSB says what the device *is*; the port speed says how it is *running*.</summary>
     private static string Version(int bcd) => $"USB {(bcd >> 8) & 0xFF}.{(bcd >> 4) & 0x0F}";
 
-    private static bool ReadConnection(SafeFileHandle hub, int port, out int vid, out int pid,
-                                       out int speed, out int bcdUsb)
+    private static string ShortHubName(string path)
     {
-        vid = pid = 0;
-        speed = -1;
-        bcdUsb = 0;
+        // \\?\usb#root_hub30#4&1ec2f4d5&0&0#{f18a0e88-...} -> root_hub30
+        var parts = path.Split('#');
+        return parts.Length > 1 ? parts[1] : path;
+    }
+
+    /// <summary>What the connection query says about one port.</summary>
+    private readonly record struct Connection(int VendorId, int ProductId, int BcdUsb,
+                                              int V1Speed, int MaxPacketSize0);
+
+    private static bool ReadConnection(SafeFileHandle hub, int port, out Connection conn)
+    {
+        conn = default;
 
         // Base struct is 35 bytes plus a pipe array; a generous buffer avoids caring.
         var buffer = new byte[2048];
@@ -190,46 +257,155 @@ public static class UsbDescriptors
         // ConnectionStatus at offset 31; 1 = DeviceConnected.
         if (BitConverter.ToUInt32(buffer, 31) != 1) return false;
 
-        // USB_DEVICE_DESCRIPTOR starts at 4: idVendor at +8, idProduct at +10.
-        bcdUsb = BitConverter.ToUInt16(buffer, 4 + 2);
-        bcdUsb = BitConverter.ToUInt16(buffer, 4 + 2);
-        vid = BitConverter.ToUInt16(buffer, 4 + 8);
-        pid = BitConverter.ToUInt16(buffer, 4 + 10);
-        speed = buffer[23];
-
-        // The V1 structure has no way to say "SuperSpeed" — it reports high speed for
-        // every USB 3 device, which is exactly why V2 exists. Without this the card looks
-        // like it is running at 480 Mbit/s when it is not.
-        if (speed == 2 && ReadSuperSpeed(hub, port) is { } upgraded) speed = upgraded;
-
+        // USB_DEVICE_DESCRIPTOR starts at 4: bcdUSB at +2, bMaxPacketSize0 at +7,
+        // idVendor at +8, idProduct at +10. Speed is the byte after the descriptor.
+        conn = new Connection(
+            VendorId: BitConverter.ToUInt16(buffer, 4 + 8),
+            ProductId: BitConverter.ToUInt16(buffer, 4 + 10),
+            BcdUsb: BitConverter.ToUInt16(buffer, 4 + 2),
+            V1Speed: buffer[23],
+            MaxPacketSize0: buffer[4 + 7]);
         return true;
     }
 
+    private readonly record struct LinkVerdict(int Code, bool CapableOfSuperSpeed, List<string> Evidence);
+
+    /// <summary>
+    /// Works out how fast the port is really running, from every source that has an opinion.
+    /// <para>
+    /// This needs more than one source. The V1 connection query cannot express SuperSpeed —
+    /// it is documented to report high speed for a SuperSpeed device — so believing it alone
+    /// says 480 Mbit/s for a card visibly moving several gigabits. The V2 query exists for
+    /// exactly this, but only the USB 3 hub driver answers it. The descriptors themselves are
+    /// the tiebreaker and need no IOCTL at all: the USB 3 specification fixes bMaxPacketSize0
+    /// at 9 (an exponent, so 512 bytes) for a device operating at SuperSpeed, against 64 at
+    /// high speed, and the hub only hands back endpoint companion descriptors for a device
+    /// enumerated on the SuperSpeed bus.
+    /// </para>
+    /// </summary>
+    private static LinkVerdict ResolveSpeed(SafeFileHandle hub, int port, Connection conn,
+                                            List<UsbEndpoint> endpoints, byte[] config)
+    {
+        var evidence = new List<string>();
+        int code = conn.V1Speed;
+        bool capable = false;
+
+        evidence.Add($"connection query (V1): {SpeedName(conn.V1Speed)}" +
+                     (conn.V1Speed == 2 ? " - but V1 cannot express SuperSpeed" : ""));
+
+        // 1. The device descriptor. Decisive on its own, and free.
+        if (conn.MaxPacketSize0 == 9)
+        {
+            code = Math.Max(code, 3);
+            capable = true;
+            evidence.Add("device descriptor: bMaxPacketSize0 = 9 (512 bytes) - only legal at SuperSpeed");
+        }
+        else
+        {
+            evidence.Add($"device descriptor: bMaxPacketSize0 = {conn.MaxPacketSize0} bytes - " +
+                         (conn.MaxPacketSize0 == 64 ? "the high-speed value" : "below high speed"));
+        }
+
+        if (conn.BcdUsb >= 0x0300)
+        {
+            capable = true;
+            evidence.Add($"device descriptor: bcdUSB {Version(conn.BcdUsb)} - the device is SuperSpeed capable");
+        }
+
+        // 2. Endpoint companions. The hub returns these only for a device enumerated on the
+        //    SuperSpeed bus, so their presence settles how it is running, not what it can do.
+        if (HasCompanionDescriptor(config))
+        {
+            code = Math.Max(code, 3);
+            capable = true;
+            evidence.Add("configuration descriptor carries SuperSpeed endpoint companions - " +
+                         "the device enumerated on the SuperSpeed bus");
+        }
+        else
+        {
+            evidence.Add("configuration descriptor has no SuperSpeed endpoint companions");
+        }
+
+        foreach (var ep in endpoints.Where(e => e.Kind == "bulk"))
+        {
+            string reading = ep.MaxPacketSize switch
+            {
+                1024 => "the SuperSpeed value",
+                512 => "the high-speed value",
+                _ => "unexpected"
+            };
+            evidence.Add($"bulk endpoint 0x{ep.Address:X2}: wMaxPacketSize {ep.MaxPacketSize} - {reading}");
+            if (ep.MaxPacketSize == 1024) code = Math.Max(code, 3);
+        }
+
+        // 3. The V2 query, which is the only source that can name SuperSpeed+.
+        if (ReadSuperSpeed(hub, port) is { } v2)
+        {
+            evidence.Add(v2.Text);
+            if (v2.Operating > code) code = v2.Operating;
+            if (v2.Capable) capable = true;
+        }
+        else
+        {
+            evidence.Add($"V2 connection query: no answer (win32 {Marshal.GetLastWin32Error()})");
+        }
+
+        return new LinkVerdict(code, capable, evidence);
+    }
+
+    private static bool HasCompanionDescriptor(byte[] config)
+    {
+        for (int i = 0; i + 1 < config.Length;)
+        {
+            int length = config[i];
+            if (length < 2 || i + length > config.Length) break;
+            if (config[i + 1] == DescriptorSsCompanion) return true;
+            i += length;
+        }
+        return false;
+    }
+
+    private readonly record struct V2Speed(int Operating, bool Capable, string Text);
+
     /// <summary>
     /// Asks the V2 interface whether the port is actually operating above high speed.
-    /// Returns null when the hub does not support the request — pre-xHCI stacks do not.
+    /// Returns null when the hub does not answer — only the USB 3 hub driver implements this.
     /// </summary>
-    private static int? ReadSuperSpeed(SafeFileHandle hub, int port)
+    private static V2Speed? ReadSuperSpeed(SafeFileHandle hub, int port)
     {
-        // USB_NODE_CONNECTION_INFORMATION_EX_V2: ConnectionIndex, Length, SupportedProtocols, Flags.
+        // USB_NODE_CONNECTION_INFORMATION_EX_V2: ConnectionIndex, Length, SupportedUsbProtocols,
+        // Flags. All four are ULONG, so the structure is 16 bytes.
+        //
+        // SupportedUsbProtocols is an *input*: the caller states which protocols it understands,
+        // and the hub rejects the request outright if it is left empty. Bit 0 is USB 1.1, bit 1
+        // is USB 2.0, bit 2 is USB 3.0. Omitting bit 2 is what made every earlier call come back
+        // ERROR_INVALID_PARAMETER, which reads like "not supported" and is nothing of the sort.
         var buffer = new byte[16];
         BitConverter.GetBytes(port).CopyTo(buffer, 0);
         BitConverter.GetBytes(16).CopyTo(buffer, 4);
+        BitConverter.GetBytes(0x04u).CopyTo(buffer, 8);   // SupportedUsbProtocols.Usb300 = 1
 
         if (!DeviceIoControl(hub, IoctlGetNodeConnectionInformationExV2, buffer, buffer.Length,
                              buffer, buffer.Length, out _, IntPtr.Zero))
-        {
-            Log.Debug($"  port {port}: V2 speed query unsupported (win32 {Marshal.GetLastWin32Error()})");
             return null;
-        }
 
-        uint protocols = BitConverter.ToUInt32(buffer, 8);
+        // Flags is output-only, so whatever comes back is the hub's own answer. The
+        // SupportedUsbProtocols field is not read back: it may simply echo the request,
+        // and there is no way to tell from one call which it did.
         uint flags = BitConverter.ToUInt32(buffer, 12);
-        Log.Debug($"  port {port}: V2 protocols=0x{protocols:X} flags=0x{flags:X}");
-        bool superSpeed = (flags & 0x01) != 0;        // operating at SuperSpeed or higher
-        bool superSpeedPlus = (flags & 0x04) != 0;    // operating at SuperSpeed+ or higher
 
-        return superSpeedPlus ? 4 : superSpeed ? 3 : null;
+        bool atSuperSpeed = (flags & 0x01) != 0;      // operating at SuperSpeed or higher
+        bool canSuperSpeed = (flags & 0x02) != 0;     // capable of SuperSpeed or higher
+        bool atSuperSpeedPlus = (flags & 0x04) != 0;  // operating at SuperSpeed+ or higher
+        bool canSuperSpeedPlus = (flags & 0x08) != 0; // capable of SuperSpeed+ or higher
+
+        string text = $"V2 connection query: flags 0x{flags:X2} - operating at " +
+                      (atSuperSpeedPlus ? "SuperSpeed+" : atSuperSpeed ? "SuperSpeed" : "high speed or below") +
+                      ", capable of " +
+                      (canSuperSpeedPlus ? "SuperSpeed+" : canSuperSpeed ? "SuperSpeed" : "high speed or below");
+
+        return new V2Speed(atSuperSpeedPlus ? 4 : atSuperSpeed ? 3 : 0,
+                           canSuperSpeed || canSuperSpeedPlus, text);
     }
 
     private static byte[]? ReadConfigurationDescriptor(SafeFileHandle hub, int port)
@@ -281,9 +457,11 @@ public static class UsbDescriptors
     /// declares: its formats, their frames, and the bandwidth its isochronous endpoints
     /// are willing to carry.
     /// </summary>
-    private static (List<UsbFormat> Formats, double Ceiling, string Source) ParseVideoStreaming(byte[] config)
+    private static (List<UsbFormat> Formats, List<UsbEndpoint> Endpoints, double Ceiling, string Source)
+        ParseVideoStreaming(byte[] config)
     {
         var formats = new List<UsbFormat>();
+        var endpoints = new List<UsbEndpoint>();
         UsbFormat? current = null;
         bool inVideoStreaming = false;
         double ceiling = 0;
@@ -310,13 +488,23 @@ public static class UsbDescriptors
 
                 case DescriptorEndpoint when inVideoStreaming && length >= 7:
                 {
-                    // bmAttributes bits 0-1: 1 = isochronous.
-                    if ((d[3] & 0x03) != 1) break;
-
                     ushort maxPacket = BitConverter.ToUInt16(d[4..6]);
                     int size = maxPacket & 0x7FF;
-                    int extra = (maxPacket >> 11) & 0x03;      // additional transactions
+                    int extra = (maxPacket >> 11) & 0x03;      // additional transactions, high speed only
                     byte interval = d[6];
+                    int kind = d[3] & 0x03;
+
+                    endpoints.Add(new UsbEndpoint(d[2], kind switch
+                    {
+                        0 => "control",
+                        1 => "isochronous",
+                        2 => "bulk",
+                        _ => "interrupt"
+                    }, size, interval) { AdditionalTransactions = extra });
+
+                    // Only isochronous endpoints reserve bandwidth, so only they state a
+                    // ceiling. Bulk gets whatever is left over and declares nothing.
+                    if (kind != 1) break;
 
                     // High speed: one service interval every 125 us, so 8000 a second,
                     // divided down by bInterval.
@@ -333,9 +521,20 @@ public static class UsbDescriptors
 
                 case DescriptorSsCompanion when inVideoStreaming && length >= 6:
                 {
+                    // The companion belongs to the endpoint just before it.
+                    ushort perInterval = BitConverter.ToUInt16(d[4..6]);
+                    if (endpoints.Count > 0)
+                    {
+                        int last = endpoints.Count - 1;
+                        endpoints[last] = endpoints[last] with
+                        {
+                            Burst = d[2],                    // bMaxBurst: 0 means one packet
+                            BytesPerInterval = perInterval,
+                        };
+                    }
+
                     // SuperSpeed states the real figure directly, and it supersedes the
                     // high-speed arithmetic above for the same endpoint.
-                    ushort perInterval = BitConverter.ToUInt16(d[4..6]);
                     if (perInterval > 0)
                     {
                         double bytes = perInterval * 8000.0;
@@ -352,7 +551,7 @@ public static class UsbDescriptors
             i += length;
         }
 
-        return (formats, ceiling, source);
+        return (formats, endpoints, ceiling, source);
     }
 
     private static void ParseClassSpecific(ReadOnlySpan<byte> d, List<UsbFormat> formats, ref UsbFormat? current)

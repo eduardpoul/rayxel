@@ -357,6 +357,29 @@ void CrossCheckUsb(CaptureDeviceInfo device, DeviceProbe probe)
     }
 
     Log.Info($"  {usb.VendorId:x4}:{usb.ProductId:x4}   device is {usb.UsbVersion}, running at {usb.Speed}");
+    Log.Info($"  found on {usb.Location}");
+
+    // The link speed took three tries to read correctly, so every source now shows its
+    // working. If they disagree the reader can see which one to distrust.
+    Log.Info("  link speed, by source:");
+    foreach (var line in usb.SpeedEvidence) Log.Info($"    {line}");
+
+    if (usb.DowngradedLink)
+        Log.Warn("    the device can do SuperSpeed but is not running there - " +
+                 "a USB 2 cable or port would explain it, and would cap real capture at ~60 MB/s");
+
+    if (usb.Endpoints.Count > 0)
+    {
+        Log.Info("  streaming endpoints:");
+        foreach (var ep in usb.Endpoints)
+        {
+            string burst = ep.Burst >= 0 ? $", burst {ep.Burst + 1}" : "";
+            string perInterval = ep.BytesPerInterval > 0 ? $", {ep.BytesPerInterval} bytes/interval" : "";
+            Log.Info($"    0x{ep.Address:X2} {(ep.In ? "in " : "out")} {ep.Kind,-12} " +
+                     $"{ep.MaxPacketSize} bytes/packet{burst}{perInterval}");
+        }
+    }
+
     Log.Info($"  {usb.Formats.Count} format(s) declared by the hardware:");
 
     foreach (var f in usb.Formats)
@@ -386,7 +409,23 @@ void CrossCheckUsb(CaptureDeviceInfo device, DeviceProbe probe)
     }
     else
     {
-        Log.Warn("  no isochronous endpoint found; the device may use bulk transfers");
+        // Not a failure to read: bulk endpoints genuinely declare no reserved rate, so
+        // there is no ceiling in the descriptors to compare against.
+        Log.Info("  no isochronous endpoint - this card streams over bulk, which reserves " +
+                 "no bandwidth and so declares no ceiling");
+    }
+
+    // With no declared ceiling the only physical check left is the link itself. The app's
+    // bandwidth detector infers a ceiling from the mode list without ever asking the wire;
+    // this is the first chance to say whether that inference is even possible.
+    if (usb.PracticalBytesPerSecond > 0)
+    {
+        double wireMiBs = usb.PracticalBytesPerSecond / (1024 * 1024);
+        Log.Info($"  the negotiated link carries roughly {wireMiBs:0} MiB/s of payload");
+        Log.Info($"  measured ceiling  {probe.Link.CeilingMiBs:0} MiB/s  (inferred from the mode list)");
+        Log.Info(probe.Link.CeilingMiBs <= wireMiBs
+            ? "    it fits inside the link - the inferred ceiling is physically possible"
+            : "    it exceeds the link - something in the mode list cannot be real");
     }
 
     // The point of the exercise. The comparison has to be on geometry *and* rate: this
