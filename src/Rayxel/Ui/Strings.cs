@@ -29,6 +29,13 @@ public static partial class Strings
             ["thDelay"] = "мс",
             ["tenBitCost"] = "10 бит — вдвое больше данных и рывки",
             ["capNote"] = "канал {0} MiB/s",
+            // "масштабатор" is not a word anyone says out loud.
+            ["upscaler"] = "Апскейлер",
+            ["whyComposed"] = "окно рисует композитор Windows — минус целый кадр, F11",
+            ["whyCodec"] = "в тракте кодек — картинку разжимают за нас",
+            ["whyBudget"] = "не укладываемся в бюджет кадра",
+            ["whyDropped"] = "кадры теряются",
+            ["whyNoSignal"] = "источник молчит",
         },
         ["en"] = new()
         {
@@ -46,6 +53,11 @@ public static partial class Strings
             ["thDelay"] = "ms",
             ["tenBitCost"] = "10-bit — twice the data, and it stutters",
             ["capNote"] = "{0} MiB/s link",
+            ["whyComposed"] = "the Windows compositor draws the window — a whole frame, F11",
+            ["whyCodec"] = "a codec is in the path — someone is decompressing for us",
+            ["whyBudget"] = "over the frame budget",
+            ["whyDropped"] = "frames are being dropped",
+            ["whyNoSignal"] = "the source is silent",
         },
         ["uk"] = new()
         {
@@ -63,6 +75,12 @@ public static partial class Strings
             ["thDelay"] = "мс",
             ["tenBitCost"] = "10 біт — удвічі більше даних і ривки",
             ["capNote"] = "канал {0} MiB/s",
+            ["upscaler"] = "Апскейлер",
+            ["whyComposed"] = "вікно малює композитор Windows — мінус цілий кадр, F11",
+            ["whyCodec"] = "у тракті кодек — картинку розтискають за нас",
+            ["whyBudget"] = "не вкладаємось у бюджет кадра",
+            ["whyDropped"] = "кадри губляться",
+            ["whyNoSignal"] = "джерело мовчить",
         },
         ["de"] = new()
         {
@@ -80,6 +98,11 @@ public static partial class Strings
             ["thDelay"] = "ms",
             ["tenBitCost"] = "10 Bit — doppelte Datenmenge, und es ruckelt",
             ["capNote"] = "Leitung {0} MiB/s",
+            ["whyComposed"] = "der Windows-Compositor zeichnet das Fenster — ein ganzes Bild, F11",
+            ["whyCodec"] = "ein Codec liegt im Pfad — es wird für uns dekomprimiert",
+            ["whyBudget"] = "über dem Bildbudget",
+            ["whyDropped"] = "Bilder gehen verloren",
+            ["whyNoSignal"] = "die Quelle schweigt",
         },
         ["es"] = new()
         {
@@ -97,8 +120,20 @@ public static partial class Strings
             ["thDelay"] = "ms",
             ["tenBitCost"] = "10 bits — el doble de datos, y da tirones",
             ["capNote"] = "enlace {0} MiB/s",
+            ["whyComposed"] = "el compositor de Windows dibuja la ventana — un fotograma entero, F11",
+            ["whyCodec"] = "hay un códec en la ruta — nos lo descomprimen",
+            ["whyBudget"] = "por encima del presupuesto de fotograma",
+            ["whyDropped"] = "se están perdiendo fotogramas",
+            ["whyNoSignal"] = "la fuente está en silencio",
         },
     };
+
+    /// <summary>
+    /// First letter up. The panel used to lower-case its labels for every language except
+    /// German; sentence case reads better and is one rule rather than two.
+    /// </summary>
+    public static string Sentence(string s) =>
+        s.Length == 0 ? s : char.ToUpperInvariant(s[0]) + s[1..];
 
     static Strings()
     {

@@ -38,6 +38,13 @@ public static class Widgets
     /// </summary>
     private static float _cardInsetRight;
 
+    /// <summary>
+    /// The same inset, for callers drawing to the draw list in screen coordinates rather
+    /// than laying items out. Without it a hand-drawn value sits flush against the card
+    /// border while every laid-out one beside it stops a padding short.
+    /// </summary>
+    public static float CardInsetRight => _cardInsetRight;
+
     /// <summary>Places the next item so that <paramref name="width"/> pixels end at the right edge.</summary>
     public static void RightAlign(float width) => ImGui.SameLine(Math.Max(0, RightEdge() - width));
 

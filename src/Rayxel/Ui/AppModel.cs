@@ -216,6 +216,27 @@ public sealed class AppModel
         }
     }
 
+    /// <summary>
+    /// What is keeping the status off nominal, worst first. The word alone was true and
+    /// unactionable — three unrelated conditions all produce "partial" and it never said
+    /// which, so the only way to find out was to read the log.
+    /// </summary>
+    public IEnumerable<string> StatusReasons()
+    {
+        if (Pump.State is CaptureState.NoSignal or CaptureState.Lost)
+        {
+            yield return Strings.T("whyNoSignal");
+            yield break;
+        }
+
+        // Ordered by what it costs: a composed frame is 8.33 ms at 120 fps, more than
+        // everything else on this list together.
+        if (Composition == "Composed") yield return Strings.T("whyComposed");
+        if (Pump.CurrentMode?.HasCodecInPath == true) yield return Strings.T("whyCodec");
+        if (HeadroomMs < 0) yield return Strings.T("whyBudget");
+        if (Shown.FramesDropped > 0) yield return Strings.T("whyDropped");
+    }
+
     public string StatusWord => Status switch
     {
         AppStatus.Nominal => Strings.T("stNominal"),

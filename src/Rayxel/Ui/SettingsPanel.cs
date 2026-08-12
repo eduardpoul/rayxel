@@ -87,13 +87,9 @@ public static class SettingsPanel
         if (pushed) ImGui.PopFont();
     }
 
-    /// <summary>Section labels are lowercase in every language except German.</summary>
-    private static void SectionLabel(Fonts fonts, string key)
-    {
-        var text = Strings.T(key);
-        if (Strings.Current != "de") text = text.ToLowerInvariant();
-        Widgets.Text(fonts.Small, Theme.TextMuted, text);
-    }
+    /// <summary>Section labels start with a capital, like every other label in the panel.</summary>
+    private static void SectionLabel(Fonts fonts, string key) =>
+        Widgets.Text(fonts.Small, Theme.TextMuted, Strings.Sentence(Strings.T(key)));
 
     /// <summary>
     /// A full-width select shaped like the design's: rounded row, value on the left, caret
@@ -179,8 +175,13 @@ public static class SettingsPanel
         float dotR = Layout.S(6) / 2f;
         draw.AddCircleFilled(new Vector2(rowStart.X + dotR, rowStart.Y + rowH / 2f), dotR, Theme.U32(Theme.Good));
 
+        // The card's own right padding. GetContentRegionAvail only knows about the left
+        // indent, so anything drawn from `width` alone lands on the border while every
+        // laid-out row below stops a padding short of it.
+        float inset = Widgets.CardInsetRight;
+
         var rate = LinkRate(model);
-        float rateWidth = rate.Length > 0 ? Widgets.Measure(fonts.MonoSmall, rate).X + Layout.S(8) : 0;
+        float rateWidth = rate.Length > 0 ? Widgets.Measure(fonts.MonoSmall, rate).X + Layout.S(8) + inset : 0;
 
         var devices = model.Devices.Where(d => Selectable(model, d)).ToList();
         int currentIndex = Math.Max(0, devices.FindIndex(d => model.Pump.Device.Is(d)));
@@ -202,14 +203,20 @@ public static class SettingsPanel
         if (rate.Length > 0)
         {
             var size = Widgets.Measure(fonts.MonoSmall, rate);
-            DrawText(draw, fonts.MonoSmall, new Vector2(rowStart.X + width - size.X, rowStart.Y + (rowH - size.Y) / 2f),
+            DrawText(draw, fonts.MonoSmall,
+                     new Vector2(rowStart.X + width - inset - size.X, rowStart.Y + (rowH - size.Y) / 2f),
                      Theme.Alpha(Theme.TextPrimary, 0.38f), rate);
         }
 
         ImGui.SetCursorScreenPos(rowStart);
         ImGui.Dummy(new Vector2(width, rowH));
 
-        Widgets.Divider(4f);
+        // Divider lays out as Dummy, line, Dummy, so the panel's 8px item spacing lands
+        // three times inside it — thirty pixels of nothing between the device name and the
+        // rule under it. Tightened for this one rule.
+        ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, new Vector2(ImGui.GetStyle().ItemSpacing.X, Layout.S(2)));
+        Widgets.Divider(2f);
+        ImGui.PopStyleVar();
 
         InfoRow(fonts, "adapter", model.Renderer.AdapterName);
         InfoRow(fonts, "driver", model.Renderer.DriverVersion);
@@ -226,10 +233,7 @@ public static class SettingsPanel
 
     private static void InfoRow(Fonts fonts, string labelKey, string value)
     {
-        var label = Strings.T(labelKey);
-        if (Strings.Current != "de") label = label.ToLowerInvariant();
-
-        Widgets.Text(fonts.Small, Theme.Alpha(Theme.TextPrimary, 0.4f), label);
+        Widgets.Text(fonts.Small, Theme.Alpha(Theme.TextPrimary, 0.4f), Strings.Sentence(Strings.T(labelKey)));
         float w = Widgets.Measure(fonts.MonoSmall, value).X;
         ImGui.SameLine(Math.Max(0, Widgets.RightEdge() - w));
         Widgets.Text(fonts.MonoSmall, Theme.TextSecondary, value);
@@ -611,25 +615,49 @@ public static class SettingsPanel
 
     // ── window mode, language ────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Two modes, not three. The old middle option was a topmost borderless window and the
+    /// third was a borderless window — the same swapchain, the same overlay plane, the same
+    /// latency, and two names nobody could tell apart. Neither was ever DXGI exclusive
+    /// fullscreen, so there was no third behaviour to name.
+    /// <para>
+    /// The status reasons live here because this is where the common one is fixed: a
+    /// windowed swapchain is composed by DWM and costs a whole frame, which is more than
+    /// every other choice in this panel put together.
+    /// </para>
+    /// </summary>
     private static void WindowModeSelect(AppModel model, Fonts fonts)
     {
         SectionLabel(fonts, "winMode");
 
-        string[] names = [Strings.T("w1"), Strings.T("w2"), Strings.T("w3")];
-        int current = model.WindowKind switch
-        {
-            WindowKind.Windowed => 0,
-            WindowKind.Fullscreen => 1,
-            _ => 2
-        };
+        string[] names = [Strings.Sentence(Strings.T("w1")), Strings.Sentence(Strings.T("w3"))];
+        int current = model.WindowKind == WindowKind.Windowed ? 0 : 1;
 
         if (Select(fonts, "##winmode", names[current], Layout.S(36), names, current, out int chosen))
-            model.SetWindowKind(chosen switch
-            {
-                0 => WindowKind.Windowed,
-                1 => WindowKind.Fullscreen,
-                _ => WindowKind.BorderlessFullscreen
-            });
+            model.SetWindowKind(chosen == 0 ? WindowKind.Windowed : WindowKind.BorderlessFullscreen);
+
+        StatusReasons(model, fonts);
+    }
+
+    /// <summary>
+    /// Why the status word is not "nominal". One word at the top of the panel was true and
+    /// unactionable: three different conditions produce it and it never said which.
+    /// </summary>
+    private static void StatusReasons(AppModel model, Fonts fonts)
+    {
+        foreach (var reason in model.StatusReasons())
+        {
+            var dot = ImGui.GetCursorScreenPos();
+            float r = Layout.S(3);
+            ImGui.GetWindowDrawList().AddCircleFilled(
+                dot + new Vector2(r, ImGui.GetTextLineHeight() / 2f), r, Theme.U32(model.StatusColour));
+
+            ImGui.Dummy(new Vector2(r * 2, ImGui.GetTextLineHeight()));
+            ImGui.SameLine(0, Layout.S(7));
+            ImGui.PushTextWrapPos(0);
+            Widgets.Text(fonts.MonoTiny, Theme.TextMuted, reason);
+            ImGui.PopTextWrapPos();
+        }
     }
 
     private static void LanguageSelect(AppModel model, Fonts fonts)
