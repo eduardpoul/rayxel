@@ -176,7 +176,8 @@ try
     Log.Info($"{menuEntries.Count} renderable modes offered in the menu");
 
     const int WindowWidth = 1600, WindowHeight = 900;
-    hwnd = Win32.CreateAppWindow("Rayxel", wndProc, WindowWidth, WindowHeight);
+    hwnd = Win32.CreateAppWindow("Rayxel", wndProc, WindowWidth, WindowHeight,
+                                 AppIcon.Large, AppIcon.Small);
     // A swapchain behind another window is not composed at all, which shows up as
     // "present: None" and makes the composition reading meaningless. Coming up in front
     // is also just what a video window should do.
@@ -286,6 +287,7 @@ finally
     pump?.Dispose();
     renderer?.Dispose();
     if (hwnd != IntPtr.Zero) Win32.DestroyWindow(hwnd);
+    AppIcon.Release();
     Kernel.TimeEndPeriod(1);
     GC.KeepAlive(wndProc);
     Log.Info($"log: {Log.FilePath}");

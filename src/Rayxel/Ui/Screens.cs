@@ -62,7 +62,17 @@ public static class Screens
         var size = new Vector2(model.Renderer.Width, model.Renderer.Height);
         FullStage("##splash", size, () =>
         {
-            float left = CentreColumn(Layout.S(280), Layout.S(150));
+            float mark = Layout.S(60), markGap = Layout.S(18);
+            float left = CentreColumn(Layout.S(280), Layout.S(150) + mark + markGap);
+
+            // Drawn onto the list and claimed with one Dummy of the exact height, rather
+            // than laid out as an item and spaced with another: ImGui puts its item spacing
+            // either side of a Dummy, and the 18px the design asks for would arrive as 18
+            // plus two helpings of it.
+            var markAt = ImGui.GetCursorScreenPos() + new Vector2((Layout.S(280) - mark) * 0.5f, 0);
+            Brand.Mark(ImGui.GetWindowDrawList(), markAt, mark);
+            ImGui.Dummy(new Vector2(Layout.S(280),
+                Math.Max(1f, mark + markGap - ImGui.GetStyle().ItemSpacing.Y)));
 
             var wordmark = Widgets.Measure(fonts.Wordmark, "Rayxel");
             ImGui.SetCursorPosX(left + (Layout.S(280) - wordmark.X) * 0.5f);
