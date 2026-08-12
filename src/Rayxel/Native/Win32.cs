@@ -22,6 +22,8 @@ public static unsafe class Win32
     public const int WM_MOUSEWHEEL = 0x020A, WM_MOUSEHWHEEL = 0x020E, WM_MOUSELEAVE = 0x02A3;
     public const int WM_SETFOCUS = 0x0007, WM_KILLFOCUS = 0x0008;
     public const int WM_SETCURSOR = 0x0020;
+    public const int WM_SETICON = 0x0080;
+    public const int ICON_SMALL = 0, ICON_BIG = 1;
 
     [DllImport("user32.dll")] public static extern short GetKeyState(int vk);
     [DllImport("user32.dll")] public static extern IntPtr SetCapture(IntPtr hWnd);
@@ -85,6 +87,14 @@ public static unsafe class Win32
     [DllImport("user32.dll")] public static extern IntPtr SetForegroundWindow(IntPtr h);
     [DllImport("user32.dll")] public static extern IntPtr LoadCursorW(IntPtr inst, IntPtr name);
     [DllImport("user32.dll")] public static extern int GetSystemMetrics(int index);
+    [DllImport("user32.dll")] public static extern IntPtr SendMessageW(IntPtr h, uint msg, IntPtr w, IntPtr l);
+
+    // Takes both the classic DIB form and the PNG-compressed one, which is what every
+    // image in rayxel.ico is. See AppIcon, which picks the image and calls this.
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern IntPtr CreateIconFromResourceEx(IntPtr bits, uint size, bool isIcon,
+        uint version, int cx, int cy, uint flags);
+    [DllImport("user32.dll")] public static extern bool DestroyIcon(IntPtr icon);
 
     [DllImport("user32.dll")] public static extern IntPtr CreatePopupMenu();
     [DllImport("user32.dll")] public static extern bool DestroyMenu(IntPtr menu);
@@ -139,7 +149,23 @@ public static unsafe class Win32
 
     [DllImport("shcore.dll")] public static extern int SetProcessDpiAwareness(int value);
 
+    private static bool _dpiAware;
+
+    /// <summary>
+    /// Per-monitor DPI awareness, once — Windows only accepts it once per process, and only
+    /// before the first window. Anything that measures in pixels has to come after it:
+    /// GetSystemMetrics answers in virtualised units on the other side of this call, which
+    /// is how a 150% display ends up with a 32px icon where a 48px one was available.
+    /// </summary>
+    public static void EnsureDpiAwareness()
+    {
+        if (_dpiAware) return;
+        _dpiAware = true;
+        try { SetProcessDpiAwareness(2); } catch { /* pre-8.1 shells */ }
+    }
+
     public const int SM_CXSCREEN = 0, SM_CYSCREEN = 1;
+    public const int SM_CXICON = 11, SM_CYICON = 12, SM_CXSMICON = 49, SM_CYSMICON = 50;
     public static readonly IntPtr IDC_ARROW = 32512;
 
     public const uint WS_OVERLAPPEDWINDOW = 0x00CF0000;
@@ -149,9 +175,10 @@ public static unsafe class Win32
     /// Note that a windowed swapchain is composed by DWM rather than reaching an
     /// overlay plane, which costs a frame — the HUD reports which one we got.
     /// </summary>
-    public static IntPtr CreateAppWindow(string title, WndProc proc, int clientWidth, int clientHeight)
+    public static IntPtr CreateAppWindow(string title, WndProc proc, int clientWidth, int clientHeight,
+                                         IntPtr icon = default, IntPtr smallIcon = default)
     {
-        try { SetProcessDpiAwareness(2); } catch { /* pre-8.1 shells */ }
+        EnsureDpiAwareness();
 
         var instance = GetModuleHandleW(IntPtr.Zero);
         const string className = "UpscalerDemoWindow";
@@ -163,6 +190,8 @@ public static unsafe class Win32
             lpfnWndProc = Marshal.GetFunctionPointerForDelegate(proc),
             hInstance = instance,
             hCursor = LoadCursorW(IntPtr.Zero, IDC_ARROW),
+            hIcon = icon,
+            hIconSm = smallIcon,
             hbrBackground = IntPtr.Zero,
             lpszClassName = Marshal.StringToHGlobalUni(className)
         };
@@ -182,17 +211,28 @@ public static unsafe class Win32
         if (hwnd == IntPtr.Zero)
             throw new InvalidOperationException($"CreateWindowEx failed: {Marshal.GetLastWin32Error()}");
 
+        // Also set per window, not only on the class: the class is registered once, and a
+        // second call here would find it already there and silently keep the first icon.
+        SetWindowIcon(hwnd, icon, smallIcon);
         SetForegroundWindow(hwnd);
         return hwnd;
+    }
+
+    /// <summary>Title bar, taskbar button and Alt-Tab. Either handle may be zero.</summary>
+    public static void SetWindowIcon(IntPtr hwnd, IntPtr icon, IntPtr smallIcon)
+    {
+        if (icon != IntPtr.Zero) SendMessageW(hwnd, WM_SETICON, ICON_BIG, icon);
+        if (smallIcon != IntPtr.Zero) SendMessageW(hwnd, WM_SETICON, ICON_SMALL, smallIcon);
     }
 
     [DllImport("user32.dll")] public static extern bool AdjustWindowRect(ref RECT r, uint style, bool menu);
 
     /// <summary>Creates a borderless window covering the primary display.</summary>
-    public static IntPtr CreateFullscreenWindow(string title, WndProc proc, out int width, out int height)
+    public static IntPtr CreateFullscreenWindow(string title, WndProc proc, out int width, out int height,
+                                                IntPtr icon = default, IntPtr smallIcon = default)
     {
         // Per-monitor DPI awareness, so the swapchain matches physical pixels.
-        try { SetProcessDpiAwareness(2); } catch { /* pre-8.1 shells */ }
+        EnsureDpiAwareness();
 
         var instance = GetModuleHandleW(IntPtr.Zero);
         const string className = "UpscalerDemoWindow";
@@ -204,6 +244,8 @@ public static unsafe class Win32
             lpfnWndProc = Marshal.GetFunctionPointerForDelegate(proc),
             hInstance = instance,
             hCursor = LoadCursorW(IntPtr.Zero, IDC_ARROW),
+            hIcon = icon,
+            hIconSm = smallIcon,
             hbrBackground = IntPtr.Zero, // we clear via D3D; letting GDI paint causes flashes
             lpszClassName = Marshal.StringToHGlobalUni(className)
         };
@@ -218,6 +260,7 @@ public static unsafe class Win32
         if (hwnd == IntPtr.Zero)
             throw new InvalidOperationException($"CreateWindowEx failed: {Marshal.GetLastWin32Error()}");
 
+        SetWindowIcon(hwnd, icon, smallIcon);
         SetWindowPos(hwnd, IntPtr.Zero, 0, 0, width, height, SWP_SHOWWINDOW);
         SetForegroundWindow(hwnd);
         return hwnd;

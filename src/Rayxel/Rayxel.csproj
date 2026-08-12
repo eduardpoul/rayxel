@@ -25,6 +25,10 @@
     <Version>1.0.0</Version>
     <NeutralLanguage>en</NeutralLanguage>
 
+    <!-- What Explorer, the Start menu and a pinned taskbar entry show for the file itself.
+         The window's own icon is a separate thing and is set from the embedded copy below. -->
+    <ApplicationIcon>Assets\Brand\rayxel.ico</ApplicationIcon>
+
     <!-- Publish as one self-contained executable: no .NET install needed on the target
          machine, and nothing to lose track of beside it. cimgui.dll is bundled too.
 
@@ -54,6 +58,11 @@
          Embedded, not copied: a single-file build has nowhere to put loose files, and an
          executable that stops working when moved on its own is not one file. -->
     <EmbeddedResource Include="Render\NIS\*.h" />
+
+    <!-- The same .ico again, this time readable at runtime: WM_SETICON wants an HICON, and
+         the icon <ApplicationIcon> puts in the executable's resources belongs to the
+         apphost, not to us. Embedded rather than copied, for the reason above. -->
+    <EmbeddedResource Include="Assets\Brand\rayxel.ico" />
 
     <!-- The designed typefaces, if whoever builds this has put them there. Absent by
          default: bundling someone else's font binaries is a licensing decision, and the

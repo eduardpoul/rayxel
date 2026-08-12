@@ -100,9 +100,10 @@ That yields **exactly one file**: `Rayxel.exe`, about 38 MB. No .NET install nee
 target machine, no `.pdb`, nothing beside it to lose.
 
 Everything is inside it. NVIDIA's NIS shader sources are embedded as assembly resources
-rather than copied out, `cimgui.dll` is bundled, and debug symbols are embedded in the
-assembly — so stack traces still carry file and line numbers without a separate symbol
-file. Verified by copying the executable alone into an empty folder and running it.
+rather than copied out, `cimgui.dll` is bundled, the window icon is embedded the same way
+(see `src/Rayxel/Assets/Brand/`), and debug symbols are embedded in the assembly — so stack
+traces still carry file and line numbers without a separate symbol file. Verified by copying
+the executable alone into an empty folder and running it.
 
 The bundle is compressed, which roughly halves it. That costs about **0.35 s on the very
 first launch** while .NET extracts to its cache, and nothing on later launches. Time to the
