@@ -283,7 +283,7 @@ public static class SettingsPanel
             float sub = baseY + (resSize.Y - rateSize.Y);
             DrawText(draw, fonts.Body, new Vector2(x, sub), Theme.TextSecondary, rate);
             DrawText(draw, fonts.Small, new Vector2(x + rateSize.X + Layout.S(7), sub),
-                     Theme.TextMuted, mode.Format.Name);
+                     mode.Format.IsHighBitDepth ? Theme.Warn : Theme.TextMuted, mode.Format.Name);
 
             var (colour, alpha) = WireColour(mode);
             var tagSize = Widgets.Measure(fonts.MonoTiny, mode.WireTag);
@@ -311,12 +311,14 @@ public static class SettingsPanel
             Theme.U32(colour));
     }
 
-    private static (Vector4, float) WireColour(CaptureMode m) => m.Transport switch
-    {
-        WireTransport.Raw => (Theme.Good, 0.14f),
-        WireTransport.Compressed => (Theme.Warn, 0.14f),
-        _ => (Theme.Bad, 0.16f)
-    };
+    /// <summary>
+    /// Red used to mean "claims to be uncompressed and is not", which was worth alarming
+    /// about while such a mode sat next to an identical honest one. Those are hidden now,
+    /// so every remaining codec mode buys a rate no raw mode reaches — a real choice, not a
+    /// trap. Amber for "a codec is in the path", green for none, and nothing shouts.
+    /// </summary>
+    private static (Vector4, float) WireColour(CaptureMode m) =>
+        m.Transport == WireTransport.Raw ? (Theme.Good, 0.14f) : (Theme.Warn, 0.14f);
 
     /// <summary>
     /// The mode table. Only NV12 and P010 are listed — nothing else can be displayed, and
@@ -335,11 +337,13 @@ public static class SettingsPanel
         float rowH = Layout.S(24);
         float listH = Math.Min(Layout.S(250), rowH * modes.Count + Layout.S(6));
 
-        // Column starts, from the design's `1fr 52px 44px 56px`.
+        // Column starts. The design's `1fr 52px 44px 56px` gained a latency column: the
+        // wire tag shrank from `mjpeg?` to `raw`/`zip` and paid for it.
         float total = ImGui.GetContentRegionAvail().X;
-        float cFps = total - Layout.S(152), cFmt = total - Layout.S(100), cWire = total - Layout.S(56);
+        float cFps = total - Layout.S(172), cFmt = total - Layout.S(134),
+              cMs = total - Layout.S(92), cWire = total - Layout.S(34);
 
-        HeaderRow(fonts, cFps, cFmt, cWire);
+        HeaderRow(fonts, cFps, cFmt, cMs, cWire);
 
         ImGui.PushStyleColor(ImGuiCol.ChildBg, Theme.Popover);
         ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, new Vector2(0, Layout.S(1)));
@@ -368,7 +372,21 @@ public static class SettingsPanel
 
                 DrawText(draw, fonts.MonoSmall, new Vector2(rowStart.X + Layout.S(9), ty), colour, $"{m.Width}×{m.Height}");
                 DrawText(draw, fonts.MonoSmall, new Vector2(rowStart.X + cFps, ty), colour, $"{m.MaxFps:0}");
-                DrawText(draw, fonts.MonoSmall, new Vector2(rowStart.X + cFmt, ty), Theme.TextMuted, m.Format.Name);
+
+                // 10-bit is the one choice here that quietly costs something: twice the
+                // bytes, twice the wire time, and a delivery tail that falls apart. It is
+                // marked on the format rather than on the time, because the time alone
+                // does not say why.
+                DrawText(draw, fonts.MonoSmall, new Vector2(rowStart.X + cFmt, ty),
+                         m.Format.IsHighBitDepth ? Theme.Warn : Theme.TextMuted, m.Format.Name);
+
+                // What this mode costs before anything of ours runs. Blank for a codec
+                // mode: fewer bytes cross the wire, but a decode follows and the total is
+                // not something we can state from the mode list.
+                double ms = m.WireMs(probe.WireMiBs);
+                DrawText(draw, fonts.MonoSmall, new Vector2(rowStart.X + cMs, ty),
+                         m.Format.IsHighBitDepth ? Theme.Warn : Theme.TextSecondary,
+                         ms > 0 ? $"{ms:0.0}" : "—");
 
                 var (wireColour, _) = WireColour(m);
                 DrawText(draw, fonts.MonoTiny, new Vector2(rowStart.X + cWire, ty), wireColour, m.WireTag);
@@ -380,16 +398,24 @@ public static class SettingsPanel
 
         var summary = $"{modes.Count} / {probe.Modes.Count}";
         Widgets.Text(fonts.MonoTiny, Theme.TextMuted, summary);
-        if (probe.Link.Known && !probe.Device.IsVirtual)
+        if (probe.WireMiBs > 0 && !probe.Device.IsVirtual)
         {
-            var cap = $"{Strings.T("capNote")}";
+            // The handoff's copy deck had "356 MiB/s" written into the string itself — this
+            // machine's number, baked into all five languages. It is the divisor for the
+            // column beside it, so it has to come from the device.
+            var cap = string.Format(Strings.T("capNote"), probe.WireMiBs.ToString("0"));
             float w = Widgets.Measure(fonts.MonoTiny, cap).X;
             ImGui.SameLine(Math.Max(0, Widgets.RightEdge() - w));
             Widgets.Text(fonts.MonoTiny, Theme.TextMuted, cap);
         }
+
+        // Said once under the table rather than on every 10-bit row. The rows are already
+        // amber; repeating a sentence nine times is how a panel stops being read.
+        if (modes.Any(m => m.Format.IsHighBitDepth))
+            Widgets.Text(fonts.MonoTiny, Theme.Warn, Strings.T("tenBitCost"));
     }
 
-    private static void HeaderRow(Fonts fonts, float cFps, float cFmt, float cWire)
+    private static void HeaderRow(Fonts fonts, float cFps, float cFmt, float cMs, float cWire)
     {
         var start = ImGui.GetCursorScreenPos();
         var draw = ImGui.GetWindowDrawList();
@@ -398,6 +424,7 @@ public static class SettingsPanel
         DrawText(draw, fonts.Micro, start, colour, Strings.T("thRes"));
         DrawText(draw, fonts.Micro, start + new Vector2(cFps, 0), colour, Strings.T("thFps"));
         DrawText(draw, fonts.Micro, start + new Vector2(cFmt, 0), colour, Strings.T("thFmt"));
+        DrawText(draw, fonts.Micro, start + new Vector2(cMs, 0), colour, Strings.T("thDelay"));
         DrawText(draw, fonts.Micro, start + new Vector2(cWire, 0), colour, Strings.T("thWire"));
 
         ImGui.Dummy(new Vector2(0, Widgets.Measure(fonts.Micro, "0").Y));
@@ -415,11 +442,16 @@ public static class SettingsPanel
 
         string ScaleOn(int index) => index == current ? model.ScaleLabel : "";
 
-        if (Widgets.RadioRow(fonts, Strings.T("pNone"), "", "0.01 ms", current == 0,
+        // Measured on this machine with --bench, not taken from a vendor sheet: against a
+        // 0.19 ms baseline of our own blit, NIS came out at 0.19 and VSR at 4.29. NIS is
+        // free to inside the noise, which the 0.9 ms figure that used to sit here was not
+        // saying. They stay static rather than live because a number that moves while you
+        // read it cannot be compared to the one above it.
+        if (Widgets.RadioRow(fonts, Strings.T("pNone"), "", "—", current == 0,
                              true, ScaleOn(0), model.ScaleColour))
             model.SelectScaler(0);
 
-        if (Widgets.RadioRow(fonts, Strings.T("pNis"), "", "~0.9 ms", current == 1,
+        if (Widgets.RadioRow(fonts, Strings.T("pNis"), "", "< 0.1 ms", current == 1,
                              true, ScaleOn(1), model.ScaleColour))
             model.SelectScaler(1);
 
@@ -431,7 +463,7 @@ public static class SettingsPanel
                     : model.ScalerInert && current == 2 ? Strings.T("vsrSmall")
                     : "";
 
-        if (Widgets.RadioRow(fonts, vsrLabel, vsrNote, "4.50 ms", current == 2, driverOk,
+        if (Widgets.RadioRow(fonts, vsrLabel, vsrNote, "+4.1 ms", current == 2, driverOk,
                              ScaleOn(2), model.ScaleColour) && driverOk)
             model.SelectScaler(2);
     }

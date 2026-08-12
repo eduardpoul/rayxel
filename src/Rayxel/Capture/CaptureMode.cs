@@ -114,15 +114,44 @@ public sealed record CaptureMode(
     public bool IsOfferable => IsUsable && !IsRedundant;
 
     /// <summary>
-    /// Short tag for the UI. A trailing <c>?</c> means the mode claims to be uncompressed
-    /// while carrying a codec — the thing no other capture app tells you.
+    /// Short tag for the UI: is there a codec in the path or not. Two words, because that
+    /// is the whole of what a person choosing a mode needs — the codec's name and whether
+    /// the mode was honest about carrying one are diagnostics, and they live in
+    /// <see cref="WireDetail"/>.
+    /// <para>
+    /// This used to read <c>mjpeg?</c>, which was precise and unreadable. It also mattered
+    /// more before the redundant modes were hidden: back then a <c>mjpeg?</c> mode usually
+    /// had an identical raw twin sitting next to it and the tag was how you told them
+    /// apart. Now every remaining compressed mode buys a rate no raw mode reaches, so the
+    /// only question left is whether you are paying a codec for it.
+    /// </para>
     /// </summary>
-    public string WireTag => Transport switch
+    public string WireTag => Transport == WireTransport.Raw ? "raw" : "zip";
+
+    /// <summary>The full story, for logs and diagnostics: <c>raw</c>, <c>mjpeg</c>, <c>mjpeg?</c>.</summary>
+    public string WireDetail => Transport switch
     {
         WireTransport.Raw => "raw",
         WireTransport.Compressed => (WireCodec ?? Format.Name).ToLowerInvariant(),
         _ => (WireCodec ?? "codec").ToLowerInvariant() + "?"
     };
+
+    /// <summary>
+    /// One frame in MiB, or zero when a codec is in the path — then the bytes on the wire
+    /// are whatever the encoder produced and cannot be known in advance.
+    /// </summary>
+    public double FrameMiB => Transport != WireTransport.Raw
+        ? 0
+        : Format.BytesPerFrame(Width, Height) / (1024.0 * 1024.0);
+
+    /// <summary>
+    /// How long one frame takes to cross a link of the given speed — and therefore very
+    /// nearly the whole capture latency of this mode. Measured end to end, everything else
+    /// in the path (driver, frame server, our read) adds about 0.15 ms, so this is the
+    /// number worth putting beside a mode in a list.
+    /// </summary>
+    public double WireMs(double linkMiBs) =>
+        linkMiBs > 0 && FrameMiB > 0 ? FrameMiB / linkMiBs * 1000.0 : 0;
 
     /// <summary>Uncompressed bytes/second at the given rate; 0 for lossy formats.</summary>
     public double BytesPerSecond(double fps) =>

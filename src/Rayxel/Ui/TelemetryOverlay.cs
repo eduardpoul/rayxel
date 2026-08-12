@@ -67,12 +67,11 @@ public static class TelemetryOverlay
 
         // The wire tag, right-aligned. `mjpeg?` in red is the app's most useful finding
         // and the design gives it a slot rather than a footnote.
-        var (colour, alpha) = mode.Transport switch
-        {
-            WireTransport.Raw => (Theme.Good, 0.14f),
-            WireTransport.Compressed => (Theme.Warn, 0.14f),
-            _ => (Theme.Bad, 0.16f)
-        };
+        // Same two-colour vocabulary as the mode table: green when nothing is decoding,
+        // amber when something is. See SettingsPanel.WireColour for why red went away.
+        var (colour, alpha) = mode.Transport == WireTransport.Raw
+            ? (Theme.Good, 0.14f)
+            : (Theme.Warn, 0.14f);
         var tagWidth = Widgets.Measure(fonts.MonoTiny, mode.WireTag).X + Layout.S(16);
         Widgets.RightAlign(tagWidth);
         Widgets.Pill(fonts.MonoTiny, mode.WireTag, colour, alpha);

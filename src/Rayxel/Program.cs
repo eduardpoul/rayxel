@@ -353,8 +353,13 @@ static MenuEntry? RememberedMode(DeviceProbe probe, AppSettings settings)
 
 // Caches a probe result under the device's interface path, which is the only key that
 // stays put when the enumeration order changes.
+//
+// Also the one place every probe passes through, so it is where the link speed gets read
+// off the device's own USB descriptors. That has to happen before anything shows a mode's
+// transfer time, and doing it here means a device swapped mid-session gets it too.
 DeviceProbe Remember(DeviceProbe p)
 {
+    CaptureDevice.MeasureWire(p);
     probed[p.Device.SymbolicLink] = p;
     return p;
 }
@@ -585,7 +590,7 @@ void ReportByResolution(UsbVideoInfo usb, DeviceProbe probe)
                 int genuine = HardwareCount(byFormat.Key, w, h, fps);
                 int invented = Math.Max(0, windows - genuine);
                 int flagged = byFormat.Count(m => m.Transport == WireTransport.CompressedDecoded);
-                string tags = string.Join(" + ", byFormat.Select(m => m.WireTag));
+                string tags = string.Join(" + ", byFormat.Select(m => m.WireDetail));
 
                 string verdict = genuine == 0
                     ? $"hardware has no {byFormat.Key} this fast - all {windows} are decoded MJPEG"
@@ -708,13 +713,27 @@ void Report(DeviceProbe p)
         Log.Warn($"  infer  {p.BandwidthOnlyDetections} mode(s) claim to be uncompressed but do not fit " +
                  $"the {p.Link.CeilingMiBs:0} MiB/s link - treated as compressed on that basis alone");
 
+    if (p.WireMiBs > 0)
+        Log.Info($"  carry  {p.WireMiBs:0} MiB/s" +
+                 (Math.Abs(p.WireMiBs - p.Link.CeilingMiBs) > 1
+                     ? $" (the inferred ceiling of {p.Link.CeilingMiBs:0} is the fastest mode offered, not the wire)"
+                     : ""));
+
     if (p.BestRaw is { } best)
         Log.Info($"  best   {best.Width}x{best.Height} @ {best.MaxFps:0.##} {best.Format.Name} " +
-                 $"[{best.WireTag}]  {best.MegabytesPerSecond(best.MaxFps):0} MiB/s");
+                 $"[{best.WireDetail}]  {best.MegabytesPerSecond(best.MaxFps):0} MiB/s, " +
+                 $"{best.WireMs(p.WireMiBs):0.0} ms on the wire");
     else
         Log.Warn("  best   no uncompressed renderable mode - every option has a codec in the path");
 
-    Log.Info($"  10-bit {(p.SupportsTenBit ? "yes - HDR capture possible" : "no - SDR capture only")}");
+    // 10-bit is not a free quality setting: P010 is 3 bytes a pixel against NV12's 1.5, so
+    // it is twice the frame and twice the wire, and measured it also turns a clean delivery
+    // into a hitching one - p99 of 73 ms against 11.5 at the same size and rate.
+    if (p.SupportsTenBit && p.Renderable.FirstOrDefault(m => m.Format.IsHighBitDepth) is { } ten)
+        Log.Info($"  10-bit yes - HDR capture possible, at {ten.WireMs(p.WireMiBs):0.0} ms on the wire " +
+                 $"for {ten.Width}x{ten.Height}, twice the 8-bit cost");
+    else
+        Log.Info("  10-bit no - SDR capture only");
 }
 
 void RunLoop()
@@ -1037,7 +1056,7 @@ static MenuEntry? ForcedMode(DeviceProbe probe, string? spec)
 
     double pick = fps > 0 ? fps : match.MaxFps;
     Log.Info($"--mode={spec} -> #{match.TypeIndex} {match.Width}x{match.Height} @ {pick:0.##} " +
-             $"{match.Format.Name} [{match.WireTag}]");
+             $"{match.Format.Name} [{match.WireDetail}]");
     return new MenuEntry(match, pick);
 }
 
@@ -1146,7 +1165,7 @@ void ShowModeMenu(int screenX, int screenY)
             int id = menuEntries.IndexOf(e) + 1;
             var m = e.Mode;
             var bw = m.Transport == WireTransport.Raw ? $"{m.MegabytesPerSecond(e.Fps):0} MiB/s" : "compressed";
-            var label = $"{e.Fps,6:0.##} fps   {m.Format.Name,-6} {m.WireTag,-8} {bw}";
+            var label = $"{e.Fps,6:0.##} fps   {m.Format.Name,-6} {m.WireDetail,-8} {bw}";
 
             uint flags = Win32.MF_STRING;
             if (pump?.CurrentMode?.TypeIndex == m.TypeIndex && Math.Abs(pump.CurrentFps - e.Fps) < 0.5)

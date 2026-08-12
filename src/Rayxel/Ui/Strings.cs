@@ -26,6 +26,9 @@ public static partial class Strings
             ["quitTitle"] = "Выйти из Rayxel?",
             ["quitBody"] = "Видео остановится. Настройки сохранятся.",
             ["cancel"] = "Отмена",
+            ["thDelay"] = "мс",
+            ["tenBitCost"] = "10 бит — вдвое больше данных и рывки",
+            ["capNote"] = "канал {0} MiB/s",
         },
         ["en"] = new()
         {
@@ -40,6 +43,9 @@ public static partial class Strings
             ["quitTitle"] = "Quit Rayxel?",
             ["quitBody"] = "The video stops. Settings are kept.",
             ["cancel"] = "Cancel",
+            ["thDelay"] = "ms",
+            ["tenBitCost"] = "10-bit — twice the data, and it stutters",
+            ["capNote"] = "{0} MiB/s link",
         },
         ["uk"] = new()
         {
@@ -54,6 +60,9 @@ public static partial class Strings
             ["quitTitle"] = "Вийти з Rayxel?",
             ["quitBody"] = "Відео зупиниться. Налаштування збережуться.",
             ["cancel"] = "Скасувати",
+            ["thDelay"] = "мс",
+            ["tenBitCost"] = "10 біт — удвічі більше даних і ривки",
+            ["capNote"] = "канал {0} MiB/s",
         },
         ["de"] = new()
         {
@@ -68,6 +77,9 @@ public static partial class Strings
             ["quitTitle"] = "Rayxel beenden?",
             ["quitBody"] = "Das Video stoppt. Einstellungen bleiben erhalten.",
             ["cancel"] = "Abbrechen",
+            ["thDelay"] = "ms",
+            ["tenBitCost"] = "10 Bit — doppelte Datenmenge, und es ruckelt",
+            ["capNote"] = "Leitung {0} MiB/s",
         },
         ["es"] = new()
         {
@@ -82,6 +94,9 @@ public static partial class Strings
             ["quitTitle"] = "¿Salir de Rayxel?",
             ["quitBody"] = "El vídeo se detiene. Los ajustes se conservan.",
             ["cancel"] = "Cancelar",
+            ["thDelay"] = "ms",
+            ["tenBitCost"] = "10 bits — el doble de datos, y da tirones",
+            ["capNote"] = "enlace {0} MiB/s",
         },
     };
 

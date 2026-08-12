@@ -49,9 +49,17 @@ returned. It tracks **frame size**, not frame rate:
 | 1280×720 @ 60 NV12 | 1.318 MiB | 3.25 ms | 3.43 |
 | 1920×1080 @ 60 NV12 | 2.966 MiB | 7.32 ms | 7.48 |
 | 1920×1080 @ 120 NV12 | 2.966 MiB | 7.32 ms | 7.68 |
+| 2560×1440 @ 60 NV12 | 5.273 MiB | 13.01 ms | 13.21 |
 | 1920×1080 @ 60 **P010** | 5.933 MiB | 14.64 ms | 15.42 |
+| 3840×2160 @ 30 NV12 † | 11.865 MiB | 29.27 ms | 29.44 |
 
-A line through the first and last gives **~385 MiB/s and an intercept near zero**, against
+† The source here is 1440p, so the card cannot produce 4K from it and sent its own "source
+content does not support this resolution" card instead. The transfer figure still stands —
+an uncompressed frame is the same size whatever is in it — but the card was generating a
+static image rather than processing live HDMI, so its **distribution** is not comparable
+with the rest and is not used for anything below.
+
+A line through the first and last gives **~400 MiB/s and an intercept near zero**, against
 405 MiB/s computed from the USB descriptors. Two entirely separate routes to the same
 number: the descriptors say what the link should carry, the clock says what it does.
 
@@ -70,9 +78,20 @@ Same geometry, same rate, one format apart:
 | 1920×1080 @60 P010 | **15.42** | 16.42 | **72.79** | **114.68** |
 
 P010 is 3 bytes per pixel against NV12's 1.5, so it is exactly twice the frame and takes
-exactly twice the wire. At 60 fps that is 14.6 ms of transfer inside a 16.7 ms period — 88%
-of the link, continuously — and the tail falls apart: one frame in a hundred arrives five
-times late, and the worst is 115 ms.
+exactly twice the wire. That accounts for the median. It does not account for the tail:
+one frame in a hundred arrives five times late, and the worst is 115 ms.
+
+Two obvious explanations were tested and both are wrong:
+
+- **Not the frame size.** 2560×1440 NV12 is 5.27 MiB, within 12% of P010's 5.93, and its
+  p99 is 21 ms against P010's 73.
+- **Not the link being saturated.** 1080p120 NV12, 1080p60 P010 and 4K30 NV12 all sit at
+  the same 88% of the link. Only the P010 one misbehaves.
+
+What is left is the 10-bit path itself. The cleanest comparison is the first one: same
+geometry, same rate, same downscale from the 1440p source, only the bit depth differs —
+p99 goes from 11.5 ms to 72.8. Why the card or `usbvideo.sys` handles P010 so much worse is
+not established here; that it does is.
 
 So HDR capture is not a free quality setting. It doubles the median delay and turns a clean
 distribution into a hitching one. Worth it for film, wrong for a game.
@@ -89,6 +108,24 @@ distribution into a hitching one. Worth it for film, wrong for a game.
 
 Everything left is either physics or a preference. There is no engineering left to do on
 this path — which is itself the result.
+
+## What the app does with this
+
+The measurements are in the interface rather than only in this file:
+
+- The mode table has a **delay column**: one frame's bytes over the link speed, which the
+  app now reads from the device's own USB descriptors rather than inferring. A mode with a
+  codec in it shows `—`, because the bytes on the wire are whatever the encoder produced.
+- **10-bit rows are amber**, with one line under the table saying why. It is the only
+  choice there that quietly costs something.
+- The wire tag is **`raw` or `zip`** — two words, because that is the whole of what someone
+  choosing a mode needs. It used to read `mjpeg?`, which was precise and unreadable. The
+  detail still exists as `WireDetail` and still goes in the log.
+- The scaler rows carry **measured** costs, not vendor figures: NIS turned out to be free
+  to inside the noise where the panel had been claiming 0.9 ms.
+- The link figure under the table came from the design's copy deck with **`356 MiB/s`
+  written into the string** in all five languages — this machine's number, baked in. It now
+  comes from the device.
 
 The one route that could beat the wire is not a faster stack but an earlier start:
 uploading rows to the GPU as they arrive rather than waiting for a whole frame. That

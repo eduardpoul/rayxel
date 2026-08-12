@@ -55,6 +55,18 @@ public sealed record DeviceProbe(
     public int Count(WireTransport t) => Modes.Count(m => m.Transport == t);
 
     /// <summary>
+    /// What the wire actually carries, in MiB/s — the divisor for a mode's transfer time.
+    /// <para>
+    /// Seeded from the inferred ceiling and replaced with the figure from the device's own
+    /// USB descriptors when those can be read. The two differ by about 13% and the
+    /// descriptor one is right: the inferred ceiling is the byte rate of the fastest mode
+    /// offered, which is where the wire ran out, not the speed of the wire itself. Measured
+    /// end to end the true figure came out at ~400 MiB/s against an inferred 356.
+    /// </para>
+    /// </summary>
+    public double WireMiBs { get; set; }
+
+    /// <summary>
     /// Modes only the link-budget detector caught: they claim to be uncompressed and the
     /// capture stack gave no structural hint, but the wire cannot carry them. Worth saying
     /// out loud, because it is the case where we are reasoning rather than observing.
@@ -374,6 +386,25 @@ public static class CaptureDevice
 
         MarkRedundant(modes);
         return modes;
+    }
+
+    /// <summary>
+    /// Fills in what the wire really carries, from the device's own USB descriptors.
+    /// <para>
+    /// The inferred ceiling is a fine fallback but it is not the same quantity: it is the
+    /// byte rate of the fastest mode offered — where the wire ran out — rather than the
+    /// speed of the wire. On the ShadowCast the two are 356 and 405 MiB/s, and end-to-end
+    /// timing of four different frame sizes put the truth at ~400.
+    /// </para>
+    /// <para>Read-only, opens no stream, and takes the device away from nobody.</para>
+    /// </summary>
+    public static void MeasureWire(DeviceProbe probe)
+    {
+        probe.WireMiBs = probe.Link.CeilingMiBs;
+        if (probe.Device.IsVirtual) return;
+
+        if (UsbDescriptors.Read(probe.Device)?.PracticalBytesPerSecond is > 0 and var bytes)
+            probe.WireMiBs = bytes / (1024 * 1024);
     }
 
     /// <summary>
