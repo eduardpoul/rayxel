@@ -1,0 +1,75 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- WinExe, so no console window opens behind the video. Log output still goes to the
+         rolling file, and to a console when one is attached (see Log.HasConsole). -->
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+
+    <!-- Frame loop must not be interrupted by GC pauses or background JIT stalls. -->
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+    <TieredPGO>true</TieredPGO>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <Product>Rayxel</Product>
+    <AssemblyTitle>Rayxel</AssemblyTitle>
+    <Description>Low-latency capture-card viewer with RTX VSR, RTX Video HDR and NIS.</Description>
+    <Version>1.0.0</Version>
+    <NeutralLanguage>en</NeutralLanguage>
+
+    <!-- Publish as one self-contained executable: no .NET install needed on the target
+         machine, and nothing to lose track of beside it. cimgui.dll is bundled too.
+
+         The RID deliberately lives on the publish command line, not here. Setting it as a
+         project property moves *every* build into a bin\...\win-x64\ subfolder and leaves
+         the previous executable sitting at the old path, where it goes on being launched
+         and looking like the code changed nothing. -->
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+
+    <!-- Trimming is off on purpose. Vortice, NAudio and System.Text.Json all resolve types
+         reflectively, and a trimmed build fails at runtime rather than at build time. -->
+    <PublishTrimmed>false</PublishTrimmed>
+
+    <!-- Symbols go inside the assembly instead of into a .pdb beside it. One file on disk,
+         and stack traces still carry file and line numbers - which is the whole reason to
+         keep symbols at all. -->
+    <DebugType>embedded</DebugType>
+
+    <!-- The bundle is mostly the .NET runtime, and it compresses well. Costs a little
+         start-up time while it decompresses; nothing at all once running. -->
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- NVIDIA's MIT-licensed NIS sources, compiled at runtime rather than build time.
+         Embedded, not copied: a single-file build has nowhere to put loose files, and an
+         executable that stops working when moved on its own is not one file. -->
+    <EmbeddedResource Include="Render\NIS\*.h" />
+
+    <!-- The designed typefaces, if whoever builds this has put them there. Absent by
+         default: bundling someone else's font binaries is a licensing decision, and the
+         app falls back to system faces that carry the same Cyrillic. -->
+    <Content Include="Assets\Fonts\*.ttf" Link="Assets\Fonts\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ImGui.NET" Version="1.91.6.1" />
+    <PackageReference Include="NAudio.Wasapi" Version="2.3.0" />
+    <PackageReference Include="System.Drawing.Common" Version="10.0.10" />
+    <PackageReference Include="Vortice.D3DCompiler" Version="3.8.3" />
+    <PackageReference Include="Vortice.Direct2D1" Version="3.8.3" />
+    <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
+    <PackageReference Include="Vortice.DXGI" Version="3.8.3" />
+    <PackageReference Include="Vortice.MediaFoundation" Version="3.8.3" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,25 @@
+# Build output
+bin/
+obj/
+publish/
+
+# Rolling logs. The app writes these next to the settings now, but older builds
+# dropped them beside the executable.
+logs/
+*.log
+
+# Font binaries are not committed: bundling someone else's OFL faces is a licensing
+# decision, and the app falls back to system faces without them.
+# See src/Rayxel/Assets/Fonts/README.md
+src/Rayxel/Assets/Fonts/*.ttf
+src/Rayxel/Assets/Fonts/*.otf
+
+# Visual Studio / Rider / VS Code scratch
+.vs/
+.idea/
+*.user
+*.suo
+*.DotSettings.user
+
+# Diagnostic captures from --shot
+*.png.tmp

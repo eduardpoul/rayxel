@@ -1,0 +1,947 @@
+﻿// Aliased rather than imported: NAudio.CoreAudioApi has its own CaptureState, and pulling
+// the whole namespace in here would make every mention of ours ambiguous.
+using DataFlow = NAudio.CoreAudioApi.DataFlow;
+using Rayxel.Audio;
+using Rayxel.Capture;
+using Rayxel.Diagnostics;
+using Rayxel.Native;
+using Rayxel.Render;
+using Rayxel.Settings;
+using Rayxel.Ui;
+
+// A windowed build has no console of its own. --console attaches to the one it was
+// launched from, which is what makes running it from a terminal useful again.
+if (args.Contains("--console")) Win32.AttachParentConsole();
+if (args.Contains("--verbose")) Log.MinLevel = LogLevel.Debug;
+
+// Logs go beside the settings, not beside the executable: Program Files is not writable,
+// and a tool that cannot write its own log where it was installed is a support call.
+Log.OpenFile(Path.Combine(Rayxel.Settings.AppSettings.Directory, "logs"));
+Log.Info($"Rayxel {System.Reflection.Assembly.GetExecutingAssembly().GetName().Version}");
+
+var settings = AppSettings.Load();
+Strings.Use(settings.Language);
+
+string? deviceSelector = null;
+string? shotPath = null;
+string? forcedScreen = null;
+bool listOnly = false;
+bool startWithTelemetry = false;
+bool noAutoHdr = false;
+bool startBorderless = false;
+foreach (var arg in args)
+{
+    if (arg is "--list" or "-l") listOnly = true;
+    else if (arg.StartsWith("--device=", StringComparison.OrdinalIgnoreCase)) deviceSelector = arg[9..];
+    else if (arg.StartsWith("--lang=", StringComparison.OrdinalIgnoreCase)) Strings.Use(arg[7..]);
+    // Diagnostic: run for a few seconds, write what was rendered to a PNG, exit. Captures
+    // the back buffer rather than the screen, so it works when the window is not visible.
+    else if (arg.StartsWith("--shot=", StringComparison.OrdinalIgnoreCase)) shotPath = arg[7..];
+    else if (arg is "--tele") startWithTelemetry = true;
+    // Starts on our own shader instead of following the Windows HDR state, so the driver
+    // path can be taken out of the picture when comparing what is actually on screen.
+    else if (arg is "--no-auto-hdr") noAutoHdr = true;
+    else if (arg is "--borderless") startBorderless = true;
+    // Forces a screen so the splash and picker can be inspected without racing them.
+    else if (arg.StartsWith("--screen=", StringComparison.OrdinalIgnoreCase)) forcedScreen = arg[9..];
+    else if (!arg.StartsWith('-')) deviceSelector = arg;
+}
+
+Renderer? renderer = null;
+FramePump? pump = null;
+AppModel? model = null;
+DeviceProbe? active = null;
+List<MenuEntry> menuEntries = [];
+IntPtr hwnd = IntPtr.Zero;
+bool quit = false;
+bool pendingVsrToggle = false, pendingHdrToggle = false, pendingNisToggle = false, autoHdrPending = false;
+bool deferredStatePending = true;
+int pendingScaler = -1;
+float pendingSharpness = 0f;
+CaptureDeviceInfo? pendingDeviceSwitch = null;
+WindowKind? pendingWindowKind = null;
+bool pendingAudioRestart = false;
+WindowMode? windowMode = null;
+
+// Every device Windows currently offers, refreshed whenever the menu opens so a card
+// plugged in mid-session shows up. Separate from what we have actually opened: enumerating
+// is free, opening is not, and opening a device is what makes a webcam's light come on.
+List<CaptureDeviceInfo> allDevices = [];
+Dictionary<string, DeviceProbe> probed = new(StringComparer.OrdinalIgnoreCase);
+
+// The delegate must outlive the window: Win32 keeps the raw pointer, not the object.
+Win32.WndProc wndProc = WindowProc;
+
+Kernel.TimeBeginPeriod(1);
+try
+{
+    allDevices = CaptureDevice.Enumerate();
+    Log.Info($"{allDevices.Count} video capture device(s) present");
+    foreach (var d in allDevices)
+        Log.Info($"  [{d.Ordinal}] {d.FriendlyName}   {d.ShortId}{(d.IsVirtual ? "   (software device)" : "")}");
+
+    if (allDevices.Count == 0)
+    {
+        Log.Error("no video capture devices at all. Plug the card in, or check Windows camera privacy settings.");
+        return 1;
+    }
+
+    if (listOnly)
+    {
+        foreach (var d in allDevices) Report(Remember(CaptureDevice.Probe(d)));
+        return 0;
+    }
+
+    // Last used device, if it is still here. A remembered choice is only a preference:
+    // if the card was unplugged or is now busy, fall through to choosing afresh.
+    if (deviceSelector is null && settings.DeviceLink is { Length: > 0 } link)
+    {
+        var remembered = allDevices.FirstOrDefault(d =>
+            string.Equals(d.SymbolicLink, link, StringComparison.OrdinalIgnoreCase));
+        if (remembered is not null)
+        {
+            var probe = Remember(CaptureDevice.Probe(remembered));
+            if (probe.IsReady) { active = probe; Log.Info($"using remembered device '{remembered.FriendlyName}'"); }
+            else Log.Info($"remembered device '{remembered.FriendlyName}' is {probe.Availability.ToString().ToLowerInvariant()}; choosing another");
+        }
+    }
+
+    // Named device: honour it exactly, including its failures. Guessing past a device the
+    // user asked for by name would hide the very problem they are trying to see.
+    if (deviceSelector is not null)
+    {
+        var wanted = CaptureDevice.Resolve(deviceSelector, allDevices);
+        if (wanted is null)
+        {
+            Log.Error($"no device matches '{deviceSelector}'. Run with --list to see what is here.");
+            return 1;
+        }
+        active = Remember(CaptureDevice.Probe(wanted));
+    }
+    else if (active is null)
+    {
+        var (chosen, examined) = CaptureDevice.ChooseBest(allDevices);
+        foreach (var p in examined) Remember(p);
+        active = chosen;
+    }
+
+    foreach (var p in probed.Values) Report(p);
+
+    if (active is null || !active.IsReady)
+    {
+        var busy = probed.Values.Count(p => p.Availability == DeviceAvailability.Busy);
+        Log.Error(busy > 0
+            ? $"no usable device. {busy} of {probed.Count} are held by another application "
+              + "(a browser tab, OBS, Teams) - close it and try again."
+            : "no usable device: nothing here exposes a mode this app can render.");
+        return 1;
+    }
+
+    Log.Info($"using: {active.Device.FriendlyName}  ({active.Device.ShortId})");
+
+    menuEntries = BuildMenuEntries(active.Modes);
+    Log.Info($"{menuEntries.Count} renderable modes offered in the menu");
+
+    const int WindowWidth = 1600, WindowHeight = 900;
+    hwnd = Win32.CreateAppWindow("Rayxel", wndProc, WindowWidth, WindowHeight);
+    // A swapchain behind another window is not composed at all, which shows up as
+    // "present: None" and makes the composition reading meaningless. Coming up in front
+    // is also just what a video window should do.
+    Win32.SetForegroundWindow(hwnd);
+    Log.Info($"window {WindowWidth}x{WindowHeight} (client)");
+
+    renderer = new Renderer();
+    renderer.Initialize(hwnd, WindowWidth, WindowHeight);
+
+    pump = new FramePump(active.Device, renderer);
+    pump.AttachD3D(renderer.Device);
+
+    model = new AppModel { Renderer = renderer, Pump = pump };
+    model.Devices = allDevices;
+    model.Probed = probed;
+    model.Active = active;
+    model.SelectScaler = want => { pendingScaler = want; model!.Touch(); };
+    model.ToggleHdr = () => pendingHdrToggle = true;
+    model.SelectMode = (m, fps) => { try { pump!.Select(m, fps); } catch (Exception ex) { Log.Error("mode switch failed", ex); } };
+    model.SwitchDevice = d => pendingDeviceSwitch = d;
+    model.SetWindowKind = k => pendingWindowKind = k;
+    model.Quit = () => quit = true;
+    windowMode = new WindowMode(hwnd);
+    if (startBorderless) pendingWindowKind = WindowKind.BorderlessFullscreen;
+    model.RestartAudio = () => pendingAudioRestart = true;
+    model.ShowTelemetry = startWithTelemetry || settings.ShowTelemetry;
+    model.ShowSettings = settings.ShowSettings;
+    model.OverlayNits = settings.OverlayNits;
+    model.VideoNits = settings.VideoNits;
+    model.AudioEnabled = settings.AudioEnabled;
+    model.AudioOutputId = settings.AudioOutputId;
+    if (renderer.Nis is { } nisScaler) nisScaler.Sharpness = settings.NisSharpness;
+
+    // Audio endpoints are listed once here and refreshed when the user opens a combo, so a
+    // headset plugged in mid-session shows up without polling WASAPI every frame.
+    RefreshAudioEndpoints();
+    model.AudioInputId = settings.AudioInputId is { Length: > 0 } saved
+                         && model.AudioInputs.Any(e => e.Id == saved)
+        ? saved
+        : AudioEndpoints.MatchTo(active.Device)?.Id;
+    pendingAudioRestart = true;
+
+    if (settings.Borderless) pendingWindowKind = WindowKind.BorderlessFullscreen;
+    if (forcedScreen is not null)
+        model.Screen = forcedScreen.ToLowerInvariant() switch
+        {
+            "splash" => Screen.Splash,
+            "devices" => Screen.Devices,
+            _ => Screen.App
+        };
+    if (forcedScreen == "nosignal") model.ForceNoSignal = true;
+    // Opens the states that need a click to reach, so they can be checked without one.
+    if (forcedScreen == "modes") model.ModeTableOpen = true;
+    if (forcedScreen == "quit") model.ConfirmQuit = true;
+
+    var initial = RememberedMode(active, settings) ?? PickInitialMode(active);
+    if (initial is null) { Log.Error("no renderable mode found"); return 1; }
+    pump.Select(initial.Mode, initial.Fps);
+    ReportFirstFrame(pump);
+
+    // Probing cannot see "in use elsewhere" — that only shows at the first read — so the
+    // best-looking device can still turn out to be held by something else. With more than
+    // one card present, try the others before settling for a black window. A device the
+    // user named is left alone: they asked for that one, and hiding its failure by quietly
+    // using a different card would be worse than showing nothing.
+    if (pump.State == CaptureState.Lost && deviceSelector is null)
+    {
+        foreach (var other in allDevices.Where(d => !d.Is(pump.Device) && !d.IsVirtual))
+        {
+            Log.Warn($"trying '{other.FriendlyName}' instead");
+            SwitchDevice(other);
+            if (pump.State == CaptureState.Starting) ReportFirstFrame(pump);
+            if (pump.State != CaptureState.Lost) break;
+        }
+    }
+
+    // Follow Windows: if the desktop is already in HDR, start in HDR too. If it is not,
+    // the toggle stays unavailable rather than producing a washed-out picture.
+    // Compile NIS up front rather than on first use: shader compilation and parsing the
+    // coefficient tables are the two things most likely to be wrong, and finding out at
+    // startup beats finding out when the user presses a key mid-game.
+    if (renderer.Nis?.Initialize(NisHdrMode.None) != true)
+        Log.Warn($"NIS unavailable: {renderer.Nis?.LastError ?? "unknown"}");
+
+    // Deferred: the video processor is only built once the first frame arrives, and the
+    // HDR extension cannot be set before it exists.
+    autoHdrPending = renderer.DisplaySupportsHdr && !noAutoHdr;
+    Log.Info(autoHdrPending
+        ? "Windows has this display in HDR - will enable HDR output once the first frame lands"
+        : "Windows has this display in SDR - HDR toggle disabled");
+
+    Log.Info("Tab settings · T telemetry · M modes · H HDR · 1/2/3 scaler · Esc quit");
+    RunLoop();
+    return 0;
+}
+catch (Exception ex)
+{
+    Log.Error("fatal", ex);
+    return 2;
+}
+finally
+{
+    // Last write wins over the periodic one: whatever changed in the final seconds is
+    // exactly what the user did most recently.
+    if (model is not null) { model.CaptureInto(settings); settings.Save(); }
+    model?.Audio.Dispose();
+    pump?.Dispose();
+    renderer?.Dispose();
+    if (hwnd != IntPtr.Zero) Win32.DestroyWindow(hwnd);
+    Kernel.TimeEndPeriod(1);
+    GC.KeepAlive(wndProc);
+    Log.Info($"log: {Log.FilePath}");
+    Log.Close();
+}
+
+// Waits out the gap between "the device accepted a media type" and "the device is actually
+// producing pictures". Those are not the same event: a card another application is already
+// streaming from opens and configures without complaint and only refuses at the first read,
+// so this is the earliest moment at which "in use elsewhere" can be known at all.
+static void ReportFirstFrame(FramePump pump)
+{
+    var clock = System.Diagnostics.Stopwatch.StartNew();
+    while (clock.ElapsedMilliseconds < 2500 && pump.State == CaptureState.Starting)
+        Thread.Sleep(20);
+
+    switch (pump.State)
+    {
+        case CaptureState.Streaming:
+            Log.Info($"first frame after {clock.ElapsedMilliseconds} ms");
+            break;
+        case CaptureState.Lost:
+            Log.Error($"no video: {pump.StateDetail}. " +
+                      "Close whatever else is using the card, or pick another device from the menu.");
+            break;
+        default:
+            Log.Warn("no frames yet - the source may be asleep or the HDMI input unplugged. " +
+                     "Video will appear on its own when a frame arrives.");
+            break;
+    }
+}
+
+// Re-lists the WASAPI endpoints. Called at start-up and whenever the audio card is shown,
+// so a headset plugged in mid-session appears without polling WASAPI every frame.
+void RefreshAudioEndpoints()
+{
+    if (model is null) return;
+    model.AudioInputs = AudioEndpoints.List(DataFlow.Capture);
+    model.AudioOutputs = AudioEndpoints.List(DataFlow.Render);
+}
+
+// The mode from last time, if this device still offers it. Matched on what the user
+// actually chose - geometry, rate and format - rather than on the type index, which is a
+// position in a list the driver is free to reorder between runs.
+static MenuEntry? RememberedMode(DeviceProbe probe, AppSettings settings)
+{
+    if (settings.ModeWidth <= 0 || settings.ModeFormat is null) return null;
+
+    var match = probe.Renderable.FirstOrDefault(m =>
+        m.Width == settings.ModeWidth &&
+        m.Height == settings.ModeHeight &&
+        m.Format.Name == settings.ModeFormat &&
+        settings.ModeFps >= m.MinFps - 0.5 && settings.ModeFps <= m.MaxFps + 0.5);
+
+    if (match is null)
+    {
+        Log.Info($"remembered mode {settings.ModeWidth}x{settings.ModeHeight} @ {settings.ModeFps:0.##} " +
+                 $"{settings.ModeFormat} is not offered by this device; choosing afresh");
+        return null;
+    }
+
+    Log.Info($"restoring mode {match.Width}x{match.Height} @ {settings.ModeFps:0.##} {match.Format.Name}");
+    return new MenuEntry(match, settings.ModeFps);
+}
+
+// Caches a probe result under the device's interface path, which is the only key that
+// stays put when the enumeration order changes.
+DeviceProbe Remember(DeviceProbe p)
+{
+    probed[p.Device.SymbolicLink] = p;
+    return p;
+}
+
+/// <summary>Everything one device turned out to be, in the log and on stdout.</summary>
+void Report(DeviceProbe p)
+{
+    var d = p.Device;
+    Log.Section($"[{d.Ordinal}] {d.FriendlyName}");
+    Log.Info($"  path   {d.ShortId}{(d.IsVirtual ? "   (software device - its mode list describes no wire)" : "")}");
+
+    if (!p.IsReady)
+    {
+        Log.Warn($"  state  {p.Availability.ToString().ToLowerInvariant()} - {p.Problem}");
+        return;
+    }
+
+    int renderable = p.Renderable.Count();
+    Log.Info($"  state  ready - {p.Modes.Count} modes, {renderable} renderable");
+    Log.Info($"  wire   {p.Count(WireTransport.Raw)} raw / " +
+             $"{p.Count(WireTransport.CompressedDecoded)} compressed-but-labelled-raw / " +
+             $"{p.Count(WireTransport.Compressed)} compressed");
+
+    // A software device reports whatever its author felt like; running bandwidth arithmetic
+    // on it produces a confident number about a wire that does not exist.
+    Log.Info(d.IsVirtual ? "  link   n/a for a software device" : $"  link   {p.Link.Describe()}");
+
+    if (p.BandwidthOnlyDetections > 0)
+        Log.Warn($"  infer  {p.BandwidthOnlyDetections} mode(s) claim to be uncompressed but do not fit " +
+                 $"the {p.Link.CeilingMiBs:0} MiB/s link - treated as compressed on that basis alone");
+
+    if (p.BestRaw is { } best)
+        Log.Info($"  best   {best.Width}x{best.Height} @ {best.MaxFps:0.##} {best.Format.Name} " +
+                 $"[{best.WireTag}]  {best.MegabytesPerSecond(best.MaxFps):0} MiB/s");
+    else
+        Log.Warn("  best   no uncompressed renderable mode - every option has a codec in the path");
+
+    Log.Info($"  10-bit {(p.SupportsTenBit ? "yes - HDR capture possible" : "no - SDR capture only")}");
+}
+
+void RunLoop()
+{
+    var logClock = System.Diagnostics.Stopwatch.StartNew();
+    var frameClock = System.Diagnostics.Stopwatch.StartNew();
+    var sampleClock = System.Diagnostics.Stopwatch.StartNew();
+    var retryClock = System.Diagnostics.Stopwatch.StartNew();
+    var audioRetryClock = System.Diagnostics.Stopwatch.StartNew();
+    var displayClock = System.Diagnostics.Stopwatch.StartNew();
+    var saveClock = System.Diagnostics.Stopwatch.StartNew();
+    string lastSavedJson = settings.ToJson();
+    long presented = 0, lastLoggedPresent = 0;
+    long lastTimedArrival = 0, newFramesPresented = 0, lastLoggedNewFrames = 0;
+    double appCpuMs = 0;
+    // Seeded from the pump rather than from Idle, so the first frame is not announced as
+    // a recovery from a problem that never happened.
+    var lastState = pump!.State;
+
+    while (!quit)
+    {
+        if (!Win32.PumpMessages()) break;
+
+        // Requests from the message pump and from the UI are applied here, on the thread
+        // that owns the device, and never allowed to escape as an exception.
+        if (pendingDeviceSwitch is { } target)
+        {
+            pendingDeviceSwitch = null;
+            try { SwitchDevice(target); } catch (Exception ex) { Log.Error("device switch failed", ex); }
+        }
+        if (pendingAudioRestart)
+        {
+            pendingAudioRestart = false;
+            try
+            {
+                model!.Audio.Stop();
+                if (model.AudioEnabled) model.Audio.Start(model.AudioInputId, model.AudioOutputId);
+            }
+            catch (Exception ex) { Log.Error("audio restart failed", ex); }
+        }
+        if (pendingWindowKind is { } wantKind)
+        {
+            pendingWindowKind = null;
+            // Logged either side, because the whole reason this control exists is to find
+            // out whether it moves the swapchain onto an overlay plane. Skipped before the
+            // first Present, when DXGI has no statistics to give and would only say so.
+            if (presented > 0) Log.Info($"present before: {renderer!.DescribeCompositionMode()}");
+            try { windowMode!.Set(wantKind); model!.WindowKind = windowMode.Kind; }
+            catch (Exception ex) { Log.Error("window mode switch failed", ex); }
+        }
+        if (pendingScaler >= 0)
+        {
+            int want = pendingScaler; pendingScaler = -1;
+            try { SelectScaler(want); } catch (Exception ex) { Log.Error("scaler switch failed", ex); }
+        }
+        if (pendingVsrToggle) { pendingVsrToggle = false; try { ToggleVsr(); } catch (Exception ex) { Log.Error("VSR toggle failed", ex); } }
+        if (pendingHdrToggle) { pendingHdrToggle = false; try { ToggleHdr(); } catch (Exception ex) { Log.Error("HDR toggle failed", ex); } }
+        if (pendingNisToggle) { pendingNisToggle = false; try { ToggleNis(); } catch (Exception ex) { Log.Error("NIS toggle failed", ex); } }
+        if (pendingSharpness != 0f && renderer!.Nis is { } nis)
+        {
+            nis.Sharpness = Math.Clamp(nis.Sharpness + pendingSharpness, 0f, 1f);
+            pendingSharpness = 0f;
+            Log.Info($"NIS sharpness {nis.Sharpness:0.0}");
+        }
+
+        // Wait for the swapchain first so we never queue ahead of the display, then
+        // take whatever frame the capture thread has most recently delivered.
+        renderer!.WaitForNextFrame(8);
+        pump!.FrameReady.WaitOne(8);
+
+        // Time our own segment: from the frame landing in our process to Present returning.
+        // Only frames we have not presented before count — we present faster than the
+        // capture rate, and re-presenting a stale frame would inflate the figure.
+        long arrival = System.Threading.Volatile.Read(ref pump.LastArrivalQpc);
+        bool isNewFrame = arrival != lastTimedArrival;
+
+        float dt = (float)frameClock.Elapsed.TotalSeconds;
+        frameClock.Restart();
+
+        model!.AppCpuMs = appCpuMs;
+        model.GpuMs = renderer.LastGpuMs;
+        renderer.OverlayNits = model.OverlayNits;
+        renderer.VideoNits = model.VideoNits;
+        // A pending capture holds the panel open: otherwise the idle timer hides it before
+        // the shot lands and every capture shows an empty frame.
+        if (shotPath is not null) model.PanelActivity();
+
+        AppShell.Tick(model, dt * 1000.0, advance: forcedScreen is null);
+
+        // The graph keeps its 5 Hz trace, but the numbers beside it are only replaced once
+        // a second. Repainting them at frame rate left every trailing digit permanently in
+        // motion, which reads as instability rather than as measurement.
+        if (sampleClock.ElapsedMilliseconds >= 200)
+        {
+            sampleClock.Restart();
+            model.History.Push((float)(appCpuMs + renderer.LastGpuMs));
+        }
+        if (displayClock.ElapsedMilliseconds >= 1000)
+        {
+            displayClock.Restart();
+            model.SampleForDisplay(renderer.DescribeCompositionMode());
+        }
+
+        if (renderer.BeginUi(dt)) AppShell.Draw(model, renderer.Ui!.Fonts);
+
+        renderer.Render();
+        renderer.Present();
+        presented++;
+
+        // Deferred until the video processor exists, which only happens once a frame has
+        // been through it. Both the remembered scaler and HDR need it.
+        // Gated on the processor, not on HDR: an SDR display still has a scaler to restore.
+        if (deferredStatePending && renderer.Processor is { OutputWidth: > 0 })
+        {
+            deferredStatePending = false;
+            if (settings.Scaler != 0)
+            {
+                try { SelectScaler(settings.Scaler); }
+                catch (Exception ex) { Log.Error("restoring the scaler failed", ex); }
+            }
+            // Only the driver path can produce HDR, so a remembered NIS choice takes it away.
+            if (autoHdrPending && settings.Hdr && !renderer.UseNis)
+            {
+                try { ToggleHdr(); } catch (Exception ex) { Log.Error("auto HDR failed", ex); }
+            }
+        }
+
+        // Audio drifts because capture and playback run off different clocks. Checked
+        // every frame; it does nothing at all until the buffer has actually grown.
+        model!.Audio.TrimDrift();
+
+        // Sound is expected to come back on its own. The HDMI audio endpoint disappears
+        // whenever the console sleeps and returns when it wakes, and a one-shot attempt at
+        // start-up leaves the user with silence and no way back short of a restart.
+        if (model.AudioEnabled && !model.Audio.Running && audioRetryClock.ElapsedMilliseconds >= 5000)
+        {
+            audioRetryClock.Restart();
+            try
+            {
+                RefreshAudioEndpoints();
+                // Re-match rather than trusting the remembered id: after a sleep the
+                // endpoint often comes back under a different one.
+                if (model.AudioInputId is null || model.AudioInputs.All(e => e.Id != model.AudioInputId))
+                    model.AudioInputId = AudioEndpoints.MatchTo(pump.Device)?.Id;
+
+                if (model.AudioInputId is not null) model.Audio.Start(model.AudioInputId, model.AudioOutputId);
+            }
+            catch (Exception ex) { Log.Debug($"audio retry failed: {ex.Message}"); }
+        }
+        else if (model.Audio.Running) audioRetryClock.Restart();
+
+        if (isNewFrame && arrival != 0)
+        {
+            lastTimedArrival = arrival;
+            newFramesPresented++;
+            double ms = (System.Diagnostics.Stopwatch.GetTimestamp() - arrival) * 1000.0
+                        / System.Diagnostics.Stopwatch.Frequency;
+            if (ms is > 0 and < 200) appCpuMs = appCpuMs == 0 ? ms : appCpuMs * 0.9 + ms * 0.1;
+        }
+
+        // A lost device does not come back on its own — the read loop has stopped — so it
+        // is retried on the cadence the no-signal card promises. "No signal" is different
+        // and needs nothing: the reader is alive and recovers by itself when frames resume.
+        if (pump.State == CaptureState.Lost && retryClock.ElapsedMilliseconds >= 3000)
+        {
+            retryClock.Restart();
+            Log.Info($"retrying '{pump.Device.FriendlyName}'");
+            try { SwitchDevice(pump.Device); } catch (Exception ex) { Log.Error("retry failed", ex); }
+        }
+        else if (pump.State != CaptureState.Lost) retryClock.Restart();
+
+        // The video simply freezing on the last frame is the one failure a user cannot
+        // diagnose from the picture, so it gets said out loud the moment it happens.
+        var state = pump.State;
+        if (state != lastState)
+        {
+            lastState = state;
+            if (state == CaptureState.NoSignal)
+                Log.Warn($"no signal from '{pump.Device.FriendlyName}' - source asleep, unplugged, or changing mode");
+            else if (state == CaptureState.Lost)
+                Log.Error($"device lost: {pump.StateDetail ?? "unknown"}");
+            else if (state == CaptureState.Streaming)
+                Log.Info("signal restored");
+        }
+
+        // Diagnostic capture: give the pipeline a few seconds to settle into a steady
+        // state, grab one frame, and stop.
+        if (shotPath is not null && presented > 400)
+        {
+            renderer.SaveBackBuffer(shotPath);
+            shotPath = null;
+            quit = true;
+        }
+
+        // Settings are compared rather than tracked. Threading a "changed" flag through
+        // every control is a thing to forget in one place and then wonder about; taking a
+        // snapshot and writing only when it differs cannot drift out of sync with reality.
+        if (saveClock.ElapsedMilliseconds >= (model.SettingsDirty ? 400 : 4000))
+        {
+            saveClock.Restart();
+            model.SettingsDirty = false;
+            model.CaptureInto(settings);
+            var json = settings.ToJson();
+            if (json != lastSavedJson) { settings.Save(); lastSavedJson = json; }
+        }
+
+        // Heartbeat: the evidence that a mode switch actually took effect, independent
+        // of anything drawn on screen. Present rate and capture rate are logged
+        // separately because they are allowed to differ.
+        if (logClock.ElapsedMilliseconds >= 1000)
+        {
+            double seconds = logClock.Elapsed.TotalSeconds;
+            logClock.Restart();
+            var s = pump.Snapshot();
+            var m = pump.CurrentMode;
+            double presentFps = (presented - lastLoggedPresent) / seconds;
+            double uniqueFps = (newFramesPresented - lastLoggedNewFrames) / seconds;
+            lastLoggedPresent = presented;
+            lastLoggedNewFrames = newFramesPresented;
+
+            double budgetMs = pump.CurrentFps > 0 ? 1000.0 / pump.CurrentFps : 0;
+            var age = s.PipelineDelayValid && budgetMs > 0
+                ? $"{s.PipelineDelayMs,5:0.0}ms/{s.PipelineDelayMs / budgetMs:0.00}fr"
+                : "        n/a";
+
+            Log.Info(
+                $"#{m?.TypeIndex,-3} {m?.Width}x{m?.Height} {pump.ActiveSubtype,-5} " +
+                $"{FramePump.DescribeTransport(m!),-38} " +
+                $"budget {budgetMs,5:0.00}ms  age {age}  " +
+                $"cpu {appCpuMs,5:0.00}  gpu {renderer!.LastGpuMs,5:0.00}  " +
+                $"free {budgetMs - appCpuMs - renderer.LastGpuMs,5:0.00}ms  " +
+                $"capture {s.MeasuredFps,6:0.0}fps  present {presentFps,6:0.0}fps (unique {uniqueFps,5:0.0})  " +
+                $"late {s.FramesLate} dropped {s.FramesDropped}  {model.Composition}");
+        }
+    }
+}
+
+/// <summary>
+/// The profile the whole project aims at: no codec in the path, fastest, then largest.
+/// A card with nothing raw still gets opened — a compressed picture beats no picture, and
+/// the readout says plainly which one is on screen.
+/// </summary>
+static MenuEntry? PickInitialMode(DeviceProbe probe)
+{
+    var best = probe.BestRaw ?? probe.Renderable
+        .OrderByDescending(m => m.MaxFps)
+        .ThenByDescending(m => m.Width * m.Height)
+        .FirstOrDefault();
+    return best is null ? null : new MenuEntry(best, best.MaxFps);
+}
+
+static List<MenuEntry> BuildMenuEntries(List<CaptureMode> modes)
+{
+    // Only formats we can actually put on screen. The raw/compressed comparison survives
+    // this filter intact: every compressed mode still has a decoded twin, so raw and
+    // compressed can be A/B'd at identical output format and resolution.
+    var entries = new List<MenuEntry>();
+    foreach (var m in modes.Where(m => m.IsOfferable)
+                           .OrderByDescending(m => m.Width * m.Height)
+                           .ThenByDescending(m => m.MaxFps))
+        entries.Add(new MenuEntry(m, m.MaxFps));
+    return entries;
+}
+
+/// <summary>
+/// Probes and moves to another device. Probing afresh rather than trusting a cached result
+/// matters: the usual reason a device was unusable is that a browser tab had it, and the
+/// usual reason the user is picking it now is that they just closed the tab.
+/// </summary>
+void SwitchDevice(CaptureDeviceInfo target)
+{
+    // Release ours first. Two capture sources open at once is exactly the contention this
+    // is trying to escape, and on a shared USB controller it can cost the other one frames.
+    pump!.Stop();
+
+    var fresh = Remember(CaptureDevice.Probe(target));
+    if (!fresh.IsReady)
+    {
+        Log.Warn($"cannot switch to '{target.FriendlyName}': {fresh.Problem}");
+        // Put the old device back the way it was, or the user is left with a frozen window.
+        if (active?.IsReady == true && PickInitialMode(active) is { } restore)
+            pump.Select(restore.Mode, restore.Fps);
+        return;
+    }
+
+    var entry = PickInitialMode(fresh);
+    if (entry is null) { Log.Warn($"'{target.FriendlyName}' has no renderable mode"); return; }
+
+    pump.SwitchTo(fresh.Device);
+    active = fresh;
+    if (model is not null) model.Active = fresh;
+    menuEntries = BuildMenuEntries(fresh.Modes);
+    Report(fresh);
+    pump.Select(entry.Mode, entry.Fps);
+}
+
+/// <summary>
+/// The Win32 mode menu. Kept as a fallback for the case where ImGui failed to start —
+/// the app is still usable then, just plainer.
+/// </summary>
+void ShowModeMenu(int screenX, int screenY)
+{
+    var menu = Win32.CreatePopupMenu();
+    var submenus = new List<IntPtr>();
+
+    // Re-enumerated on every open, so a card plugged in mid-session is simply there.
+    try { allDevices = CaptureDevice.Enumerate(); if (model is not null) model.Devices = allDevices; }
+    catch (Exception ex) { Log.Warn($"device re-enumeration failed: {ex.Message}"); }
+
+    if (allDevices.Count > 1)
+    {
+        var devMenu = Win32.CreatePopupMenu();
+        submenus.Add(devMenu);
+        for (int i = 0; i < allDevices.Count; i++)
+        {
+            var d = allDevices[i];
+            // Never opened means never opened: showing a guess here would be a claim we
+            // have not earned, and opening every device to fill in a menu is rude.
+            var state = probed.TryGetValue(d.SymbolicLink, out var p)
+                ? p.Availability switch
+                {
+                    DeviceAvailability.Ready => $"{p.Renderable.Count()} modes, {p.Link.CeilingMiBs:0} MiB/s",
+                    DeviceAvailability.Busy => "in use elsewhere",
+                    DeviceAvailability.Unusable => "nothing renderable",
+                    _ => "unavailable"
+                }
+                : d.IsVirtual ? "software device, not checked" : "not checked yet";
+
+            uint flags = Win32.MF_STRING;
+            if (pump?.Device.Is(d) == true) flags |= Win32.MF_CHECKED;
+            Win32.AppendMenuW(devMenu, flags, (UIntPtr)(9100 + i), $"{d.FriendlyName}   ({state})");
+        }
+        Win32.AppendMenuW(menu, Win32.MF_POPUP, (UIntPtr)(long)devMenu, "Capture device");
+        Win32.AppendMenuW(menu, Win32.MF_SEPARATOR, UIntPtr.Zero, null);
+    }
+
+    foreach (var group in menuEntries.GroupBy(e => (e.Mode.Width, e.Mode.Height))
+                                     .OrderByDescending(g => g.Key.Width * g.Key.Height))
+    {
+        var sub = Win32.CreatePopupMenu();
+        submenus.Add(sub);
+
+        foreach (var e in group.OrderByDescending(e => e.Fps))
+        {
+            int id = menuEntries.IndexOf(e) + 1;
+            var m = e.Mode;
+            var bw = m.Transport == WireTransport.Raw ? $"{m.MegabytesPerSecond(e.Fps):0} MiB/s" : "compressed";
+            var label = $"{e.Fps,6:0.##} fps   {m.Format.Name,-6} {m.WireTag,-8} {bw}";
+
+            uint flags = Win32.MF_STRING;
+            if (pump?.CurrentMode?.TypeIndex == m.TypeIndex && Math.Abs(pump.CurrentFps - e.Fps) < 0.5)
+                flags |= Win32.MF_CHECKED;
+
+            Win32.AppendMenuW(sub, flags, (UIntPtr)id, label);
+        }
+
+        var raw = group.Count(e => e.Mode.Transport == WireTransport.Raw);
+        Win32.AppendMenuW(menu, Win32.MF_POPUP, (UIntPtr)(long)sub,
+            $"{group.Key.Width}x{group.Key.Height}   ({raw} raw / {group.Count() - raw} compressed)");
+    }
+
+    Win32.AppendMenuW(menu, Win32.MF_SEPARATOR, UIntPtr.Zero, null);
+    Win32.AppendMenuW(menu, Win32.MF_STRING, (UIntPtr)9999, "Quit");
+
+    Win32.SetForegroundWindow(hwnd);
+    int chosen = Win32.TrackPopupMenu(menu,
+        Win32.TPM_LEFTALIGN | Win32.TPM_TOPALIGN | Win32.TPM_RETURNCMD | Win32.TPM_RIGHTBUTTON,
+        screenX, screenY, 0, hwnd, IntPtr.Zero);
+
+    foreach (var s in submenus) Win32.DestroyMenu(s);
+    Win32.DestroyMenu(menu);
+
+    if (chosen == 9999) { quit = true; return; }
+    if (chosen is >= 9100 and < 9200)
+    {
+        // Queued like every other device-touching action: opening a capture source from
+        // inside a menu callback runs driver work on the message pump.
+        int i = chosen - 9100;
+        if (i < allDevices.Count && pump?.Device.Is(allDevices[i]) != true)
+            pendingDeviceSwitch = allDevices[i];
+        return;
+    }
+    if (chosen >= 1 && chosen <= menuEntries.Count)
+    {
+        var e = menuEntries[chosen - 1];
+        try { pump!.Select(e.Mode, e.Fps); }
+        catch (Exception ex) { Log.Error($"switch to #{e.Mode.TypeIndex} failed", ex); }
+    }
+}
+
+IntPtr WindowProc(IntPtr h, uint msg, IntPtr wParam, IntPtr lParam)
+{
+    // Any exception escaping here crosses a native callback boundary and terminates the
+    // process instead of unwinding. Nothing in a window message is worth that.
+    try { return WindowProcCore(h, msg, wParam, lParam); }
+    catch (Exception ex)
+    {
+        Log.Error($"window message {msg:X} handler failed", ex);
+        return Win32.DefWindowProcW(h, msg, wParam, lParam);
+    }
+}
+
+IntPtr WindowProcCore(IntPtr h, uint msg, IntPtr wParam, IntPtr lParam)
+{
+    if (renderer?.Ui is { Available: true } ui)
+    {
+        // WM_SETCURSOR is the only place a cursor change sticks; Windows resets it on
+        // every move, so ImGui's requested cursor has to be re-applied from here.
+        const int HTCLIENT = 1;
+        if (msg == Win32.WM_SETCURSOR && Win32.LoWord(lParam) == HTCLIENT && ui.WantsMouse)
+        {
+            ImGuiInput.ApplyCursor(ui);
+            return 1;
+        }
+
+        // A click that landed on a panel has been consumed and must not also reach the
+        // video underneath, or the right-click menu opens behind the settings window.
+        if (ImGuiInput.Handle(ui, h, msg, wParam, lParam)) return IntPtr.Zero;
+    }
+
+    switch (msg)
+    {
+        case Win32.WM_CLOSE:
+            // The title-bar X asks too, so there is exactly one way out of the app and it
+            // always confirms. Asking twice goes through, so nobody is ever trapped.
+            if (model is { ConfirmQuit: false })
+            {
+                model.ConfirmQuit = true;
+                model.ShowSettings = true;
+                model.PanelActivity();
+                return IntPtr.Zero;
+            }
+            quit = true;
+            Win32.PostQuitMessage(0);
+            return IntPtr.Zero;
+
+        case Win32.WM_DESTROY:
+            quit = true;
+            Win32.PostQuitMessage(0);
+            return IntPtr.Zero;
+
+        case Win32.WM_SIZE:
+            renderer?.Resize(Win32.LoWord(lParam), Win32.HiWord(lParam));
+            return IntPtr.Zero;
+
+        case Win32.WM_KEYDOWN:
+            HandleKey((int)wParam, h);
+            return IntPtr.Zero;
+
+        case Win32.WM_RBUTTONDOWN:
+            OpenMenuAt(h, Win32.LoWord(lParam), Win32.HiWord(lParam));
+            return IntPtr.Zero;
+    }
+    return Win32.DefWindowProcW(h, msg, wParam, lParam);
+}
+
+// The hotkeys the design specifies. Device work is queued rather than done here: touching
+// D3D from inside a window callback runs driver work on the message pump.
+void HandleKey(int vk, IntPtr h)
+{
+    // A keypress is someone using the app, so the panel's idle timer starts over.
+    model?.PanelActivity();
+
+    switch (vk)
+    {
+        case Win32.VK_ESCAPE:
+            // Esc never closes the app. It backs out of whatever is open, and when nothing
+            // is, it brings the panel up — which is where the one way out lives.
+            if (model is { ModeTableOpen: true }) { model.ModeTableOpen = false; break; }
+            if (model is { ConfirmQuit: true }) { model.ConfirmQuit = false; break; }
+            if (model is not null) { model.ShowSettings = true; model.PanelActivity(); }
+            break;
+
+        case 0x09: if (model is not null) model.ShowSettings = !model.ShowSettings; break;   // Tab
+        case 'T': if (model is not null) model.ShowTelemetry = !model.ShowTelemetry; break;
+        case 'M': if (model is not null) model.ModeTableOpen = !model.ModeTableOpen; break;
+        case 'H': pendingHdrToggle = true; break;
+        // F11 walks the three window modes, in the order the panel lists them.
+        case 0x7A: pendingWindowKind = windowMode?.Kind switch
+            {
+                WindowKind.Windowed => WindowKind.BorderlessFullscreen,
+                WindowKind.BorderlessFullscreen => WindowKind.Fullscreen,
+                _ => WindowKind.Windowed
+            }; break;
+
+        case '1': pendingScaler = 0; break;
+        case '2': pendingScaler = 1; break;
+        case '3': pendingScaler = 2; break;
+
+        // The original keys, kept because they are in muscle memory by now.
+        case 'V': pendingVsrToggle = true; break;
+        case 'N': pendingNisToggle = true; break;
+        case Win32.VK_F1: OpenMenuAt(h, 24, 24); break;
+        // Sharpness at 0 isolates what the scaler itself does, with no USM on top.
+        case 0xDB: pendingSharpness = -0.1f; break; // [
+        case 0xDD: pendingSharpness = +0.1f; break; // ]
+    }
+}
+
+/// <summary>Applies a radio choice through the toggles, which enforce the mutual exclusion.</summary>
+void SelectScaler(int want)
+{
+    var p = renderer!.Processor;
+    switch (want)
+    {
+        case 0:
+            if (renderer.NisEnabled) ToggleNis();
+            if (p?.SuperResolutionEnabled == true) ToggleVsr();
+            break;
+        case 1:
+            if (!renderer.NisEnabled) ToggleNis();
+            break;
+        default:
+            if (p?.SuperResolutionEnabled != true) ToggleVsr();
+            break;
+    }
+}
+
+void ToggleVsr()
+{
+    var p = renderer?.Processor;
+    if (p is null || !p.Available) { Log.Warn("VSR unavailable: no D3D11 video device"); return; }
+    // Only one upscaler owns the frame; enabling the driver one stands NIS down.
+    if (!p.SuperResolutionEnabled && renderer!.NisEnabled)
+    {
+        renderer.NisEnabled = false;
+        Log.Info("NIS off: RTX VSR takes the scaling path");
+    }
+    p.ToggleSuperResolution();
+    Log.Info($"VSR now {(p.SuperResolutionEnabled ? "ON" : "OFF")}" +
+             (p.LastError is null ? "" : $" ({p.LastError})"));
+}
+
+/// <summary>
+/// NIS and the driver filters both want to own the scale, and only one path can run.
+/// Turning NIS on therefore switches the driver path off rather than leaving a toggle
+/// that silently does nothing - the previous behaviour, which was simply a bug.
+/// </summary>
+void ToggleNis()
+{
+    if (renderer is null) return;
+    bool want = !renderer.NisEnabled;
+
+    if (want && renderer.UseProcessor)
+    {
+        var p = renderer.Processor!;
+        if (p.SuperResolutionEnabled) { p.ToggleSuperResolution(); Log.Info("RTX VSR off: NIS takes the scaling path"); }
+        if (p.HdrEnabled) { renderer.SetHdrOutput(false); p.ToggleHdr(); Log.Info("RTX Video HDR off: it requires the driver path"); }
+    }
+
+    renderer.NisEnabled = want;
+    Log.Info($"NIS now {(want ? "ON" : "OFF")}");
+}
+
+void ToggleHdr()
+{
+    var p = renderer?.Processor;
+    if (p is null || !p.Available) { Log.Warn("RTX HDR unavailable: no D3D11 video device"); return; }
+    if (!renderer!.DisplaySupportsHdr)
+    {
+        Log.Warn("RTX HDR unavailable: Windows has this display in SDR mode. " +
+                 "Turn HDR on in Windows display settings and restart.");
+        return;
+    }
+
+    bool want = !p.HdrEnabled;
+    // The swapchain colour space and the driver filter have to move together: PQ output
+    // with the filter off looks washed out, the filter on in sRGB output does nothing.
+    if (!renderer.SetHdrOutput(want)) return;
+    p.ToggleHdr();
+    if (p.HdrEnabled != want) renderer.SetHdrOutput(p.HdrEnabled);
+
+    Log.Info($"RTX Video HDR now {(p.HdrEnabled ? "ON" : "OFF")}" +
+             (p.LastError is null ? "" : $" ({p.LastError})"));
+}
+
+void OpenMenuAt(IntPtr h, int clientX, int clientY)
+{
+    var pt = new Win32.POINT { X = clientX, Y = clientY };
+    Win32.ClientToScreen(h, ref pt);
+    ShowModeMenu(pt.X, pt.Y);
+}
+
+/// <summary>One selectable entry: a media type plus the rate to pin it to.</summary>
+internal sealed record MenuEntry(CaptureMode Mode, double Fps);
