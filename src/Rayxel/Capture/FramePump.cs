@@ -81,6 +81,12 @@ public sealed class FramePump : IDisposable
     private double _emaPipelineDelayMs;
     private int _pipelineDelaySamples, _pipelineDelayRejected;
 
+    // Every frame's raw numbers, kept only while something is being measured. The moving
+    // averages above are right for a HUD and wrong for a comparison: they hide the tail,
+    // and the tail is where a pipeline change shows up first.
+    private double[]? _delayLog, _intervalLog;
+    private int _logCount;
+
     /// <summary>Current time on Media Foundation's clock: QPC expressed in 100 ns units.</summary>
     private static long MfSystemTime() =>
         (long)(Stopwatch.GetTimestamp() * (10_000_000.0 / Stopwatch.Frequency));
@@ -352,6 +358,31 @@ public sealed class FramePump : IDisposable
         _renderer.UploadFrame(texture, (int)dxgi.SubresourceIndex);
     }
 
+    /// <summary>
+    /// Starts keeping every frame's delay and arrival interval, for a measurement that
+    /// needs percentiles. Off unless asked for: a comparison is the only thing it is good
+    /// for, and it costs two doubles a frame.
+    /// </summary>
+    public void StartRecording(int capacity)
+    {
+        lock (_statsGate)
+        {
+            _delayLog = new double[capacity];
+            _intervalLog = new double[capacity];
+            _logCount = 0;
+        }
+    }
+
+    /// <summary>Recorded frames so far. NaN entries are frames with nothing trustworthy to say.</summary>
+    public (double[] Delays, double[] Intervals) Recording()
+    {
+        lock (_statsGate)
+        {
+            if (_delayLog is null || _intervalLog is null) return ([], []);
+            return (_delayLog[.._logCount], _intervalLog[.._logCount]);
+        }
+    }
+
     private void RecordArrival(long sampleTime100Ns)
     {
         long now = Stopwatch.GetTimestamp();
@@ -361,10 +392,13 @@ public sealed class FramePump : IDisposable
 
         lock (_statsGate)
         {
+            double intervalMs = double.NaN, delaySample = double.NaN;
+
             _framesArrived++;
             if (_lastArrivalTicks != 0)
             {
                 double ms = (now - _lastArrivalTicks) * 1000.0 / Stopwatch.Frequency;
+                intervalMs = ms;
                 // Exponential moving average: cheap, allocation-free, and reacts fast
                 // enough that a mode switch is visible within a few frames.
                 _emaIntervalMs = _emaIntervalMs == 0 ? ms : _emaIntervalMs * 0.9 + ms * 0.1;
@@ -382,6 +416,7 @@ public sealed class FramePump : IDisposable
                 double delayMs = (mfNow - sampleTime100Ns) / 10_000.0;
                 if (delayMs is > 0 and < 500)
                 {
+                    delaySample = delayMs;
                     _emaPipelineDelayMs = _emaPipelineDelayMs == 0
                         ? delayMs
                         : _emaPipelineDelayMs * 0.9 + delayMs * 0.1;
@@ -390,6 +425,13 @@ public sealed class FramePump : IDisposable
                 else _pipelineDelayRejected++;
             }
             else _pipelineDelayRejected++;
+
+            if (_delayLog is not null && _logCount < _delayLog.Length)
+            {
+                _delayLog[_logCount] = delaySample;
+                _intervalLog![_logCount] = intervalMs;
+                _logCount++;
+            }
         }
     }
 

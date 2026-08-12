@@ -87,11 +87,31 @@ public sealed record CaptureMode(
     public bool IsRenderable => Format.Name is "NV12" or "P010";
 
     /// <summary>
-    /// Worth putting in front of a user. Renderable, and fast enough to play through —
-    /// this card advertises rates down to a few frames a second, and nobody is going to
-    /// pick 5 fps for a game. They only cluttered a list that already has ninety entries.
+    /// Renderable and fast enough to play through — this card advertises rates down to a
+    /// few frames a second, and nobody is going to pick 5 fps for a game. They only
+    /// cluttered a list that already has ninety entries.
+    /// <para>
+    /// This is the honest set, redundancy included. Diagnostics want it; the UI wants
+    /// <see cref="IsOfferable"/>.
+    /// </para>
     /// </summary>
-    public bool IsOfferable => IsRenderable && MaxFps >= 29.5;
+    public bool IsUsable => IsRenderable && MaxFps >= 29.5;
+
+    /// <summary>
+    /// A codec-carrying mode that has a genuine uncompressed twin at the same format, size
+    /// and rate. There is no reason to ever pick it: it costs an encode on the device and a
+    /// decode on the host to deliver exactly what the twin delivers for neither.
+    /// <para>
+    /// Set by <see cref="CaptureDevice.ClassifyTransport"/>, and deliberately <em>not</em>
+    /// set on compressed modes that reach a rate no uncompressed format does — 4K60,
+    /// 1440p144, 1080p240 exist only because of the codec, and hiding those would remove
+    /// capability rather than clutter.
+    /// </para>
+    /// </summary>
+    public bool IsRedundant { get; init; }
+
+    /// <summary>Worth putting in front of a user.</summary>
+    public bool IsOfferable => IsUsable && !IsRedundant;
 
     /// <summary>
     /// Short tag for the UI. A trailing <c>?</c> means the mode claims to be uncompressed

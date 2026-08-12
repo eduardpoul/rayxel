@@ -344,36 +344,73 @@ public static class CaptureDevice
                 };
         }
 
-        if (!applyLinkBudget) return modes;
-
         // The budget is derived from what survived as raw. A single mis-read mode cannot
         // set it, because a budget only counts as known when two different geometries
         // agree on the same byte rate.
-        var budget = LinkBudget.Measure(modes);
-        if (!budget.Corroborated) return modes;
+        var budget = applyLinkBudget ? LinkBudget.Measure(modes) : null;
+        if (budget is { Corroborated: true })
+        {
+            for (int i = 0; i < modes.Count; i++)
+            {
+                var m = modes[i];
+                if (m.IsCompressed) continue;
+                if (m.MegabytesPerSecond(m.MaxFps) <= budget.SuspectAboveMiBs) continue;
+
+                if (m.Transport == WireTransport.CompressedDecoded)
+                {
+                    modes[i] = m with { Evidence = m.Evidence | TransportEvidence.Bandwidth };
+                    continue;
+                }
+
+                // Claims to be raw, and the device has no wire wide enough to carry it. The
+                // codec is unknown here - we only know there has to be one.
+                modes[i] = m with
+                {
+                    Transport = WireTransport.CompressedDecoded,
+                    Evidence = TransportEvidence.Bandwidth
+                };
+            }
+        }
+
+        MarkRedundant(modes);
+        return modes;
+    }
+
+    /// <summary>
+    /// Hides the modes there is no reason to ever choose: a codec-carrying entry that has a
+    /// genuine uncompressed twin at the same format, size and rate. The twin delivers the
+    /// same picture without an encode on the device and a decode on the host, so the pair
+    /// only makes the list twice as long and invites the worse half to be picked.
+    /// <para>
+    /// What survives is every compressed mode that reaches a rate no uncompressed format
+    /// does — on this card 4K60, 1440p144 and 1080p240. Those exist <em>because</em> of the
+    /// codec, and removing them would take away capability rather than clutter.
+    /// </para>
+    /// <para>
+    /// This trusts the classification to have flagged the right member of a pair. Where
+    /// hardware declares one stream and the capture stack publishes two, which of them is
+    /// the invention is not provable from the type list — but it is the same bet the
+    /// automatic mode choice already makes, and getting it backwards costs a decode rather
+    /// than a broken picture.
+    /// </para>
+    /// </summary>
+    private static void MarkRedundant(List<CaptureMode> modes)
+    {
+        var genuine = modes.Where(m => m.Transport == WireTransport.Raw && m.IsRenderable).ToList();
 
         for (int i = 0; i < modes.Count; i++)
         {
             var m = modes[i];
-            if (m.IsCompressed) continue;
-            if (m.MegabytesPerSecond(m.MaxFps) <= budget.SuspectAboveMiBs) continue;
+            if (m.Transport != WireTransport.CompressedDecoded || !m.IsRenderable) continue;
 
-            if (m.Transport == WireTransport.CompressedDecoded)
-            {
-                modes[i] = m with { Evidence = m.Evidence | TransportEvidence.Bandwidth };
-                continue;
-            }
-
-            // Claims to be raw, and the device has no wire wide enough to carry it. The
-            // codec is unknown here - we only know there has to be one.
-            modes[i] = m with
-            {
-                Transport = WireTransport.CompressedDecoded,
-                Evidence = TransportEvidence.Bandwidth
-            };
+            // The twin has to cover the whole range, not just reach the same peak: a mode
+            // offering 30-120 is not replaced by one that only does 120.
+            bool covered = genuine.Any(o => o.Format.Name == m.Format.Name
+                                            && o.Width == m.Width && o.Height == m.Height
+                                            && o.MaxFps >= m.MaxFps - 0.5
+                                            && o.MinFps <= m.MinFps + 0.5);
+            if (covered) modes[i] = m with { IsRedundant = true };
         }
-
-        return modes;
     }
 
     private static CaptureMode? Describe(int index, IMFMediaType type)

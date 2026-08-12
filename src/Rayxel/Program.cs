@@ -27,6 +27,7 @@ string? shotPath = null;
 string? forcedScreen = null;
 bool listOnly = false;
 bool usbCheck = false;
+double benchSeconds = 0;
 bool startWithTelemetry = false;
 bool noAutoHdr = false;
 bool startBorderless = false;
@@ -42,6 +43,13 @@ foreach (var arg in args)
     // the back buffer rather than the screen, so it works when the window is not visible.
     else if (arg.StartsWith("--shot=", StringComparison.OrdinalIgnoreCase)) shotPath = arg[7..];
     else if (arg is "--tele") startWithTelemetry = true;
+    // Runs a fixed measurement and exits: warm up, record every frame for N seconds,
+    // print percentiles. For comparing one pipeline configuration against another, which
+    // a moving average on a HUD cannot do.
+    else if (arg.StartsWith("--bench", StringComparison.OrdinalIgnoreCase))
+        benchSeconds = arg.Length > 8 && double.TryParse(arg[8..],
+            System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture,
+            out double bs) ? bs : 20;
     // Starts on our own shader instead of following the Windows HDR state, so the driver
     // path can be taken out of the picture when comparing what is actually on screen.
     else if (arg is "--no-auto-hdr") noAutoHdr = true;
@@ -458,7 +466,9 @@ void CrossCheckCounts(UsbVideoInfo usb, DeviceProbe probe)
     var over = new List<string>();
     var under = new List<string>();
 
-    foreach (var group in probe.Modes.Where(m => m.IsOfferable)
+    // IsUsable, not IsOfferable: the redundant entries are exactly what this is counting,
+    // and filtering them out first would make the check agree with itself by construction.
+    foreach (var group in probe.Modes.Where(m => m.IsUsable)
                                      .GroupBy(m => (m.Format.Name, m.Width, m.Height, Fps: Math.Round(m.MaxFps, 1))))
     {
         var (name, w, h, fps) = group.Key;
@@ -534,7 +544,7 @@ void ReportByResolution(UsbVideoInfo usb, DeviceProbe probe)
                                                   fr.Rates.Any(r => Math.Abs(r - fps) < 0.6)));
 
     var resolutions = probe.Modes
-        .Where(m => m.IsOfferable)
+        .Where(m => m.IsUsable)
         .Select(m => (m.Width, m.Height))
         .Distinct()
         .OrderByDescending(r => r.Width * (long)r.Height)
@@ -548,7 +558,7 @@ void ReportByResolution(UsbVideoInfo usb, DeviceProbe probe)
         Log.Info($"    {w}x{h}   hardware: uncompressed to {rawMax:0.##} fps, mjpeg to {jpegMax:0.##} fps");
 
         var offered = probe.Modes
-            .Where(m => m.IsOfferable && m.Width == w && m.Height == h)
+            .Where(m => m.IsUsable && m.Width == w && m.Height == h)
             .GroupBy(m => Math.Round(m.MaxFps, 1))
             .OrderByDescending(g => g.Key);
 
@@ -575,6 +585,59 @@ void ReportByResolution(UsbVideoInfo usb, DeviceProbe probe)
     }
 }
 
+/// <summary>
+/// Whether Windows is routing capture through the frame server process. Absent means on:
+/// the value only ever exists because someone turned it off deliberately.
+/// </summary>
+bool FrameServerEnabled()
+{
+    using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
+        @"SOFTWARE\Microsoft\Windows Media Foundation\Platform");
+    return key?.GetValue("EnableFrameServerMode") is not int v || v != 0;
+}
+
+/// <summary>
+/// One fixed measurement window, reported as percentiles rather than an average.
+/// <para>
+/// Averages are the wrong tool for a pipeline comparison: two configurations can share a
+/// mean and differ entirely in the tail, and the tail is what is felt. The number that
+/// carries the most here is <b>pipeline delay</b> — the sample's own capture timestamp
+/// against the clock when <c>ReadSample</c> returned. Everything between the sensor and us
+/// is inside it: the exposure, the USB transfer, any decode, and the hop out of the frame
+/// server process into ours.
+/// </para>
+/// </summary>
+void ReportBench(FramePump pump, TimeSpan window, TimeSpan cpu)
+{
+    var (delays, intervals) = pump.Recording();
+    var d = delays.Where(x => !double.IsNaN(x)).OrderBy(x => x).ToArray();
+    var iv = intervals.Where(x => !double.IsNaN(x)).OrderBy(x => x).ToArray();
+
+    static double P(double[] sorted, int pct) => sorted.Length == 0 ? 0
+        : sorted[Math.Clamp((int)Math.Round(pct / 100.0 * (sorted.Length - 1)), 0, sorted.Length - 1)];
+
+    Log.Section($"bench — {pump.CurrentMode?.Describe(pump.CurrentFps) ?? "no mode"}");
+    Log.Info($"  frame server      {(FrameServerEnabled() ? "ON (Windows default)" : "OFF")}");
+    Log.Info($"  window            {window.TotalSeconds:0.0} s, {intervals.Length} frames, " +
+             $"{intervals.Length / window.TotalSeconds:0.0} fps");
+    Log.Info($"  our process CPU   {cpu.TotalMilliseconds / window.TotalSeconds:0.0} ms per second, " +
+             $"{cpu.TotalMilliseconds / Math.Max(1, intervals.Length):0.000} ms per frame");
+
+    if (d.Length < 30)
+        Log.Warn($"  pipeline delay    only {d.Length} trustworthy sample(s) - the source is not " +
+                 "stamping on the system clock, so this run cannot be compared");
+    else
+        Log.Info($"  pipeline delay    min {P(d, 0):0.00}   p50 {P(d, 50):0.00}   p95 {P(d, 95):0.00}   " +
+                 $"p99 {P(d, 99):0.00}   max {P(d, 100):0.00} ms   (n={d.Length})");
+
+    if (iv.Length >= 30)
+        Log.Info($"  arrival interval  min {P(iv, 0):0.00}   p50 {P(iv, 50):0.00}   p95 {P(iv, 95):0.00}   " +
+                 $"p99 {P(iv, 99):0.00}   max {P(iv, 100):0.00} ms");
+
+    var s = pump.Snapshot();
+    Log.Info($"  dropped {s.FramesDropped}, late {s.FramesLate}");
+}
+
 /// <summary>Everything one device turned out to be, in the log and on stdout.</summary>
 void Report(DeviceProbe p)
 {
@@ -590,6 +653,11 @@ void Report(DeviceProbe p)
 
     int renderable = p.Renderable.Count();
     Log.Info($"  state  ready - {p.Modes.Count} modes, {renderable} renderable");
+
+    int hidden = p.Modes.Count(m => m.IsRedundant);
+    if (hidden > 0)
+        Log.Info($"  hidden {hidden} codec mode(s) that duplicate an uncompressed twin exactly - " +
+                 $"{p.Modes.Count(m => m.IsOfferable)} offered");
     Log.Info($"  wire   {p.Count(WireTransport.Raw)} raw / " +
              $"{p.Count(WireTransport.CompressedDecoded)} compressed-but-labelled-raw / " +
              $"{p.Count(WireTransport.Compressed)} compressed");
@@ -617,6 +685,9 @@ void RunLoop()
     var frameClock = System.Diagnostics.Stopwatch.StartNew();
     var sampleClock = System.Diagnostics.Stopwatch.StartNew();
     var retryClock = System.Diagnostics.Stopwatch.StartNew();
+    var benchClock = System.Diagnostics.Stopwatch.StartNew();
+    bool benchRecording = false;
+    TimeSpan benchCpuStart = TimeSpan.Zero;
     var audioRetryClock = System.Diagnostics.Stopwatch.StartNew();
     var displayClock = System.Diagnostics.Stopwatch.StartNew();
     var saveClock = System.Diagnostics.Stopwatch.StartNew();
@@ -801,6 +872,27 @@ void RunLoop()
             renderer.SaveBackBuffer(shotPath);
             shotPath = null;
             quit = true;
+        }
+
+        // Fixed measurement, then exit. The warm-up is not politeness: the first second
+        // after a mode starts is the device locking on and the driver settling, and
+        // averaging that in would blame or flatter whatever is being compared.
+        if (benchSeconds > 0)
+        {
+            if (!benchRecording && pump.State == CaptureState.Streaming && presented > 300)
+            {
+                benchRecording = true;
+                pump.StartRecording(500_000);
+                benchCpuStart = System.Diagnostics.Process.GetCurrentProcess().TotalProcessorTime;
+                benchClock.Restart();
+                Log.Info($"bench: warm, recording for {benchSeconds:0.#} s");
+            }
+            else if (benchRecording && benchClock.Elapsed.TotalSeconds >= benchSeconds)
+            {
+                ReportBench(pump, benchClock.Elapsed,
+                            System.Diagnostics.Process.GetCurrentProcess().TotalProcessorTime - benchCpuStart);
+                quit = true;
+            }
         }
 
         // Settings are compared rather than tracked. Threading a "changed" flag through
