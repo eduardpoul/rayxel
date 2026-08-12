@@ -403,14 +403,24 @@ void CrossCheckUsb(CaptureDeviceInfo device, DeviceProbe probe)
 
     if (usb.Endpoints.Count > 0)
     {
-        Log.Info("  streaming endpoints:");
+        Log.Info("  endpoints:");
         foreach (var ep in usb.Endpoints)
         {
             string burst = ep.Burst >= 0 ? $", burst {ep.Burst + 1}" : "";
             string perInterval = ep.BytesPerInterval > 0 ? $", {ep.BytesPerInterval} bytes/interval" : "";
             Log.Info($"    0x{ep.Address:X2} {(ep.In ? "in " : "out")} {ep.Kind,-12} " +
+                     $"{(ep.OnVideoControl ? "VideoControl " : "VideoStreaming")}  " +
                      $"{ep.MaxPacketSize} bytes/packet{burst}{perInterval}");
         }
+
+        // The only way a UVC device can say something it was not asked. Without one it can
+        // answer questions and nothing more — no arriving message of any kind can reach the
+        // host until the host happens to poll for it.
+        bool canInterrupt = usb.Endpoints.Any(e => e.OnVideoControl && e.Kind == "interrupt");
+        Log.Info(canInterrupt
+            ? "    a VideoControl interrupt endpoint exists - the card can raise events unprompted"
+            : "    no VideoControl interrupt endpoint - the card cannot raise an event at all, " +
+              "it can only answer what it is asked");
     }
 
     // The device's whole control surface. Anything not listed here cannot be asked of it
@@ -432,6 +442,8 @@ void CrossCheckUsb(CaptureDeviceInfo device, DeviceProbe probe)
               "is nothing to send a proprietary command through"
             : $"    {extensions.Count} extension unit(s) - a vendor channel exists, though what " +
               "it carries is undocumented");
+
+        foreach (var xu in extensions) ProbeExtensionUnit(device, xu);
     }
 
     Log.Info($"  {usb.Formats.Count} format(s) declared by the hardware:");
@@ -708,6 +720,83 @@ void ReportBench(FramePump pump, TimeSpan window, TimeSpan cpu,
 
     var s = pump.Snapshot();
     Log.Info($"  dropped {s.FramesDropped}, late {s.FramesLate}");
+}
+
+/// <summary>
+/// Asks a vendor extension unit what each of its controls is: readable, writable, how long,
+/// and what it holds right now.
+/// <para>
+/// The descriptor says how many controls exist and nothing else. What they mean stays the
+/// vendor's business, but shape is evidence — a sixteen-byte control that reads back a
+/// plausible message frame is a different kind of thing from a one-byte flag, and neither
+/// needs a datasheet to notice.
+/// </para>
+/// <para>Only GET is ever issued. Writing blind into an undocumented control is how an EDID
+/// gets overwritten, and nothing here needs to write to learn anything.</para>
+/// </summary>
+void ProbeExtensionUnit(CaptureDeviceInfo device, UsbControlUnit xu)
+{
+    if (xu.ExtensionGuid is not { } guid) return;
+
+    int count = Math.Max(xu.UnnamedControls, 1);
+    Log.Info($"  probing extension unit {guid}, {count} control(s) - reads only:");
+
+    var controls = ExtensionUnit.Probe(device, guid, count);
+    if (controls is null) { Log.Warn("    the unit could not be reached"); return; }
+
+    // Several reads, seconds apart, at the lengths already found. A control holding
+    // configuration returns the same bytes every time; one reporting live state does not;
+    // and one returning a different value on every single read is a third thing again —
+    // a window onto something rather than a value. Without this they all look alike.
+    var rounds = new List<List<XuControl>> { controls };
+    for (int i = 0; i < 4; i++)
+    {
+        System.Threading.Thread.Sleep(700);
+        if (ExtensionUnit.Reread(device, guid, controls) is { } round) rounds.Add(round);
+    }
+    var again = rounds.Count > 1 ? rounds[^1] : null;
+
+    int answered = 0, live = 0;
+    foreach (var c in controls)
+    {
+        string access = (c.CanGet ? "get" : "---") + "/" + (c.CanSet ? "set" : "---");
+        if (c.Length == 0)
+        {
+            Log.Info($"    #{c.Selector,-3} {access}  {c.Error ?? "no answer"}");
+            continue;
+        }
+
+        answered++;
+
+        // How many distinct values across every round. One means fixed; a few means it
+        // reports something that moves; as many as there were reads means the control is
+        // not a value at all.
+        int distinct = rounds
+            .Select(r => r.FirstOrDefault(x => x.Selector == c.Selector)?.Current ?? [])
+            .Select(Convert.ToHexString)
+            .Distinct()
+            .Count();
+        bool changed = distinct > 1;
+        if (changed) live++;
+        string churn = distinct == 1 ? "    "
+            : distinct >= rounds.Count ? "NEW " : "LIVE";
+
+        // Long buffers are dumped truncated: the first 48 bytes carry any header worth
+        // recognising, and 256 bytes of zeroes across a log line teaches nothing.
+        var shown = c.Current.AsSpan(0, Math.Min(48, c.Current.Length));
+        var hex = Convert.ToHexString(shown);
+        var ascii = new string(shown.ToArray().Select(b => b is >= 0x20 and < 0x7F ? (char)b : '.').ToArray());
+        bool allZero = c.Current.All(b => b == 0);
+
+        Log.Info($"    #{c.Selector,-3} {access}  {c.Length,4} byte(s) {churn} {distinct}/{rounds.Count}  " +
+                 (allZero ? "all zero" : $"{hex}{(c.Current.Length > 48 ? "..." : "")}  |{ascii}|"));
+    }
+
+    Log.Info($"    {answered} of {controls.Count} answered over {rounds.Count} reads; " +
+             $"{live} returned more than one value");
+    if (answered == 0)
+        Log.Warn("    nothing answered - the unit is declared but not reachable through KS, " +
+                 "which usually means Windows needs a registry mapping for this GUID");
 }
 
 /// <summary>Everything one device turned out to be, in the log and on stdout.</summary>

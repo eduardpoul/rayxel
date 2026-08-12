@@ -50,6 +50,9 @@ public sealed record UsbEndpoint(int Address, string Kind, int MaxPacketSize, in
     /// <summary>Bytes per service interval from the SuperSpeed companion. Isochronous only.</summary>
     public uint BytesPerInterval { get; init; }
 
+    /// <summary>On the VideoControl interface rather than VideoStreaming.</summary>
+    public bool OnVideoControl { get; init; }
+
     public bool In => (Address & 0x80) != 0;
 }
 
@@ -523,7 +526,7 @@ public static class UsbDescriptors
                     ParseClassSpecific(d, formats, ref current);
                     break;
 
-                case DescriptorEndpoint when inVideoStreaming && length >= 7:
+                case DescriptorEndpoint when (inVideoStreaming || inVideoControl) && length >= 7:
                 {
                     ushort maxPacket = BitConverter.ToUInt16(d[4..6]);
                     int size = maxPacket & 0x7FF;
@@ -531,13 +534,21 @@ public static class UsbDescriptors
                     byte interval = d[6];
                     int kind = d[3] & 0x03;
 
+                    // VideoControl endpoints matter as much as streaming ones here: an
+                    // interrupt endpoint on VideoControl is the only way a UVC device can
+                    // tell the host something it was not asked, so its absence rules out
+                    // anything the card would need to report unprompted.
                     endpoints.Add(new UsbEndpoint(d[2], kind switch
                     {
                         0 => "control",
                         1 => "isochronous",
                         2 => "bulk",
                         _ => "interrupt"
-                    }, size, interval) { AdditionalTransactions = extra });
+                    }, size, interval)
+                    {
+                        AdditionalTransactions = extra,
+                        OnVideoControl = inVideoControl
+                    });
 
                     // Only isochronous endpoints reserve bandwidth, so only they state a
                     // ceiling. Bulk gets whatever is left over and declares nothing.
