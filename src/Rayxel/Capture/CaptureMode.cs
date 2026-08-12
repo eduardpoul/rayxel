@@ -44,7 +44,19 @@ public enum TransportEvidence
     /// modes reveal. Physical, and works on hardware whose publishing order we have
     /// never seen.
     /// </summary>
-    Bandwidth = 2
+    Bandwidth = 2,
+
+    /// <summary>
+    /// The device's own USB descriptors settle it. Not a detector at all — the hardware
+    /// states which formats it has and at what rates, so where this applies there is
+    /// nothing left to infer.
+    /// <para>
+    /// It does not always apply. Where the hardware declares one stream and the capture
+    /// stack publishes two, the descriptors prove one of them is invented and cannot say
+    /// which; there the count is fact and the choice is still the detectors'.
+    /// </para>
+    /// </summary>
+    Descriptor = 4
 }
 
 /// <summary>

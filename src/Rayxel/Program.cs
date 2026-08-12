@@ -120,8 +120,12 @@ try
 
     if (usbCheck)
     {
+        // Deliberately not through Remember: that applies the descriptor corrections, and a
+        // check of the detectors against the descriptors is worth nothing once the
+        // descriptors have already rewritten what it is checking. This is the raw
+        // inference, which is the only thing here that can still be wrong.
         foreach (var d in allDevices.Where(x => !x.IsVirtual))
-            CrossCheckUsb(d, Remember(CaptureDevice.Probe(d)));
+            CrossCheckUsb(d, CaptureDevice.Probe(d));
         return 0;
     }
 
@@ -361,7 +365,7 @@ static MenuEntry? RememberedMode(DeviceProbe probe, AppSettings settings)
 // transfer time, and doing it here means a device swapped mid-session gets it too.
 DeviceProbe Remember(DeviceProbe p)
 {
-    CaptureDevice.MeasureWire(p);
+    CaptureDevice.ApplyHardwareFacts(p);
     probed[p.Device.SymbolicLink] = p;
     return p;
 }
@@ -482,6 +486,8 @@ void CrossCheckUsb(CaptureDeviceInfo device, DeviceProbe probe)
 void CrossCheckCounts(UsbVideoInfo usb, DeviceProbe probe)
 {
     Log.Info("  cross-check against the hardware's own frame lists:");
+    Log.Info("    (the classification here is the two detectors alone - the app itself now " +
+             "lets the descriptors overrule them, which would make this agree with itself)");
 
     int totalWindows = 0, totalGenuine = 0, totalFlagged = 0;
     var over = new List<string>();
@@ -714,6 +720,16 @@ void Report(DeviceProbe p)
     if (p.BandwidthOnlyDetections > 0)
         Log.Warn($"  infer  {p.BandwidthOnlyDetections} mode(s) claim to be uncompressed but do not fit " +
                  $"the {p.Link.CeilingMiBs:0} MiB/s link - treated as compressed on that basis alone");
+
+    // Where the hardware speaks for itself there is nothing left to infer, so it is worth
+    // saying how much of the classification is fact and how much is still reasoning.
+    if (p.DescriptorsRead)
+    {
+        Log.Info($"  descr  {p.DescriptorBacked} of {p.Modes.Count} mode(s) settled by the device's own descriptors");
+        if (p.DescriptorCorrections > 0)
+            Log.Warn($"         {p.DescriptorCorrections} mode(s) were reclassified - the detectors " +
+                     "had them wrong and the hardware overruled them");
+    }
 
     if (p.WireMiBs > 0)
         Log.Info($"  carry  {p.WireMiBs:0} MiB/s" +

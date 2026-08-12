@@ -66,6 +66,18 @@ public sealed record DeviceProbe(
     /// </summary>
     public double WireMiBs { get; set; }
 
+    /// <summary>True when the device answered the hub IOCTLs and its own format list was read.</summary>
+    public bool DescriptorsRead { get; set; }
+
+    /// <summary>
+    /// Modes whose transport the descriptors overruled — where the two detectors, reasoning
+    /// about a list Windows composed, disagreed with what the hardware says it has.
+    /// </summary>
+    public int DescriptorCorrections { get; set; }
+
+    /// <summary>Modes the hardware itself settles, rather than either detector inferring.</summary>
+    public int DescriptorBacked => Modes.Count(m => m.Evidence.HasFlag(TransportEvidence.Descriptor));
+
     /// <summary>
     /// Modes only the link-budget detector caught: they claim to be uncompressed and the
     /// capture stack gave no structural hint, but the wire cannot carry them. Worth saying
@@ -389,22 +401,130 @@ public static class CaptureDevice
     }
 
     /// <summary>
-    /// Fills in what the wire really carries, from the device's own USB descriptors.
+    /// Replaces inference with the device's own account of itself, where it can be had.
     /// <para>
-    /// The inferred ceiling is a fine fallback but it is not the same quantity: it is the
-    /// byte rate of the fastest mode offered — where the wire ran out — rather than the
-    /// speed of the wire. On the ShadowCast the two are 356 and 405 MiB/s, and end-to-end
-    /// timing of four different frame sizes put the truth at ~400.
+    /// Two things come out of the USB descriptors. The <b>link speed</b>, which the
+    /// inferred ceiling only approximates — that figure is the byte rate of the fastest
+    /// mode offered, where the wire ran out, not the speed of the wire. On the ShadowCast
+    /// the two are 356 and 405 MiB/s and end-to-end timing of four frame sizes put the
+    /// truth at ~400. And the <b>real format list</b>, which settles most of what the two
+    /// detectors were guessing at.
     /// </para>
-    /// <para>Read-only, opens no stream, and takes the device away from nobody.</para>
+    /// <para>Read-only, opens no stream, and takes the device away from nobody. Everything
+    /// here is best-effort: a device that will not answer keeps the inferred answers.</para>
     /// </summary>
-    public static void MeasureWire(DeviceProbe probe)
+    public static void ApplyHardwareFacts(DeviceProbe probe)
     {
         probe.WireMiBs = probe.Link.CeilingMiBs;
         if (probe.Device.IsVirtual) return;
 
-        if (UsbDescriptors.Read(probe.Device)?.PracticalBytesPerSecond is > 0 and var bytes)
-            probe.WireMiBs = bytes / (1024 * 1024);
+        var usb = UsbDescriptors.Read(probe.Device);
+        if (usb is null || usb.Formats.Count == 0) return;
+
+        probe.DescriptorsRead = true;
+        if (usb.PracticalBytesPerSecond > 0)
+            probe.WireMiBs = usb.PracticalBytesPerSecond / (1024 * 1024);
+
+        probe.DescriptorCorrections = CorrectFromDescriptors(probe.Modes, usb);
+
+        // Reclassification can create or destroy a raw twin, so redundancy has to be
+        // decided again against the corrected list.
+        MarkRedundant(probe.Modes);
+    }
+
+    /// <summary>
+    /// Rewrites the transport classification from what the hardware declares.
+    /// <para>
+    /// Both detectors are inferences about a list Windows composed. The configuration
+    /// descriptor is the device's own statement, and comparing them per fourcc, geometry
+    /// and rate gives three cases:
+    /// </para>
+    /// <list type="bullet">
+    /// <item>Hardware declares none — every entry Windows publishes there is decoder
+    /// output. Provable, and it is where the honest compressed modes live: 4K60 and
+    /// 1080p240 exist only because of the codec.</item>
+    /// <item>Hardware declares as many as Windows publishes — none is invented. Provable,
+    /// and it can <em>clear</em> a flag the adjacency rule got wrong.</item>
+    /// <item>Windows publishes more than the hardware declares — the surplus is proved and
+    /// its identity is not. The count is forced; which entries carry it stays the
+    /// detectors' choice.</item>
+    /// </list>
+    /// <para>Returns how many modes changed transport.</para>
+    /// </summary>
+    private static int CorrectFromDescriptors(List<CaptureMode> modes, UsbVideoInfo usb)
+    {
+        int changed = 0;
+
+        // Only the uncompressed-looking types are in question. A mode whose own subtype is
+        // a codec was never claiming otherwise, and nothing here can improve on that.
+        foreach (var group in modes.Select((m, i) => (Mode: m, Index: i))
+                                   .Where(e => !e.Mode.IsCompressed)
+                                   .GroupBy(e => (e.Mode.Format.Name, e.Mode.Width, e.Mode.Height,
+                                                  Fps: Math.Round(e.Mode.MaxFps, 1))))
+        {
+            var (name, w, h, fps) = group.Key;
+
+            bool Uncompressed(UsbFormat f) =>
+                !f.Compressed && string.Equals(f.Name, name, StringComparison.OrdinalIgnoreCase);
+
+            // A fourcc the descriptor walk could not name, or one Windows calls something
+            // else, would look like "the hardware has none of these" and condemn every
+            // entry. Absence of evidence, so say nothing about this format at all.
+            if (!usb.Formats.Any(Uncompressed)) continue;
+
+            int declared = usb.Formats.Count(f => Uncompressed(f)
+                && f.Frames.Any(fr => fr.Width == w && fr.Height == h
+                                      && fr.Rates.Any(r => Math.Abs(r - fps) < 0.6)));
+
+            var entries = group.OrderBy(e => e.Mode.TypeIndex).ToList();
+            int invented = Math.Max(0, entries.Count - declared);
+
+            var fake = new HashSet<int>();
+            if (invented >= entries.Count)
+            {
+                fake.UnionWith(entries.Select(e => e.Index));
+            }
+            else if (invented > 0)
+            {
+                // Keep the detectors' choice where it fits the proven count, then top up.
+                // The top-up order is a tie-break, not a finding: nothing here knows which
+                // of two identical-looking entries is the device's own.
+                foreach (var e in entries.Where(e => e.Mode.Transport == WireTransport.CompressedDecoded))
+                    if (fake.Count < invented) fake.Add(e.Index);
+                foreach (var e in Enumerable.Reverse(entries))
+                    if (fake.Count < invented) fake.Add(e.Index);
+            }
+
+            foreach (var e in entries)
+            {
+                bool shouldBeFake = fake.Contains(e.Index);
+                bool isFake = e.Mode.Transport == WireTransport.CompressedDecoded;
+
+                if (shouldBeFake == isFake)
+                {
+                    // Already right: record that the hardware backs it, so the reason can
+                    // be told apart from a guess later.
+                    modes[e.Index] = e.Mode with { Evidence = e.Mode.Evidence | TransportEvidence.Descriptor };
+                    continue;
+                }
+
+                modes[e.Index] = shouldBeFake
+                    ? e.Mode with
+                    {
+                        Transport = WireTransport.CompressedDecoded,
+                        Evidence = e.Mode.Evidence | TransportEvidence.Descriptor
+                    }
+                    : e.Mode with
+                    {
+                        Transport = WireTransport.Raw,
+                        Evidence = TransportEvidence.Descriptor,
+                        WireCodec = null
+                    };
+                changed++;
+            }
+        }
+
+        return changed;
     }
 
     /// <summary>
