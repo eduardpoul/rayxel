@@ -26,6 +26,7 @@ string? deviceSelector = null;
 string? shotPath = null;
 string? forcedScreen = null;
 string? forcedMode = null;
+int forcedScaler = -1;
 bool listOnly = false;
 bool usbCheck = false;
 double benchSeconds = 0;
@@ -58,6 +59,15 @@ foreach (var arg in args)
     // Pins the starting mode, as --mode=1280x720@60. A comparison needs a control, and
     // "whatever was remembered from last time" is not one.
     else if (arg.StartsWith("--mode=", StringComparison.OrdinalIgnoreCase)) forcedMode = arg[7..];
+    // Pins the scaler for the same reason: --scaler=none|nis|vsr.
+    else if (arg.StartsWith("--scaler=", StringComparison.OrdinalIgnoreCase))
+        forcedScaler = arg[9..].ToLowerInvariant() switch
+        {
+            "none" or "off" or "0" => 0,
+            "nis" or "1" => 1,
+            "vsr" or "rtx" or "2" => 2,
+            _ => -1
+        };
     // Forces a screen so the splash and picker can be inspected without racing them.
     else if (arg.StartsWith("--screen=", StringComparison.OrdinalIgnoreCase)) forcedScreen = arg[9..];
     else if (!arg.StartsWith('-')) deviceSelector = arg;
@@ -611,16 +621,20 @@ bool FrameServerEnabled()
 /// server process into ours.
 /// </para>
 /// </summary>
-void ReportBench(FramePump pump, TimeSpan window, TimeSpan cpu)
+void ReportBench(FramePump pump, TimeSpan window, TimeSpan cpu,
+                 double[] gpuMs, double[] cpuMs, string scalerPath, string composition)
 {
     var (delays, intervals) = pump.Recording();
     var d = delays.Where(x => !double.IsNaN(x)).OrderBy(x => x).ToArray();
     var iv = intervals.Where(x => !double.IsNaN(x)).OrderBy(x => x).ToArray();
+    var g = gpuMs.Where(x => x > 0).OrderBy(x => x).ToArray();
+    var c = cpuMs.Where(x => x > 0).OrderBy(x => x).ToArray();
 
     static double P(double[] sorted, int pct) => sorted.Length == 0 ? 0
         : sorted[Math.Clamp((int)Math.Round(pct / 100.0 * (sorted.Length - 1)), 0, sorted.Length - 1)];
 
     Log.Section($"bench — {pump.CurrentMode?.Describe(pump.CurrentFps) ?? "no mode"}");
+    Log.Info($"  path              {scalerPath},  present {composition}");
     Log.Info($"  frame server      {(FrameServerEnabled() ? "ON (Windows default)" : "OFF")}");
     Log.Info($"  window            {window.TotalSeconds:0.0} s, {intervals.Length} frames, " +
              $"{intervals.Length / window.TotalSeconds:0.0} fps");
@@ -650,6 +664,13 @@ void ReportBench(FramePump pump, TimeSpan window, TimeSpan cpu)
     if (iv.Length >= 30)
         Log.Info($"  arrival interval  min {P(iv, 0):0.00}   p50 {P(iv, 50):0.00}   p95 {P(iv, 95):0.00}   " +
                  $"p99 {P(iv, 99):0.00}   max {P(iv, 100):0.00} ms");
+
+    if (g.Length >= 30)
+        Log.Info($"  our GPU per frame min {P(g, 0):0.00}   p50 {P(g, 50):0.00}   p95 {P(g, 95):0.00}   " +
+                 $"p99 {P(g, 99):0.00}   max {P(g, 100):0.00} ms");
+    if (c.Length >= 30)
+        Log.Info($"  our CPU per frame min {P(c, 0):0.00}   p50 {P(c, 50):0.00}   p95 {P(c, 95):0.00}   " +
+                 $"p99 {P(c, 99):0.00}   max {P(c, 100):0.00} ms");
 
     var s = pump.Snapshot();
     Log.Info($"  dropped {s.FramesDropped}, late {s.FramesLate}");
@@ -705,6 +726,10 @@ void RunLoop()
     var benchClock = System.Diagnostics.Stopwatch.StartNew();
     bool benchRecording = false;
     TimeSpan benchCpuStart = TimeSpan.Zero;
+    // Our own per-present cost, sampled beside the capture delay so the whole budget can
+    // be read off one report instead of two.
+    var benchGpu = new List<double>();
+    var benchCpu = new List<double>();
     var audioRetryClock = System.Diagnostics.Stopwatch.StartNew();
     var displayClock = System.Diagnostics.Stopwatch.StartNew();
     var saveClock = System.Diagnostics.Stopwatch.StartNew();
@@ -778,6 +803,7 @@ void RunLoop()
 
         model!.AppCpuMs = appCpuMs;
         model.GpuMs = renderer.LastGpuMs;
+        if (benchRecording) { benchGpu.Add(renderer.LastGpuMs); benchCpu.Add(appCpuMs); }
         renderer.OverlayNits = model.OverlayNits;
         renderer.VideoNits = model.VideoNits;
         // A pending capture holds the panel open: otherwise the idle timer hides it before
@@ -812,9 +838,12 @@ void RunLoop()
         if (deferredStatePending && renderer.Processor is { OutputWidth: > 0 })
         {
             deferredStatePending = false;
-            if (settings.Scaler != 0)
+            // --scaler wins over what was remembered: a measurement needs the scaler it
+            // asked for, not the one left over from the last session.
+            int wantScaler = forcedScaler >= 0 ? forcedScaler : settings.Scaler;
+            if (wantScaler != 0 || forcedScaler == 0)
             {
-                try { SelectScaler(settings.Scaler); }
+                try { SelectScaler(wantScaler); }
                 catch (Exception ex) { Log.Error("restoring the scaler failed", ex); }
             }
             // Only the driver path can produce HDR, so a remembered NIS choice takes it away.
@@ -906,8 +935,14 @@ void RunLoop()
             }
             else if (benchRecording && benchClock.Elapsed.TotalSeconds >= benchSeconds)
             {
+                string path = renderer.NisEnabled ? "NIS"
+                    : renderer.Processor?.SuperResolutionEnabled == true ? "RTX VSR"
+                    : "no scaler";
+                if (renderer.Processor?.HdrEnabled == true) path += " + RTX HDR";
+
                 ReportBench(pump, benchClock.Elapsed,
-                            System.Diagnostics.Process.GetCurrentProcess().TotalProcessorTime - benchCpuStart);
+                            System.Diagnostics.Process.GetCurrentProcess().TotalProcessorTime - benchCpuStart,
+                            [.. benchGpu], [.. benchCpu], path, renderer.DescribeCompositionMode());
                 quit = true;
             }
         }
@@ -968,6 +1003,11 @@ static MenuEntry? ForcedMode(DeviceProbe probe, string? spec)
 {
     if (string.IsNullOrWhiteSpace(spec)) return null;
 
+    // Optional format suffix, as 1920x1080@60:P010. Needed because two formats share a
+    // geometry and rate and differ enormously in bytes - which is the point of measuring.
+    string? want = null;
+    if (spec.Split(':') is [var head, var fmt]) { spec = head; want = fmt; }
+
     var at = spec.Split('@');
     var wh = at[0].Split('x', 'X');
     if (wh.Length != 2 || !int.TryParse(wh[0], out int w) || !int.TryParse(wh[1], out int h))
@@ -984,6 +1024,7 @@ static MenuEntry? ForcedMode(DeviceProbe probe, string? spec)
     var match = probe.Renderable
         .Where(m => m.Width == w && m.Height == h && m.IsOfferable)
         .Where(m => fps <= 0 || (fps >= m.MinFps - 0.5 && fps <= m.MaxFps + 0.5))
+        .Where(m => want is null || m.Format.Name.Equals(want, StringComparison.OrdinalIgnoreCase))
         .OrderBy(m => m.HasCodecInPath ? 1 : 0)
         .ThenByDescending(m => m.MaxFps)
         .FirstOrDefault();
