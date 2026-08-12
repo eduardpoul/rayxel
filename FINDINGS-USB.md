@@ -186,10 +186,16 @@ sounds.
    entries at one rate and compare — the decoded one costs CPU and carries 8×8 ringing.
    That is the only remaining gap in the classification, and it needs a measurement rather
    than a descriptor.
-2. **Feed the descriptors back into the app**, not just into this report. The highest
-   uncompressed rate the hardware declares is the truth for a resolution, so any Windows
-   entry above it can be marked synthesized with certainty instead of inference — turning
-   the app's two indirect detectors into one fact wherever a device answers these IOCTLs.
+2. ~~Feed the descriptors back into the app.~~ **Done.** The app reads them at probe time
+   and lets them overrule both detectors: where the hardware declares none of a format at a
+   size and rate, every entry there is decoder output; where it declares as many as Windows
+   publishes, none is — and that can *clear* a flag the adjacency rule got wrong, which no
+   amount of inference could. Where Windows publishes more, the count is forced and the
+   identity stays a guess. 177 of 241 modes on this card are now hardware-settled, and
+   nothing needed reclassifying. The link speed comes from the same read.
+
+   `--usb` deliberately probes *without* the corrections: a check of the detectors against
+   the descriptors is worth nothing once the descriptors have rewritten what it checks.
 3. **Not WinUSB, and not the frame server switch.** Both were on this list before the
    measurement above; both are now bounded at 0.15 ms and neither is worth what it costs.
 2. Nothing to do about the bandwidth ceiling. There is no declared figure to read — this
