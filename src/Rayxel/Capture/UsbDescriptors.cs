@@ -17,6 +17,27 @@ public sealed record UsbFrame(int Index, int Width, int Height, List<double> Rat
     public uint MaxFrameBytes { get; init; }
 }
 
+/// <summary>
+/// One unit or terminal of the VideoControl interface — the device's control surface.
+/// <para>
+/// This is the whole list of what a UVC device will let a host ask of it. Standard
+/// controls (brightness, exposure, zoom) live on the processing unit and the camera
+/// terminal; anything a vendor invents has to arrive as an <em>extension unit</em>, which
+/// is the only place a proprietary channel such as HDMI CEC could exist.
+/// </para>
+/// </summary>
+public sealed record UsbControlUnit(string Kind, int Id, string Detail)
+{
+    /// <summary>The vendor's own GUID, for an extension unit. Null for everything else.</summary>
+    public Guid? ExtensionGuid { get; init; }
+
+    /// <summary>Named controls this unit declares, from its bmControls bitmap.</summary>
+    public IReadOnlyList<string> Controls { get; init; } = [];
+
+    /// <summary>Controls the bitmap sets that have no name in the spec — a vendor's own.</summary>
+    public int UnnamedControls { get; init; }
+}
+
 /// <summary>One endpoint of the VideoStreaming interface, as the device declares it.</summary>
 public sealed record UsbEndpoint(int Address, string Kind, int MaxPacketSize, int Interval)
 {
@@ -71,6 +92,9 @@ public sealed record UsbVideoInfo(
     };
 
     public List<UsbEndpoint> Endpoints { get; init; } = [];
+
+    /// <summary>Everything the VideoControl interface declares it can be asked.</summary>
+    public List<UsbControlUnit> ControlUnits { get; init; } = [];
 
     /// <summary>Which hub and port answered, so it can be found in Device Manager.</summary>
     public string Location { get; init; } = "";
@@ -140,7 +164,7 @@ public static class UsbDescriptors
                     var config = ReadConfigurationDescriptor(hub, port);
                     if (config is null) continue;
 
-                    var (formats, endpoints, ceiling, source) = ParseVideoStreaming(config);
+                    var (formats, endpoints, units, ceiling, source) = ParseVideoStreaming(config);
                     var link = ResolveSpeed(hub, port, conn, endpoints, config);
 
                     Log.Debug($"port match on hub port {port}: {SpeedName(link.Code)}, {formats.Count} formats, " +
@@ -157,6 +181,7 @@ public static class UsbDescriptors
                             SpeedCode = link.Code,
                             DowngradedLink = link.CapableOfSuperSpeed && link.Code < 3,
                             Endpoints = endpoints,
+                            ControlUnits = units,
                             Location = $"port {port} of {ShortHubName(hubPath)}",
                         };
                     }
@@ -450,6 +475,7 @@ public static class UsbDescriptors
     private const byte DescriptorSsCompanion = 0x30;
 
     private const byte ClassVideo = 0x0E;
+    private const byte SubclassVideoControl = 0x01;
     private const byte SubclassVideoStreaming = 0x02;
 
     /// <summary>
@@ -457,13 +483,15 @@ public static class UsbDescriptors
     /// declares: its formats, their frames, and the bandwidth its isochronous endpoints
     /// are willing to carry.
     /// </summary>
-    private static (List<UsbFormat> Formats, List<UsbEndpoint> Endpoints, double Ceiling, string Source)
+    private static (List<UsbFormat> Formats, List<UsbEndpoint> Endpoints, List<UsbControlUnit> Units,
+                    double Ceiling, string Source)
         ParseVideoStreaming(byte[] config)
     {
         var formats = new List<UsbFormat>();
         var endpoints = new List<UsbEndpoint>();
+        var units = new List<UsbControlUnit>();
         UsbFormat? current = null;
-        bool inVideoStreaming = false;
+        bool inVideoStreaming = false, inVideoControl = false;
         double ceiling = 0;
         string source = "no isochronous endpoint found";
 
@@ -479,7 +507,16 @@ public static class UsbDescriptors
             switch (type)
             {
                 case DescriptorInterface:
-                    inVideoStreaming = length >= 8 && d[5] == ClassVideo && d[6] == SubclassVideoStreaming;
+                    bool video = length >= 8 && d[5] == ClassVideo;
+                    inVideoStreaming = video && d[6] == SubclassVideoStreaming;
+                    inVideoControl = video && d[6] == SubclassVideoControl;
+                    break;
+
+                case DescriptorCsInterface when inVideoControl && length >= 3:
+                    // Raw bytes too: every offset in here is hand-counted against the UVC
+                    // spec, and a wrong one is silent rather than loud.
+                    Log.Debug($"  VC descriptor subtype 0x{d[2]:X2}: {Convert.ToHexString(d)}");
+                    if (ParseControlUnit(d) is { } unit) units.Add(unit);
                     break;
 
                 case DescriptorCsInterface when inVideoStreaming && length >= 3:
@@ -551,8 +588,134 @@ public static class UsbDescriptors
             i += length;
         }
 
-        return (formats, endpoints, ceiling, source);
+        return (formats, endpoints, units, ceiling, source);
     }
+
+    // ── VideoControl: the device's control surface ───────────────────────────────
+
+    private static readonly string[] ProcessingControls =
+    [
+        "brightness", "contrast", "hue", "saturation", "sharpness", "gamma",
+        "white balance temperature", "white balance component", "backlight compensation",
+        "gain", "power line frequency", "hue auto", "white balance temperature auto",
+        "white balance component auto", "digital multiplier", "digital multiplier limit",
+        "analog video standard", "analog video lock status", "contrast auto"
+    ];
+
+    private static readonly string[] CameraControls =
+    [
+        "scanning mode", "auto exposure mode", "auto exposure priority",
+        "exposure time absolute", "exposure time relative", "focus absolute",
+        "focus relative", "iris absolute", "iris relative", "zoom absolute",
+        "zoom relative", "pan/tilt absolute", "pan/tilt relative", "roll absolute",
+        "roll relative", "reserved", "reserved", "focus auto", "privacy"
+    ];
+
+    /// <summary>
+    /// One VideoControl unit or terminal. This is the complete list of what the device
+    /// will let a host ask of it — anything not here cannot be requested at all.
+    /// </summary>
+    private static UsbControlUnit? ParseControlUnit(ReadOnlySpan<byte> d)
+    {
+        const byte VcHeader = 0x01, VcInputTerminal = 0x02, VcOutputTerminal = 0x03;
+        const byte VcSelectorUnit = 0x04, VcProcessingUnit = 0x05, VcExtensionUnit = 0x06;
+
+        switch (d[2])
+        {
+            case VcHeader when d.Length >= 12:
+                return new UsbControlUnit("header", 0,
+                    $"UVC {(d[4] << 8 | d[3]) >> 8:x}.{(d[3] & 0xFF) >> 4:x}, {d[11]} streaming interface(s)");
+
+            case VcInputTerminal when d.Length >= 8:
+            {
+                int terminalType = BitConverter.ToUInt16(d[4..6]);
+                var unit = new UsbControlUnit("input terminal", d[3], TerminalName(terminalType));
+
+                // A camera terminal carries its own control bitmap: pan, tilt, zoom, focus.
+                // An HDMI input has nothing to pan, so this is normally empty or absent.
+                if (terminalType == 0x0201 && d.Length >= 15)
+                {
+                    int size = d[14];
+                    var (named, unnamed) = ReadControls(d, 15, size, CameraControls);
+                    return unit with { Controls = named, UnnamedControls = unnamed };
+                }
+                return unit;
+            }
+
+            case VcOutputTerminal when d.Length >= 9:
+                return new UsbControlUnit("output terminal", d[3],
+                    $"{TerminalName(BitConverter.ToUInt16(d[4..6]))}, from unit {d[7]}");
+
+            case VcSelectorUnit when d.Length >= 5:
+                return new UsbControlUnit("selector unit", d[3], $"{d[4]} input pin(s)");
+
+            case VcProcessingUnit when d.Length >= 8:
+            {
+                int size = d[7];
+                var (named, unnamed) = ReadControls(d, 8, size, ProcessingControls);
+                return new UsbControlUnit("processing unit", d[3], $"{named.Count + unnamed} control(s)")
+                {
+                    Controls = named,
+                    UnnamedControls = unnamed
+                };
+            }
+
+            case VcExtensionUnit when d.Length >= 24:
+            {
+                // The only place a vendor can put anything of its own — a proprietary
+                // channel over UVC has to arrive here or not at all.
+                var guid = new Guid(d[4..20]);
+                int pins = d[21];
+                int sizeAt = 22 + pins;
+                int size = sizeAt < d.Length ? d[sizeAt] : 0;
+                var (_, unnamed) = ReadControls(d, sizeAt + 1, size, []);
+
+                return new UsbControlUnit("EXTENSION UNIT", d[3],
+                    $"{d[20]} control(s) declared, {unnamed} set in the bitmap")
+                {
+                    ExtensionGuid = guid,
+                    UnnamedControls = unnamed
+                };
+            }
+        }
+        return null;
+    }
+
+    /// <summary>Reads a bmControls bitmap and names the bits the spec names.</summary>
+    private static (List<string> Named, int Unnamed) ReadControls(
+        ReadOnlySpan<byte> d, int at, int size, string[] names)
+    {
+        var named = new List<string>();
+        int unnamed = 0;
+
+        for (int b = 0; b < size && at + b < d.Length; b++)
+            for (int bit = 0; bit < 8; bit++)
+            {
+                if ((d[at + b] & (1 << bit)) == 0) continue;
+                int index = b * 8 + bit;
+                if (index < names.Length && names[index] != "reserved") named.Add(names[index]);
+                else unnamed++;
+            }
+
+        return (named, unnamed);
+    }
+
+    private static string TerminalName(int type) => type switch
+    {
+        0x0100 => "vendor specific",
+        0x0101 => "streaming",
+        0x0200 => "input, vendor specific",
+        0x0201 => "camera",
+        0x0202 => "media transport input",
+        0x0300 => "output, vendor specific",
+        0x0301 => "display",
+        0x0302 => "media transport output",
+        0x0400 => "external, vendor specific",
+        0x0401 => "composite connector",
+        0x0402 => "s-video connector",
+        0x0403 => "component connector",
+        _ => $"unknown (0x{type:X4})"
+    };
 
     private static void ParseClassSpecific(ReadOnlySpan<byte> d, List<UsbFormat> formats, ref UsbFormat? current)
     {

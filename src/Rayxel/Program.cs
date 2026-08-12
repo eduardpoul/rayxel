@@ -413,6 +413,27 @@ void CrossCheckUsb(CaptureDeviceInfo device, DeviceProbe probe)
         }
     }
 
+    // The device's whole control surface. Anything not listed here cannot be asked of it
+    // at all — and a vendor channel such as HDMI CEC would have to arrive as an extension
+    // unit, because UVC has nowhere else to put one.
+    if (usb.ControlUnits.Count > 0)
+    {
+        Log.Info("  control surface (VideoControl interface):");
+        foreach (var u in usb.ControlUnits)
+        {
+            Log.Info($"    {u.Kind,-16} id {u.Id,-3} {u.Detail}");
+            if (u.ExtensionGuid is { } g) Log.Info($"                        guid {g}");
+            if (u.Controls.Count > 0) Log.Info($"                        {string.Join(", ", u.Controls)}");
+        }
+
+        var extensions = usb.ControlUnits.Where(u => u.ExtensionGuid is not null).ToList();
+        Log.Info(extensions.Count == 0
+            ? "    no extension unit - the device declares no vendor channel at all, so there " +
+              "is nothing to send a proprietary command through"
+            : $"    {extensions.Count} extension unit(s) - a vendor channel exists, though what " +
+              "it carries is undocumented");
+    }
+
     Log.Info($"  {usb.Formats.Count} format(s) declared by the hardware:");
 
     foreach (var f in usb.Formats)
