@@ -66,7 +66,9 @@ public sealed class AppModel
     /// <summary>Time since the panel was last touched. It hides itself once this runs out.</summary>
     public double PanelIdleMs;
 
-    /// <summary>Height the telemetry block took last frame, so the gear can sit clear of it.</summary>
+    /// <summary>Height the telemetry block took last frame. Nothing reads it since the
+    /// corner gear went; kept because the overlay measures itself anyway and the next thing
+    /// placed against that block will want it.</summary>
     public float TelemetryHeight;
 
     /// <summary>

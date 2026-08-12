@@ -27,8 +27,9 @@ public static class AppShell
                     Screens.NoSignal(model, fonts);
 
                 if (model.ShowTelemetry) TelemetryOverlay.Draw(model, fonts);
+                // Nothing is drawn over the video when the panel is away. The way back in
+                // is Esc, or the window's own system menu — see Program's WM_SYSCOMMAND.
                 if (model.ShowSettings) SettingsPanel.Draw(model, fonts);
-                else Gear(model);
                 if (model.ConfirmQuit) QuitDialog(model, fonts);
                 break;
         }
@@ -105,76 +106,6 @@ public static class AppShell
         unsafe { if (fonts.Body.NativePtr != null) ImGui.PopFont(); }
 
         return clicked;
-    }
-
-    /// <summary>
-    /// The way back in once the panel has hidden itself. Almost invisible until the
-    /// pointer is near it — the video is the point, and a permanent button over it is not.
-    /// </summary>
-    /// <summary>
-    /// The way back in once the panel has hidden itself: a translucent cog in the top
-    /// right, the corner the panel comes from and the one place it can never collide with
-    /// the telemetry block opposite.
-    /// </summary>
-    private static void Gear(AppModel model)
-    {
-        float size = Layout.S(34);
-        float inset = Layout.S(16);
-
-        ImGui.SetNextWindowPos(new Vector2(model.Renderer.Width - size - inset, inset), ImGuiCond.Always);
-        ImGui.SetNextWindowSize(new Vector2(size, size), ImGuiCond.Always);
-        ImGui.PushStyleColor(ImGuiCol.WindowBg, new Vector4(0, 0, 0, 0));
-        ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, Vector2.Zero);
-
-        const ImGuiWindowFlags flags = ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoResize
-            | ImGuiWindowFlags.NoMove | ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoNav
-            | ImGuiWindowFlags.NoFocusOnAppearing | ImGuiWindowFlags.NoBackground;
-
-        if (ImGui.Begin("##gear", flags))
-        {
-            var pos = ImGui.GetCursorScreenPos();
-            bool clicked = ImGui.InvisibleButton("##gearbtn", new Vector2(size, size));
-            bool hovered = ImGui.IsItemHovered();
-
-            DrawCog(ImGui.GetWindowDrawList(), pos + new Vector2(size / 2f), size,
-                    Theme.Alpha(Theme.TextPrimary, hovered ? 0.92f : 0.42f));
-
-            if (clicked) { model.ShowSettings = true; model.PanelActivity(); }
-        }
-        ImGui.End();
-
-        ImGui.PopStyleVar();
-        ImGui.PopStyleColor();
-    }
-
-    /// <summary>
-    /// An ordinary cog: a ring with eight square teeth and a hollow centre. Drawn rather
-    /// than set as a glyph because the bundled fonts carry no icon set, and the previous
-    /// attempt — spokes radiating from a circle — read as a compass rather than a gear.
-    /// </summary>
-    private static void DrawCog(ImDrawListPtr draw, Vector2 centre, float size, Vector4 colour)
-    {
-        uint tint = Theme.U32(colour);
-        float rim = size * 0.29f;              // radius of the ring, through the tooth roots
-        float rimThickness = size * 0.115f;    // heavy enough to read at this size
-        float toothLength = size * 0.10f;
-        float toothWidth = size * 0.115f;
-
-        draw.AddCircle(centre, rim, tint, 32, rimThickness);
-
-        for (int i = 0; i < 8; i++)
-        {
-            float a = i * MathF.PI / 4f;
-            var dir = new Vector2(MathF.Cos(a), MathF.Sin(a));
-            var side = new Vector2(-dir.Y, dir.X) * (toothWidth / 2f);
-            var innerEdge = centre + dir * (rim - rimThickness * 0.3f);
-            var outerEdge = centre + dir * (rim + toothLength);
-
-            draw.AddQuadFilled(innerEdge - side, outerEdge - side, outerEdge + side, innerEdge + side, tint);
-        }
-
-        // The hollow centre is what makes it a cog and not a flower.
-        draw.AddCircle(centre, size * 0.115f, tint, 16, Math.Max(1f, size * 0.06f));
     }
 
     /// <summary>

@@ -182,6 +182,8 @@ try
     const int WindowWidth = 1600, WindowHeight = 900;
     hwnd = Win32.CreateAppWindow("Rayxel", wndProc, WindowWidth, WindowHeight,
                                  AppIcon.Large, AppIcon.Small);
+    // A way into the panel that needs no hotkey and draws nothing over the video.
+    Win32.AddSystemMenuItem(hwnd, Win32.SC_APP_SETTINGS, Strings.T("params"));
     // A swapchain behind another window is not composed at all, which shows up as
     // "present: None" and makes the composition reading meaningless. Coming up in front
     // is also just what a video window should do.
@@ -1391,6 +1393,14 @@ IntPtr WindowProcCore(IntPtr h, uint msg, IntPtr wParam, IntPtr lParam)
             renderer?.Resize(Win32.LoWord(lParam), Win32.HiWord(lParam));
             return IntPtr.Zero;
 
+        // The window's own menu, from a right-click on the title bar or Alt+Space. With the
+        // corner gear gone this is the only way back to the panel that does not need a
+        // hotkey to be known first. Windows uses the low four bits of wParam itself, hence
+        // the mask.
+        case Win32.WM_SYSCOMMAND when ((int)wParam & 0xFFF0) == Win32.SC_APP_SETTINGS:
+            if (model is not null) { model.ShowSettings = true; model.PanelActivity(); }
+            return IntPtr.Zero;
+
         case Win32.WM_KEYDOWN:
             HandleKey((int)wParam, h);
             return IntPtr.Zero;
@@ -1412,11 +1422,15 @@ void HandleKey(int vk, IntPtr h)
     switch (vk)
     {
         case Win32.VK_ESCAPE:
-            // Esc never closes the app. It backs out of whatever is open, and when nothing
-            // is, it brings the panel up — which is where the one way out lives.
+            // Esc never closes the app. It backs out of the innermost thing that is open,
+            // and once nothing is nested it toggles the panel: same key in, same key out.
             if (model is { ModeTableOpen: true }) { model.ModeTableOpen = false; break; }
             if (model is { ConfirmQuit: true }) { model.ConfirmQuit = false; break; }
-            if (model is not null) { model.ShowSettings = true; model.PanelActivity(); }
+            if (model is not null)
+            {
+                model.ShowSettings = !model.ShowSettings;
+                if (model.ShowSettings) model.PanelActivity();
+            }
             break;
 
         case 0x09: if (model is not null) model.ShowSettings = !model.ShowSettings; break;   // Tab

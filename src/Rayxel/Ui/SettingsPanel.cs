@@ -685,8 +685,9 @@ public static class SettingsPanel
         if (Widgets.Toggle("##tele", ref tele)) { model.ShowTelemetry = tele; model.Touch(); }
 
         ImGui.PushTextWrapPos(0);
+        // Esc leads, because with the corner gear gone it is the way in as well as out.
         Widgets.Text(fonts.MonoTiny, Theme.TextFaint,
-            $"Tab {Strings.T("kUi")} · T {Strings.T("kTele")} · M {Strings.T("kModes")} · " +
+            $"Esc/Tab {Strings.T("kUi")} · T {Strings.T("kTele")} · M {Strings.T("kModes")} · " +
             $"F11 {Strings.T("kWin")} · 1/2/3 {Strings.T("kPath")}");
         ImGui.PopTextWrapPos();
 

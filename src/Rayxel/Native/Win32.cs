@@ -218,6 +218,42 @@ public static unsafe class Win32
         return hwnd;
     }
 
+    public const int WM_SYSCOMMAND = 0x0112;
+
+    /// <summary>
+    /// Our own command in the window's system menu — the one a right-click on the title bar
+    /// opens. Ids there must be below 0xF000, which is where the system's own start, and a
+    /// multiple of 16: Windows uses the low four bits of wParam internally, so an id that
+    /// sets them comes back changed.
+    /// </summary>
+    public const int SC_APP_SETTINGS = 0x1010;
+
+    [DllImport("user32.dll")] public static extern IntPtr GetSystemMenu(IntPtr hwnd, bool revert);
+    // CharSet.Unicode is not decoration: without it the runtime marshals the string as ANSI
+    // and hands an 8-bit pointer to a W function, which renders as garbage — and worse for
+    // "Параметры" than for "Settings", so it would have looked fine in the wrong language.
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern bool InsertMenuW(IntPtr menu, uint position, uint flags,
+                                          UIntPtr id, string? text);
+
+    public const uint MF_BYPOSITION = 0x0400;
+
+    /// <summary>
+    /// Puts an item at the top of the window's system menu. Inserted rather than appended:
+    /// the system menu ends with Close, and burying ours under it reads as an afterthought.
+    /// <para>
+    /// Only reachable while the window has a frame — the borderless mode has no title bar to
+    /// right-click, which is exactly when the panel's own hotkey is the way in.
+    /// </para>
+    /// </summary>
+    public static void AddSystemMenuItem(IntPtr hwnd, int id, string text)
+    {
+        var menu = GetSystemMenu(hwnd, false);
+        if (menu == IntPtr.Zero) return;
+        InsertMenuW(menu, 0, MF_BYPOSITION | MF_STRING, (UIntPtr)id, text);
+        InsertMenuW(menu, 1, MF_BYPOSITION | MF_SEPARATOR, UIntPtr.Zero, null);
+    }
+
     /// <summary>Title bar, taskbar button and Alt-Tab. Either handle may be zero.</summary>
     public static void SetWindowIcon(IntPtr hwnd, IntPtr icon, IntPtr smallIcon)
     {
