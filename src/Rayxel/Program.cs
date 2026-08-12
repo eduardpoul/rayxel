@@ -25,6 +25,7 @@ Strings.Use(settings.Language);
 string? deviceSelector = null;
 string? shotPath = null;
 string? forcedScreen = null;
+string? forcedMode = null;
 bool listOnly = false;
 bool usbCheck = false;
 double benchSeconds = 0;
@@ -54,6 +55,9 @@ foreach (var arg in args)
     // path can be taken out of the picture when comparing what is actually on screen.
     else if (arg is "--no-auto-hdr") noAutoHdr = true;
     else if (arg is "--borderless") startBorderless = true;
+    // Pins the starting mode, as --mode=1280x720@60. A comparison needs a control, and
+    // "whatever was remembered from last time" is not one.
+    else if (arg.StartsWith("--mode=", StringComparison.OrdinalIgnoreCase)) forcedMode = arg[7..];
     // Forces a screen so the splash and picker can be inspected without racing them.
     else if (arg.StartsWith("--screen=", StringComparison.OrdinalIgnoreCase)) forcedScreen = arg[9..];
     else if (!arg.StartsWith('-')) deviceSelector = arg;
@@ -218,7 +222,7 @@ try
     if (forcedScreen == "modes") model.ModeTableOpen = true;
     if (forcedScreen == "quit") model.ConfirmQuit = true;
 
-    var initial = RememberedMode(active, settings) ?? PickInitialMode(active);
+    var initial = ForcedMode(active, forcedMode) ?? RememberedMode(active, settings) ?? PickInitialMode(active);
     if (initial is null) { Log.Error("no renderable mode found"); return 1; }
     pump.Select(initial.Mode, initial.Fps);
     ReportFirstFrame(pump);
@@ -623,6 +627,19 @@ void ReportBench(FramePump pump, TimeSpan window, TimeSpan cpu)
     Log.Info($"  our process CPU   {cpu.TotalMilliseconds / window.TotalSeconds:0.0} ms per second, " +
              $"{cpu.TotalMilliseconds / Math.Max(1, intervals.Length):0.000} ms per frame");
 
+    // How much of the delay is simply the frame crossing the wire. At the top modes this
+    // card uses most of the link, so it is not a rounding term - it is nearly all of it,
+    // and anything blamed on software has to be what is left after subtracting it.
+    if (pump.CurrentMode is { IsCompressed: false } m)
+    {
+        double mib = m.Format.BytesPerFrame(m.Width, m.Height) / (1024.0 * 1024.0);
+        double wireMiBs = (UsbDescriptors.Read(pump.Device)?.PracticalBytesPerSecond ?? 0) / (1024 * 1024);
+        Log.Info(wireMiBs > 0
+            ? $"  frame on the wire {mib:0.000} MiB, about {mib / wireMiBs * 1000:0.00} ms across a " +
+              $"{wireMiBs:0} MiB/s link - the rest of the delay is everything else"
+            : $"  frame on the wire {mib:0.000} MiB (link speed unknown)");
+    }
+
     if (d.Length < 30)
         Log.Warn($"  pipeline delay    only {d.Length} trustworthy sample(s) - the source is not " +
                  "stamping on the system clock, so this run cannot be compared");
@@ -943,6 +960,46 @@ void RunLoop()
 /// A card with nothing raw still gets opened — a compressed picture beats no picture, and
 /// the readout says plainly which one is on screen.
 /// </summary>
+/// <summary>
+/// Starts on a named mode, as <c>1280x720@60</c>. Only for measurement: comparing two runs
+/// means pinning the mode, and "whatever was remembered" is not a control.
+/// </summary>
+static MenuEntry? ForcedMode(DeviceProbe probe, string? spec)
+{
+    if (string.IsNullOrWhiteSpace(spec)) return null;
+
+    var at = spec.Split('@');
+    var wh = at[0].Split('x', 'X');
+    if (wh.Length != 2 || !int.TryParse(wh[0], out int w) || !int.TryParse(wh[1], out int h))
+    {
+        Log.Warn($"--mode={spec}: expected WIDTHxHEIGHT[@FPS]");
+        return null;
+    }
+    double fps = at.Length > 1 && double.TryParse(at[1], System.Globalization.NumberStyles.Float,
+                                                  System.Globalization.CultureInfo.InvariantCulture,
+                                                  out double f) ? f : 0;
+
+    // Uncompressed first: a measurement of the pipeline wants the path without a decoder
+    // in it, and both entries exist at most sizes.
+    var match = probe.Renderable
+        .Where(m => m.Width == w && m.Height == h && m.IsOfferable)
+        .Where(m => fps <= 0 || (fps >= m.MinFps - 0.5 && fps <= m.MaxFps + 0.5))
+        .OrderBy(m => m.HasCodecInPath ? 1 : 0)
+        .ThenByDescending(m => m.MaxFps)
+        .FirstOrDefault();
+
+    if (match is null)
+    {
+        Log.Warn($"--mode={spec}: no renderable mode matches");
+        return null;
+    }
+
+    double pick = fps > 0 ? fps : match.MaxFps;
+    Log.Info($"--mode={spec} -> #{match.TypeIndex} {match.Width}x{match.Height} @ {pick:0.##} " +
+             $"{match.Format.Name} [{match.WireTag}]");
+    return new MenuEntry(match, pick);
+}
+
 static MenuEntry? PickInitialMode(DeviceProbe probe)
 {
     var best = probe.BestRaw ?? probe.Renderable

@@ -146,6 +146,40 @@ ceiling it inferred is the real one.
 Meanwhile MJPEG's 4K60 would need 712 MiB/s uncompressed — well past the link — which is
 the structural reason those modes cannot be what Windows claims they are.
 
+### Measuring the link instead of computing it
+
+`--bench=<seconds>` records every frame's delay for a fixed window — the sample's own
+capture timestamp against the clock when `ReadSample` returned, so everything between the
+card and us is inside it. Run against three modes with the frame server on:
+
+| Mode | Frame | Wire time at 405 MiB/s | Measured p50 | Left over |
+|---|---|---|---|---|
+| 1280×720 @ 60 | 1.318 MiB | 3.25 ms | **3.43 ms** | 0.18 |
+| 1920×1080 @ 60 | 2.966 MiB | 7.32 ms | **7.53 ms** | 0.21 |
+| 1920×1080 @ 120 | 2.966 MiB | 7.32 ms | **7.68 ms** | 0.36 |
+
+The delay tracks frame size, not frame rate. Fitting a line through the two 60 fps points:
+
+```
+slope      (7.53 - 3.43) / (2.966 - 1.318)  =  2.49 ms per MiB  ->  402 MiB/s
+intercept   3.43 - 1.318 x 2.49             =  0.15 ms
+```
+
+**402 MiB/s measured, against 405 MiB/s computed from the negotiated SuperSpeed link.**
+Within one percent, from a completely different direction — descriptors said what the link
+should carry, and the clock says what it does.
+
+The intercept is the part that is not the wire: driver, frame server, the hop into our
+process, our own read. **0.15 ms.** That is the whole software budget of the Windows
+capture stack on this path, and it bounds what any change to it could win. Turning the
+frame server off, or replacing the entire stack with WinUSB, cannot beat 0.15 ms out of
+7.5 — because the other 7.3 ms is bytes crossing a wire, and no software moves them faster.
+
+The one route that could beat it is not a faster stack but an earlier start: uploading rows
+to the GPU as they arrive instead of waiting for a whole frame. That changes *when*
+displaying begins, not how fast the bytes move, and it is a much larger change than it
+sounds.
+
 ## What is worth doing next
 
 1. **Tell the pair apart.** The count is settled; the identity is not. Open both NV12
@@ -156,6 +190,8 @@ the structural reason those modes cannot be what Windows claims they are.
    uncompressed rate the hardware declares is the truth for a resolution, so any Windows
    entry above it can be marked synthesized with certainty instead of inference — turning
    the app's two indirect detectors into one fact wherever a device answers these IOCTLs.
+3. **Not WinUSB, and not the frame server switch.** Both were on this list before the
+   measurement above; both are now bounded at 0.15 ms and neither is worth what it costs.
 2. Nothing to do about the bandwidth ceiling. There is no declared figure to read — this
    card moves video over **bulk** transfers, and bulk endpoints reserve no bandwidth, so
    they state no rate the way isochronous ones do. The inferred value has now been checked
