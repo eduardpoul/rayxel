@@ -8,12 +8,6 @@ publish/
 logs/
 *.log
 
-# Font binaries are not committed: bundling someone else's OFL faces is a licensing
-# decision, and the app falls back to system faces without them.
-# See src/Rayxel/Assets/Fonts/README.md
-src/Rayxel/Assets/Fonts/*.ttf
-src/Rayxel/Assets/Fonts/*.otf
-
 # Visual Studio / Rider / VS Code scratch
 .vs/
 .idea/
