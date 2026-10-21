@@ -17,6 +17,21 @@
   <a href="FINDINGS-LATENCY.md">Latency findings</a>
 </p>
 
+<p align="center">
+  <img src="docs/screenshots/overview.jpg" alt="Rayxel in borderless full screen on a 3440×1440 monitor, showing a Nintendo Switch 2 home screen with the one-line telemetry at the top left and the control bar at the bottom">
+</p>
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/capture-modes.jpg" alt="The capture-mode list: uncompressed modes first, each with its rate, format, time on the USB wire and a raw or zip tag"></td>
+    <td width="50%"><img src="docs/screenshots/scaling.jpg" alt="The scaling list: no processing, NIS and RTX Video Super Resolution, each with its cost per frame"></td>
+  </tr>
+  <tr>
+    <td><sub>Capture modes, uncompressed first, with the time each takes on the USB wire.</sub></td>
+    <td><sub>Scaling, with what each option costs per frame.</sub></td>
+  </tr>
+</table>
+
 ---
 
 Rayxel shows the picture from a USB capture card — a Nintendo Switch 2 or a Steam Deck on a
