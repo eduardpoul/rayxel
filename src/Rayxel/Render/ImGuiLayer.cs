@@ -87,9 +87,10 @@ public sealed class ImGuiLayer : IDisposable
 
             // Size the atlas for the biggest window this display can give us, so going
             // full screen later does not need the whole thing rebuilt mid-frame.
-            int screenHeight = Native.Win32.GetSystemMetrics(Native.Win32.SM_CYSCREEN);
+            int screenHeight = Math.Max(Native.Win32.GetSystemMetrics(Native.Win32.SM_CYSCREEN),
+                                        Ui.Layout.DisplayHeight);
             Ui.Layout.SetAtlasFactor(Ui.Layout.ZoomFor(screenHeight));
-            Ui.Layout.Update(height);
+            Ui.Layout.Update(width, height);
             Ui.Theme.Apply();
 
             // Before the atlas is built: adding fonts afterwards would need it rebuilt.
@@ -221,8 +222,8 @@ public sealed class ImGuiLayer : IDisposable
         io.DisplaySize = new Vector2(width, height);
         io.DisplayFramebufferScale = Vector2.One;
 
-        // Layout follows the window height; the glyphs are scaled to match the atlas.
-        Ui.Layout.Update(height);
+        // Layout follows the monitor, capped by the window; the glyphs are scaled to match the atlas.
+        Ui.Layout.Update(width, height);
         io.FontGlobalScale = Ui.Layout.FontScale;
 
         // Style metrics are absolute pixels, so they have to be recomputed when the window

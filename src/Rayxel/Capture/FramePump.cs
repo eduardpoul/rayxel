@@ -106,6 +106,17 @@ public sealed class FramePump : IDisposable
     public string? StateDetail { get; private set; }
 
     /// <summary>
+    /// The device was lost because another application is already streaming from it. Kept
+    /// apart from <see cref="StateDetail"/>, which is a sentence for the log, so the
+    /// interface can say "in use" in the user's language instead of matching on English.
+    /// </summary>
+    public bool HeldElsewhere => StateDetail == HeldElsewhereDetail;
+
+    private const string HeldElsewhereDetail =
+        "another application is already streaming from this device - Windows allows the "
+        + "open, but the hardware feeds only one consumer at a time";
+
+    /// <summary>
     /// Current state, with a watchdog folded in: a device that is open and erroring is
     /// visibly broken, but a device that is open and simply silent looks identical to a
     /// working one from the API's side. The only way to tell is to notice frames stopped.
@@ -327,9 +338,7 @@ public sealed class FramePump : IDisposable
         // MF_E_HW_MFT_FAILED_START_STREAMING. This is what a device already in use looks
         // like: opening it succeeds, setting a media type succeeds, and only the first
         // read says no. Retrying cannot help while the other application is still running.
-        unchecked((int)0xC00D3704) =>
-            "another application is already streaming from this device - Windows allows the "
-            + "open, but the hardware feeds only one consumer at a time",
+        unchecked((int)0xC00D3704) => HeldElsewhereDetail,
 
         // HRESULT_FROM_WIN32(ERROR_GEN_FAILURE).
         unchecked((int)0x8007001F) => "the device stopped responding - most likely unplugged",

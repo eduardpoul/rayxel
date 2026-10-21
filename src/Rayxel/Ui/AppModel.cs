@@ -7,6 +7,9 @@ namespace Rayxel.Ui;
 
 public enum Screen { Splash, Devices, App }
 
+/// <summary>What is open above the bottom bar. One at a time, like any Fluent flyout.</summary>
+public enum Flyout { None, Mode, Scaler, More }
+
 /// <summary>Which of the design's four states the app is in right now.</summary>
 public enum AppStatus { Nominal, Compressed, Partial, NoSignal }
 
@@ -52,8 +55,24 @@ public sealed class AppModel
     // Interface state. None of it survives a restart, by design.
     public Screen Screen = Screen.Splash;
     public bool ShowTelemetry;          // off by default, per the handoff
-    public bool ShowSettings = true;
-    public bool ModeTableOpen;
+
+    /// <summary>The one-line readout, or the full card with the graph. T walks off → line → card.</summary>
+    public bool TelemetryDetailed;
+
+    /// <summary>
+    /// Whether the bottom bar is wanted. It comes up on any pointer movement or on Esc and
+    /// goes away by itself — see <see cref="PanelIdleMs"/> — so this is never persisted:
+    /// every start shows it for a moment, which is how anyone finds out it exists.
+    /// </summary>
+    public bool ShowBar = true;
+
+    /// <summary>
+    /// How far the bar has faded in, 0 to 1. Follows <see cref="ShowBar"/> over a sixth of
+    /// a second, Fluent's own duration for a surface appearing.
+    /// </summary>
+    public float BarFade;
+
+    public Flyout Flyout;
     public float OverlayNits = 230f;
 
     /// <summary>Level our own shader encodes the video at for a PQ swapchain.</summary>
@@ -63,7 +82,13 @@ public sealed class AppModel
     /// <summary>Diagnostic only: renders the no-signal card without unplugging anything.</summary>
     public bool ForceNoSignal;
 
-    /// <summary>Time since the panel was last touched. It hides itself once this runs out.</summary>
+    /// <summary>Diagnostic only: the "device in use" card, without a second app holding the card.</summary>
+    public bool ForceBusy;
+
+    /// <summary>Diagnostic only: the compositor warning, on a swapchain that is in fact on an overlay plane.</summary>
+    public bool ForceComposed;
+
+    /// <summary>Time since the bar was last touched. It hides itself once this runs out.</summary>
     public double PanelIdleMs;
 
     /// <summary>Height the telemetry block took last frame. Nothing reads it since the
@@ -79,6 +104,42 @@ public sealed class AppModel
 
     public void PanelActivity() => PanelIdleMs = 0;
 
+    /// <summary>The pointer moved over the window: bring the bar up and start its five seconds over.</summary>
+    public void PointerMoved()
+    {
+        ShowBar = true;
+        PanelIdleMs = 0;
+    }
+
+    /// <summary>Opens <paramref name="which"/>, or closes it if it is the one already open.</summary>
+    public void ToggleFlyout(Flyout which)
+    {
+        Flyout = Flyout == which ? Flyout.None : which;
+        ShowBar = true;
+        PanelIdleMs = 0;
+    }
+
+    /// <summary>Off, then the one-line readout, then the full card, then off again.</summary>
+    public void CycleTelemetry()
+    {
+        if (!ShowTelemetry) { ShowTelemetry = true; TelemetryDetailed = false; }
+        else if (!TelemetryDetailed) TelemetryDetailed = true;
+        else ShowTelemetry = false;
+        Touch();
+    }
+
+    /// <summary>
+    /// The pointer is hidden together with the bar, as any video player does. Only over the
+    /// picture itself: the picker and the quit dialog are things to click.
+    /// </summary>
+    public bool CursorHidden => Screen == Screen.App && !ShowBar && BarFade <= 0f && !ConfirmQuit;
+
+    /// <summary>
+    /// True when the device was lost because another application holds it, which is the
+    /// one cause of a lost device the user can do something about straight away.
+    /// </summary>
+    public bool DeviceBusy => ForceBusy || (Pump.State == CaptureState.Lost && Pump.HeldElsewhere);
+
     public Action<int> SelectScaler = _ => { };
     public Action ToggleHdr = () => { };
     public Action<CaptureMode, double> SelectMode = (_, _) => { };
@@ -92,36 +153,32 @@ public sealed class AppModel
     public Action<Native.WindowKind> SetWindowKind = _ => { };
 
     /// <summary>
-    /// Output width over source width. The number that decides whether an upscaler is doing
-    /// anything at all — below 1 it is scaling down and no filter can add detail.
+    /// How much the picture is enlarged on its way to the window. The number that decides
+    /// whether an upscaler is doing anything at all — at 1 or below no filter can add detail.
+    /// <para>
+    /// The smaller of the two ratios, because the picture is fitted with its aspect kept.
+    /// Width alone overstated it on an ultrawide: a 1080p source in a 3440×1440 window was
+    /// reported as ×1.79 while it was drawn at ×1.33 between two black bars.
+    /// </para>
     /// </summary>
     public double ScaleFactor
     {
         get
         {
             var m = Pump.CurrentMode;
-            return m is { Width: > 0 } ? Renderer.Width / (double)m.Width : 0;
+            return m is { Width: > 0, Height: > 0 }
+                ? Math.Min(Renderer.Width / (double)m.Width, Renderer.Height / (double)m.Height)
+                : 0;
         }
     }
 
-    /// <summary>
-    /// The design's colour rule for the scale factor: below 1 it is working downwards,
-    /// 1–1.3 is marginal, above that it is doing real work.
-    /// </summary>
-    public System.Numerics.Vector4 ScaleColour => ScaleFactor switch
-    {
-        < 1.0 => Theme.Bad,
-        <= 1.3 => Theme.Warn,
-        _ => Theme.Alpha(Theme.TextPrimary, 0.55f)
-    };
-
-    /// <summary>`×2` when integral, `×1.79` otherwise — the design prints no trailing zeros.</summary>
+    /// <summary>`2` when integral, `1,33` otherwise — no trailing zeros.</summary>
     public string ScaleLabel
     {
         get
         {
             double s = Math.Round(ScaleFactor, 2);
-            return s <= 0 ? "" : $"×{(Math.Abs(s - Math.Round(s)) < 0.005 ? s.ToString("0") : s.ToString("0.##"))}";
+            return s <= 0 ? "" : Strings.Num(s, Math.Abs(s - Math.Round(s)) < 0.005 ? "0" : "0.##");
         }
     }
 
@@ -150,7 +207,7 @@ public sealed class AppModel
         s.OverlayNits = OverlayNits;
         s.VideoNits = VideoNits;
         s.ShowTelemetry = ShowTelemetry;
-        s.ShowSettings = ShowSettings;
+        s.TelemetryDetailed = TelemetryDetailed;
         s.Borderless = WindowKind != Native.WindowKind.Windowed;
         s.DeviceLink = Pump.Device.SymbolicLink;
 
@@ -193,15 +250,24 @@ public sealed class AppModel
     }
 
     /// <summary>
-    /// True when the window is not larger than the source, which makes any upscaler inert
-    /// however it is toggled.
+    /// True when the picture is not being enlarged, which makes any upscaler inert however
+    /// it is toggled.
     /// </summary>
-    public bool ScalerInert
+    public bool ScalerInert => Pump.CurrentMode is { Width: > 0 } && ScaleFactor <= 1.0;
+
+    /// <summary>
+    /// The warning worth a badge on the bar, if any — by what it costs, worst first.
+    /// Only the two the user can act on: a composed window and a blown budget. A codec in
+    /// the path is a choice, and the mode chip already says so in its colour.
+    /// </summary>
+    public string? Warning
     {
         get
         {
-            var m = Pump.CurrentMode;
-            return m is not null && m.Width > 0 && Renderer.Width <= m.Width;
+            if (Status == AppStatus.NoSignal) return null;
+            if (ForceComposed || Composition == "Composed") return "composed";
+            if (Pump.State == CaptureState.Streaming && BudgetMs > 0 && HeadroomMs < 0) return "budget";
+            return null;
         }
     }
 
@@ -209,10 +275,11 @@ public sealed class AppModel
     {
         get
         {
-            if (Pump.State is CaptureState.NoSignal or CaptureState.Lost) return AppStatus.NoSignal;
+            if (ForceNoSignal || ForceBusy || Pump.State is CaptureState.NoSignal or CaptureState.Lost)
+                return AppStatus.NoSignal;
             if (Pump.CurrentMode?.HasCodecInPath == true) return AppStatus.Compressed;
             // Composited, dropping frames or out of budget: working, but not as intended.
-            if (Composition == "Composed" || HeadroomMs < 0 || Shown.FramesDropped > 0)
+            if (ForceComposed || Composition == "Composed" || HeadroomMs < 0 || Shown.FramesDropped > 0)
                 return AppStatus.Partial;
             return AppStatus.Nominal;
         }
@@ -233,7 +300,7 @@ public sealed class AppModel
 
         // Ordered by what it costs: a composed frame is 8.33 ms at 120 fps, more than
         // everything else on this list together.
-        if (Composition == "Composed") yield return Strings.T("whyComposed");
+        if (ForceComposed || Composition == "Composed") yield return Strings.T("whyComposed");
         if (Pump.CurrentMode?.HasCodecInPath == true) yield return Strings.T("whyCodec");
         if (HeadroomMs < 0) yield return Strings.T("whyBudget");
         if (Shown.FramesDropped > 0) yield return Strings.T("whyDropped");
@@ -249,9 +316,9 @@ public sealed class AppModel
 
     public System.Numerics.Vector4 StatusColour => Status switch
     {
-        AppStatus.Nominal => Theme.Good,
-        AppStatus.Compressed or AppStatus.Partial => Theme.Warn,
-        _ => Theme.Bad
+        AppStatus.Nominal => Theme.Success,
+        AppStatus.Compressed or AppStatus.Partial => Theme.Caution,
+        _ => Theme.TextTertiary
     };
 }
 

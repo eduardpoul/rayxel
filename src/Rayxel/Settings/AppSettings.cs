@@ -32,7 +32,9 @@ public sealed class AppSettings
     public float VideoNits { get; set; } = 200f;
 
     public bool ShowTelemetry { get; set; }
-    public bool ShowSettings { get; set; } = true;
+
+    /// <summary>The full card rather than the one-line readout.</summary>
+    public bool TelemetryDetailed { get; set; }
     public bool Borderless { get; set; }
 
     /// <summary>Device interface path. The only device identity that stays put.</summary>

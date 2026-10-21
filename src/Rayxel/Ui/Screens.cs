@@ -5,237 +5,171 @@ using Rayxel.Capture;
 namespace Rayxel.Ui;
 
 /// <summary>
-/// The full-stage screens: start-up, the device choice, and the state where the card is
-/// there but the console is not.
+/// The full-stage screens: start-up, the device choice, and the states where the card is
+/// there but no picture is — the console asleep, or the card held by another application.
 /// </summary>
 public static class Screens
 {
     public const double SplashDurationMs = 1700;
 
+    private const ImGuiWindowFlags CardFlags = ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoResize
+        | ImGuiWindowFlags.NoMove | ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoSavedSettings
+        | ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.NoNav;
+
     /// <summary>
-    /// The stage background. The design asks for a radial gradient, which a draw list
-    /// cannot express directly; concentric rounded rectangles are close enough at these
-    /// alphas and cost nothing.
+    /// The stage behind these screens: flat. The radial glow it used to have was the most
+    /// decorative thing in the app and said nothing.
     /// </summary>
-    private static void Stage(Vector2 size)
-    {
-        var draw = ImGui.GetBackgroundDrawList();
-        draw.AddRectFilled(Vector2.Zero, size, Theme.U32(Theme.Base));
+    private static void Stage(AppModel model) =>
+        ImGui.GetBackgroundDrawList().AddRectFilled(Vector2.Zero,
+            new Vector2(model.Renderer.Width, model.Renderer.Height), Theme.U32(Theme.Stage));
 
-        var centre = new Vector2(size.X * 0.5f, size.Y * 0.45f);
-        for (int i = 8; i >= 1; i--)
-        {
-            float t = i / 8f;
-            float radius = Math.Max(size.X, size.Y) * 0.55f * t;
-            draw.AddRectFilled(centre - new Vector2(radius), centre + new Vector2(radius),
-                Theme.U32(new Vector4(0.066f, 0.09f, 0.145f, 0.16f * (1f - t) + 0.04f)), radius);
-        }
+    /// <summary>A window centred on the screen, at a fixed width and whatever height it needs.</summary>
+    private static bool BeginCentred(AppModel model, string id, float width, Vector2 padding, Vector4 background)
+    {
+        ImGui.SetNextWindowPos(new Vector2(model.Renderer.Width, model.Renderer.Height) * 0.5f,
+                               ImGuiCond.Always, new Vector2(0.5f));
+        ImGui.SetNextWindowSize(new Vector2(width, 0), ImGuiCond.Always);
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, padding);
+        ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, new Vector2(Layout.S(8), Layout.S(4)));
+        ImGui.PushStyleColor(ImGuiCol.WindowBg, background);
+        ImGui.PushStyleColor(ImGuiCol.Border, background.W > 0 ? Theme.SurfaceStroke : default);
+        return ImGui.Begin(id, CardFlags);
     }
 
-    private static void FullStage(string id, Vector2 size, Action body)
+    private static void EndCentred()
     {
-        Stage(size);
-        ImGui.SetNextWindowPos(Vector2.Zero, ImGuiCond.Always);
-        ImGui.SetNextWindowSize(size, ImGuiCond.Always);
-        ImGui.PushStyleColor(ImGuiCol.WindowBg, new Vector4(0, 0, 0, 0));
-        ImGui.PushStyleVar(ImGuiStyleVar.WindowRounding, 0f);
-
-        const ImGuiWindowFlags flags = ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoResize
-            | ImGuiWindowFlags.NoMove | ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoBringToFrontOnFocus;
-
-        if (ImGui.Begin(id, flags)) body();
         ImGui.End();
-        ImGui.PopStyleVar();
-        ImGui.PopStyleColor();
+        ImGui.PopStyleColor(2);
+        ImGui.PopStyleVar(2);
     }
 
-    /// <summary>Centres the next block of the given width and returns its left edge.</summary>
-    private static float CentreColumn(float width, float contentHeight)
+    /// <summary>Text centred in the current window.</summary>
+    private static void Centred(ImFontPtr font, Vector4 colour, string text)
     {
-        var avail = ImGui.GetWindowSize();
-        ImGui.SetCursorPos(new Vector2((avail.X - width) * 0.5f, (avail.Y - contentHeight) * 0.5f));
-        return (avail.X - width) * 0.5f;
+        float w = Widgets.Measure(font, text).X;
+        ImGui.SetCursorPosX((ImGui.GetWindowWidth() - w) * 0.5f);
+        Widgets.Text(font, colour, text);
     }
 
-    public static void Splash(AppModel model, Fonts fonts)
+    public static void Splash(AppModel model)
     {
-        var size = new Vector2(model.Renderer.Width, model.Renderer.Height);
-        FullStage("##splash", size, () =>
+        var f = Widgets.F;
+        Stage(model);
+
+        if (BeginCentred(model, "##splash", Layout.S(320), Vector2.Zero, default))
         {
-            float mark = Layout.S(60), markGap = Layout.S(18);
-            float left = CentreColumn(Layout.S(280), Layout.S(150) + mark + markGap);
+            float mark = Layout.S(56);
+            var at = ImGui.GetCursorScreenPos() + new Vector2((ImGui.GetWindowWidth() - mark) * 0.5f, 0);
+            Brand.Mark(ImGui.GetWindowDrawList(), at, mark);
+            ImGui.Dummy(new Vector2(mark, mark + Layout.S(12)));
 
-            // Drawn onto the list and claimed with one Dummy of the exact height, rather
-            // than laid out as an item and spaced with another: ImGui puts its item spacing
-            // either side of a Dummy, and the 18px the design asks for would arrive as 18
-            // plus two helpings of it.
-            var markAt = ImGui.GetCursorScreenPos() + new Vector2((Layout.S(280) - mark) * 0.5f, 0);
-            Brand.Mark(ImGui.GetWindowDrawList(), markAt, mark);
-            ImGui.Dummy(new Vector2(Layout.S(280),
-                Math.Max(1f, mark + markGap - ImGui.GetStyle().ItemSpacing.Y)));
-
-            var wordmark = Widgets.Measure(fonts.Wordmark, "Rayxel");
-            ImGui.SetCursorPosX(left + (Layout.S(280) - wordmark.X) * 0.5f);
-            Widgets.Text(fonts.Wordmark, Theme.TextPrimary, "Rayxel");
-
-            ImGui.Dummy(new Vector2(0, Layout.S(9)));
-            var tag = Strings.T("splashTag");
-            var tagSize = Widgets.Measure(fonts.Body, tag);
-            ImGui.SetCursorPosX(left + (Layout.S(280) - tagSize.X) * 0.5f);
-            Widgets.Text(fonts.Body, Theme.Alpha(Theme.TextPrimary, 0.45f), tag);
-
-            ImGui.Dummy(new Vector2(0, Layout.S(26)));
-            ImGui.SetCursorPosX(left);
-
-            // 1.6 s of travel, eased. The bar is honest about progress in the sense that
-            // matters: it finishes when the app is ready to move on.
-            float t = (float)Math.Clamp(model.SplashElapsedMs / 1600.0, 0, 1);
-            float eased = 1f - MathF.Pow(1f - t, 3f);
-            var barPos = ImGui.GetCursorScreenPos();
-            var draw = ImGui.GetWindowDrawList();
-            float barW = Layout.S(280), barH = Math.Max(1f, Layout.S(2));
-            draw.AddRectFilled(barPos, barPos + new Vector2(barW, barH),
-                Theme.U32(new Vector4(1, 1, 1, 0.08f)), 99f);
-            if (eased > 0.001f)
-                draw.AddRectFilled(barPos, barPos + new Vector2(barW * eased, barH), Theme.U32(Theme.Accent), 99f);
-            ImGui.Dummy(new Vector2(barW, barH));
-
-            ImGui.Dummy(new Vector2(0, Layout.S(9)));
-            ImGui.SetCursorPosX(left);
-            Widgets.Text(fonts.MonoSmall, Theme.Alpha(Theme.TextPrimary, 0.35f), "enumerating capture modes…");
-            const string stack = "D3D11 · .NET 10";
-            float sw = Widgets.Measure(fonts.MonoSmall, stack).X;
-            ImGui.SameLine(left + Layout.S(280) - sw);
-            Widgets.Text(fonts.MonoSmall, Theme.Alpha(Theme.TextPrimary, 0.35f), stack);
-        });
-    }
-
-    public static void DevicePicker(AppModel model, Fonts fonts)
-    {
-        var size = new Vector2(model.Renderer.Width, model.Renderer.Height);
-        FullStage("##devices", size, () =>
-        {
-            float column = Math.Min(Layout.S(540), size.X * 0.92f);
-            float height = Layout.S(130) + model.Devices.Count * Layout.S(64);
-            float left = CentreColumn(column, height);
-
-            ImGui.SetCursorPosX(left);
-            Widgets.Text(fonts.Title, Theme.TextPrimary, Strings.T("chooseDevice"));
-
-            ImGui.Dummy(new Vector2(0, Layout.S(8)));
-            ImGui.SetCursorPosX(left);
-            ImGui.PushTextWrapPos(left + column);
-            Widgets.Text(fonts.Body, Theme.Alpha(Theme.TextPrimary, 0.48f), Strings.T("chooseHint"));
-            ImGui.PopTextWrapPos();
-
+            Centred(f.Title, Theme.TextPrimary, "Rayxel");
             ImGui.Dummy(new Vector2(0, Layout.S(20)));
 
-            foreach (var device in model.Devices)
-            {
-                ImGui.SetCursorPosX(left);
-                DeviceRow(model, fonts, device, column);
-                ImGui.Dummy(new Vector2(0, Layout.S(7)));
-            }
+            // Fluent's progress bar: a hairline track with a 3px accent indicator on it.
+            // The splash is a real wait — capture modes are being read behind it — and it
+            // finishes when the app is ready to move on.
+            float t = (float)Math.Clamp(model.SplashElapsedMs / 1600.0, 0, 1);
+            float eased = 1f - MathF.Pow(1f - t, 3f);
+            var pos = ImGui.GetCursorScreenPos();
+            float width = ImGui.GetContentRegionAvail().X, bar = Layout.S(3);
+            var draw = ImGui.GetWindowDrawList();
+            draw.AddRectFilled(new Vector2(pos.X, pos.Y + bar / 2f - 0.5f), new Vector2(pos.X + width, pos.Y + bar / 2f + 0.5f),
+                               Theme.U32(Theme.ControlStrong));
+            if (eased > 0.001f)
+                draw.AddRectFilled(pos, pos + new Vector2(width * eased, bar), Theme.U32(Theme.Accent), bar / 2f);
+            ImGui.Dummy(new Vector2(width, bar));
 
-            ImGui.SetCursorPosX(left);
-            Widgets.Text(fonts.MonoSmall, Theme.Alpha(Theme.TextPrimary, 0.3f), Strings.T("oneOwner"));
-        });
+            ImGui.Dummy(new Vector2(0, Layout.S(8)));
+            Centred(f.Caption, Theme.TextTertiary, Strings.T("splashStatus"));
+        }
+        EndCentred();
     }
 
-    private static void DeviceRow(AppModel model, Fonts fonts, CaptureDeviceInfo device, float width)
+    public static void DevicePicker(AppModel model)
     {
+        var f = Widgets.F;
+        Stage(model);
+
+        float width = Math.Min(Layout.S(480), model.Renderer.Width * 0.92f);
+        if (BeginCentred(model, "##devices", width, new Vector2(Layout.S(16), Layout.S(20)), Theme.Card))
+        {
+            ImGui.Indent(Layout.S(8));
+            Widgets.Text(f.Subtitle, Theme.TextPrimary, Strings.T("chooseDevice"));
+            ImGui.PushTextWrapPos(Widgets.ContentRight() - Layout.S(8));
+            Widgets.Text(f.Caption, Theme.TextTertiary, Strings.T("chooseHint"));
+            ImGui.PopTextWrapPos();
+            ImGui.Unindent(Layout.S(8));
+            ImGui.Dummy(new Vector2(0, Layout.S(8)));
+
+            ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, new Vector2(0, Layout.S(2)));
+            foreach (var device in model.Devices) DeviceRow(model, device);
+            ImGui.PopStyleVar();
+        }
+        EndCentred();
+    }
+
+    private static void DeviceRow(AppModel model, CaptureDeviceInfo device)
+    {
+        var f = Widgets.F;
         model.Probed.TryGetValue(device.SymbolicLink, out var probe);
 
-        // A device we have never opened is shown as exactly that. Busy cannot be known
-        // without trying, so the row does not claim to know.
-        var (colour, note, count, selectable) = probe switch
+        // A device never opened is shown as exactly that. Busy cannot be known without
+        // trying, so the row does not claim to know.
+        var (status, colour, detail, selectable) = probe switch
         {
             { Availability: DeviceAvailability.Ready } p =>
-                (Theme.Good, Strings.T("dAvail"), Strings.Modes(p.Modes.Count), true),
+                (Strings.T("dAvail"), Theme.Success, Details(p), true),
             { Availability: DeviceAvailability.Busy } =>
-                (Theme.Bad, Strings.T("dBusy"), "", false),
+                (Strings.T("dBusyNow"), Theme.Caution, "", false),
             { Availability: DeviceAvailability.Unusable } p =>
-                (Theme.Warn, Strings.T("dOffline"), Strings.Modes(p.Modes.Count), false),
-            { } p => (Theme.Warn, p.Problem ?? Strings.T("dOffline"), "", false),
-            _ => (Theme.TextMuted, NotChecked(device), "", true)
+                (Strings.T("dOffline"), Theme.Caution, Strings.Modes(p.Modes.Count), false),
+            { } p => (p.Problem ?? Strings.T("dOffline"), Theme.Caution, "", false),
+            _ => (NotChecked(device), Theme.TextTertiary, "", true)
         };
 
-        var start = ImGui.GetCursorScreenPos();
-        float height = Layout.S(56);
-        bool clicked = ImGui.InvisibleButton($"##dev{device.Ordinal}", new Vector2(width, height)) && selectable;
-        bool hovered = ImGui.IsItemHovered() && selectable;
-
-        var background = !selectable ? new Vector4(1, 1, 1, 0.025f)
-                       : hovered ? Theme.CardHover
-                       : new Vector4(1, 1, 1, 0.05f);
-
-        var draw = ImGui.GetWindowDrawList();
-        draw.AddRectFilled(start, start + new Vector2(width, height), Theme.U32(background), Layout.S(Theme.RadiusPopover));
-
-        float fade = selectable ? 1f : 0.55f;
-        float dotR = Layout.S(8) / 2f;
-        var dotCentre = new Vector2(start.X + Layout.S(17) + dotR, start.Y + height / 2f);
-        draw.AddCircleFilled(dotCentre, dotR * 2.6f, Theme.U32(Theme.Alpha(colour, 0.12f * fade)));
-        draw.AddCircleFilled(dotCentre, dotR, Theme.U32(Theme.Alpha(colour, fade)));
-
-        float textX = start.X + Layout.S(17) + dotR * 2 + Layout.S(10);
-        float nameH = Widgets.Measure(fonts.Name, device.FriendlyName).Y;
-        float noteH = Widgets.Measure(fonts.Label, note).Y;
-        float blockTop = start.Y + (height - nameH - noteH - Layout.S(2)) / 2f;
-
-        bool pushed = PushFont(fonts.Name);
-        draw.AddText(new Vector2(textX, blockTop),
-            Theme.U32(Theme.Alpha(Theme.TextPrimary, fade)), device.FriendlyName);
-        if (pushed) ImGui.PopFont();
-
-        pushed = PushFont(fonts.Label);
-        draw.AddText(new Vector2(textX, blockTop + nameH + Layout.S(2)),
-            Theme.U32(Theme.Alpha(colour, 0.85f * fade)), note);
-        if (pushed) ImGui.PopFont();
-
-        if (count.Length > 0)
-        {
-            var text = count;
-            float w = Widgets.Measure(fonts.MonoSmall, text).X;
-            pushed = PushFont(fonts.MonoSmall);
-            draw.AddText(new Vector2(start.X + width - w - Layout.S(17), start.Y + (height - Widgets.Measure(fonts.MonoSmall, text).Y) / 2f),
-                Theme.U32(Theme.Alpha(Theme.TextPrimary, 0.3f * fade)), text);
-            if (pushed) ImGui.PopFont();
-        }
-
-        if (clicked)
+        bool current = model.Pump.Device.Is(device) && model.Pump.State == CaptureState.Streaming;
+        if (Widgets.ListRow($"##dev{device.Ordinal}", Layout.S(60), current, selectable, out var min, out var max))
         {
             model.SwitchDevice(device);
             model.Screen = Screen.App;
         }
 
-        static bool PushFont(ImFontPtr font)
-        {
-            unsafe { if (font.NativePtr == null) return false; }
-            ImGui.PushFont(font);
-            return true;
-        }
+        var draw = ImGui.GetWindowDrawList();
+        float inset = Layout.S(12), icon = Layout.S(20);
+        float height = max.Y - min.Y;
+        Icons.Draw(draw, device.IsVirtual ? Icon.MonitorOff : Icon.Camera,
+                   new Vector2(min.X + inset, min.Y + (height - icon) / 2f), icon,
+                   selectable ? Theme.TextSecondary : Theme.TextDisabled);
+
+        float x = min.X + inset + icon + Layout.S(12);
+        var name = Widgets.Measure(f.Body, device.FriendlyName);
+        var line = Widgets.Measure(f.Caption, status);
+        float top = min.Y + (height - name.Y - line.Y - Layout.S(1)) / 2f;
+
+        Widgets.DrawText(draw, f.Body, new Vector2(x, top), selectable ? Theme.TextPrimary : Theme.TextDisabled, device.FriendlyName);
+        Widgets.DrawText(draw, f.Caption, new Vector2(x, top + name.Y + Layout.S(1)), colour, status);
+        if (detail.Length > 0)
+            Widgets.DrawText(draw, f.Caption, new Vector2(x + line.X, top + name.Y + Layout.S(1)), Theme.TextTertiary, " · " + detail);
     }
 
-    private static string Free() => Strings.Current switch
+    private static string Details(DeviceProbe p)
     {
-        "ru" => "свободно, {0} режимов",
-        "uk" => "вільно, {0} режимів",
-        "de" => "frei, {0} Modi",
-        "es" => "libre, {0} modos",
-        _ => "free, {0} modes"
-    };
+        var modes = Strings.Modes(p.Modes.Count);
+        return !p.Device.IsVirtual && p.Link.Known ? $"{modes} · {p.Link.LinkClass}" : modes;
+    }
 
     private static string NotChecked(CaptureDeviceInfo d)
     {
         if (d.IsVirtual)
             return Strings.Current switch
             {
-                "ru" => "программное устройство",
-                "uk" => "програмний пристрій",
-                "de" => "Softwaregerät",
-                "es" => "dispositivo por software",
-                _ => "software device"
+                "ru" => "программная камера, без провода",
+                "uk" => "програмна камера, без дроту",
+                "de" => "Software-Kamera, ohne Leitung",
+                "es" => "cámara por software, sin cable",
+                _ => "software camera, no wire"
             };
 
         return Strings.Current switch
@@ -249,66 +183,76 @@ public static class Screens
     }
 
     /// <summary>
-    /// Device present, no picture. Every measured value goes to n/a while this is up:
-    /// the numbers would be about a frame that is not arriving.
+    /// The card is there, the picture is not. Three causes, three cards: the source has
+    /// gone quiet (it comes back by itself), another application holds the card (the user
+    /// has to close it), or the card itself went away. The first is the common one and
+    /// the card says so calmly; nothing here is an alarm.
     /// </summary>
-    public static void NoSignal(AppModel model, Fonts fonts)
+    public static void NoSignal(AppModel model)
     {
-        var draw = ImGui.GetBackgroundDrawList();
-        draw.AddRectFilled(Vector2.Zero, new Vector2(model.Renderer.Width, model.Renderer.Height),
-            Theme.U32(Theme.Base));
+        var f = Widgets.F;
+        Stage(model);
 
-        const float cardWidth = 420f;
-        var centre = new Vector2(model.Renderer.Width * 0.5f, model.Renderer.Height * 0.5f);
+        bool busy = model.DeviceBusy;
+        bool lost = !busy && model.Pump.State == CaptureState.Lost && !model.ForceNoSignal;
+        string name = model.Pump.Device.FriendlyName;
 
-        ImGui.SetNextWindowPos(centre, ImGuiCond.Always, new Vector2(0.5f, 0.5f));
-        ImGui.SetNextWindowSize(new Vector2(cardWidth, 0), ImGuiCond.Always);
-        ImGui.PushStyleColor(ImGuiCol.WindowBg, Theme.Alpha(new Vector4(0.078f, 0.106f, 0.157f, 1f), 0.85f));
-        ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(26, 24));
-        ImGui.PushStyleVar(ImGuiStyleVar.WindowRounding, Theme.RadiusOverlay);
+        var (icon, title, body) = busy ? (Icon.Lock, Strings.T("busyTitle"), string.Format(Strings.T("busyBody"), name))
+                                : lost ? (Icon.MonitorOff, Strings.T("lostTitle"), string.Format(Strings.T("lostBody"), name))
+                                : (Icon.MonitorOff, Strings.T("nsTitle"), Strings.T("nsBody"));
 
-        const ImGuiWindowFlags flags = ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoResize
-            | ImGuiWindowFlags.NoMove | ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.AlwaysAutoResize;
-
-        if (ImGui.Begin("##nosignal", flags))
+        if (BeginCentred(model, "##nosignal", Layout.S(440), new Vector2(Layout.S(24)), Theme.Card))
         {
-            // 1.8 s pulse. Slow on purpose: this is a recoverable state, not an alarm.
-            float pulse = 0.35f + 0.55f * (0.5f + 0.5f * MathF.Sin((float)ImGui.GetTime() * MathF.PI / 0.9f));
-            Widgets.StatusDot(Theme.Alpha(Theme.Bad, pulse));
-            ImGui.SameLine(0, 9);
-            Widgets.Text(fonts.Tiny, Theme.Bad, Strings.T("stNoSignal"));
+            float glyph = Layout.S(24);
+            Icons.Draw(ImGui.GetWindowDrawList(), icon, ImGui.GetCursorScreenPos(), glyph, Theme.TextSecondary);
+            ImGui.Dummy(new Vector2(glyph, glyph + Layout.S(8)));
 
-            ImGui.Dummy(new Vector2(0, 6));
-            Widgets.Text(fonts.Title, Theme.TextPrimary, Strings.T("nosignalTitle"));
+            Widgets.Text(f.Subtitle, Theme.TextPrimary, title);
+            ImGui.Dummy(new Vector2(0, Layout.S(2)));
+            Widgets.Wrapped(f.Body, Theme.TextSecondary, body);
 
-            ImGui.Dummy(new Vector2(0, 8));
-            ImGui.PushTextWrapPos(cardWidth - 52);
-            Widgets.Text(fonts.Label, Theme.TextSecondary, Strings.T("nosignalBody"));
-            ImGui.PopTextWrapPos();
-
-            if (model.Pump.StateDetail is { } detail)
+            // A lost device is retried every three seconds by the frame loop; a quiet one
+            // needs nothing and recovers when frames resume. The ring says something is
+            // still being waited for, which is the reassuring part.
+            if (!busy)
             {
-                ImGui.Dummy(new Vector2(0, 6));
-                ImGui.PushTextWrapPos(cardWidth - 52);
-                Widgets.Text(fonts.Micro, Theme.Alpha(Theme.Warn, 0.8f), detail);
+                ImGui.Dummy(new Vector2(0, Layout.S(8)));
+                var pos = ImGui.GetCursorScreenPos();
+                float ring = Layout.S(16);
+                ProgressRing(ImGui.GetWindowDrawList(), pos + new Vector2(ring / 2f), ring / 2f - 1f);
+                var waitText = lost ? Strings.Sentence(Strings.T("retryIn")) : Strings.T("nsWait");
+                ImGui.SetCursorScreenPos(pos + new Vector2(ring + Layout.S(8), 0));
+                ImGui.PushTextWrapPos(0);
+                Widgets.Text(f.Caption, Theme.TextTertiary, waitText);
                 ImGui.PopTextWrapPos();
             }
 
-            ImGui.Dummy(new Vector2(0, 14));
-            ImGui.PushStyleColor(ImGuiCol.Button, Theme.Alpha(Theme.Accent, 0.18f));
-            ImGui.PushStyleColor(ImGuiCol.Text, Theme.AccentText);
-            if (ImGui.Button(Strings.T("retry"), new Vector2(0, 32)))
-            {
-                if (model.Active is { } active) model.SwitchDevice(active.Device);
-            }
-            ImGui.PopStyleColor(2);
+            // The log's own sentence, for the case nobody predicted.
+            if (lost && model.Pump.StateDetail is { } detail)
+                Widgets.Wrapped(f.Caption, Theme.TextTertiary, detail);
 
-            ImGui.SameLine(0, 10);
-            Widgets.Text(fonts.MonoTiny, Theme.TextMuted, Strings.T("retryIn"));
+            ImGui.Dummy(new Vector2(0, Layout.S(16)));
+            float gap = Layout.S(8);
+            float half = (ImGui.GetContentRegionAvail().X - gap) / 2f;
+            var size = new Vector2(half, Layout.S(32));
+
+            if (Widgets.Button(Strings.T(busy ? "retryNow" : "retry"), size, accent: true)
+                && model.Active is { } active)
+                model.SwitchDevice(active.Device);
+            ImGui.SameLine(0, gap);
+            if (Widgets.Button(Strings.T("otherDevice"), size))
+                model.Screen = Screen.Devices;
         }
-        ImGui.End();
+        EndCentred();
+    }
 
-        ImGui.PopStyleVar(2);
-        ImGui.PopStyleColor();
+    /// <summary>Fluent's indeterminate progress ring: a quarter arc going round once a second.</summary>
+    private static void ProgressRing(ImDrawListPtr draw, Vector2 centre, float radius)
+    {
+        float t = (float)(ImGui.GetTime() % 1.0) * MathF.PI * 2f;
+        float thickness = Math.Max(1.5f, Layout.S(2));
+        draw.AddCircle(centre, radius, Theme.U32(Theme.Alpha(Theme.TextPrimary, 0.12f)), 0, thickness);
+        draw.PathArcTo(centre, radius, t, t + MathF.PI * 0.6f);
+        draw.PathStroke(Theme.U32(Theme.Accent), ImDrawFlags.None, thickness);
     }
 }

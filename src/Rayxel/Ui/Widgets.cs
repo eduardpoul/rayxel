@@ -4,13 +4,23 @@ using ImGuiNET;
 namespace Rayxel.Ui;
 
 /// <summary>
-/// The control anatomy from the design system, built once so the screens stay readable.
-/// Anything ImGui does not have as a widget is drawn straight onto the draw list, which
-/// is also what keeps the specified radii and 1px rules exact.
+/// The Fluent controls, drawn onto the draw list.
+/// <para>
+/// ImGui's own widgets carry its look in their proportions, not only in their colours, so
+/// the ones the interface shows — switch, slider, combo box, buttons, list rows — are
+/// built here from an invisible button and a few shapes. That is also what keeps them
+/// exactly the size the Fluent spec gives them at every zoom.
+/// </para>
 /// </summary>
 public static class Widgets
 {
-    /// <summary>Draws text in a specific size from the type scale.</summary>
+    /// <summary>The ramp for this frame. Set once by the shell, so no control has to be handed it.</summary>
+    public static Fonts F { get; private set; } = null!;
+
+    public static void Use(Fonts fonts) => F = fonts;
+
+    // ── text ─────────────────────────────────────────────────────────────────────
+
     public static void Text(ImFontPtr font, Vector4 colour, string text)
     {
         bool pushed = Push(font);
@@ -18,73 +28,19 @@ public static class Widgets
         if (pushed) ImGui.PopFont();
     }
 
-    public static void TextSameLine(ImFontPtr font, Vector4 colour, string text, float spacing = -1f)
+    /// <summary>Text that wraps at the right edge of the current window or column.</summary>
+    public static void Wrapped(ImFontPtr font, Vector4 colour, string text)
     {
-        ImGui.SameLine(0, spacing < 0 ? ImGui.GetStyle().ItemInnerSpacing.X : spacing);
+        ImGui.PushTextWrapPos(0f);
         Text(font, colour, text);
+        ImGui.PopTextWrapPos();
     }
 
-    /// <summary>
-    /// Right edge of the content area in window-local coordinates, which is what
-    /// <c>ImGui.SameLine(x)</c> wants. Call it at the start of a line, before SameLine has
-    /// moved the cursor.
-    /// </summary>
-    public static float RightEdge() => ImGui.GetCursorPosX() + ImGui.GetContentRegionAvail().X - _cardInsetRight;
-
-    /// <summary>
-    /// Right padding of the card currently open. ImGui's content region only knows about
-    /// the left indent, so without this a right-aligned value lands on the card's border
-    /// instead of inside it — which is how the HDR switch ended up half off the panel.
-    /// </summary>
-    private static float _cardInsetRight;
-
-    /// <summary>
-    /// The same inset, for callers drawing to the draw list in screen coordinates rather
-    /// than laying items out. Without it a hand-drawn value sits flush against the card
-    /// border while every laid-out one beside it stops a padding short.
-    /// </summary>
-    public static float CardInsetRight => _cardInsetRight;
-
-    /// <summary>Places the next item so that <paramref name="width"/> pixels end at the right edge.</summary>
-    public static void RightAlign(float width) => ImGui.SameLine(Math.Max(0, RightEdge() - width));
-
-    /// <summary>
-    /// Several runs of text on one line, sitting on a common baseline.
-    /// <para>
-    /// ImGui lays items out from the top of the line, so mixing font sizes with SameLine
-    /// leaves the smaller ones riding high like a superscript — which is exactly how
-    /// "120 fps" ended up floating above "1920x1080". Drawn directly and claimed with a
-    /// single Dummy, so the window extent stays valid.
-    /// </para>
-    /// </summary>
-    public static void BaselineRow(params (ImFontPtr Font, Vector4 Colour, string Text, float Gap)[] parts)
+    public static void DrawText(ImDrawListPtr draw, ImFontPtr font, Vector2 at, Vector4 colour, string text)
     {
-        if (parts.Length == 0) return;
-
-        var origin = ImGui.GetCursorScreenPos();
-        var sizes = new Vector2[parts.Length];
-        float tallest = 0, width = 0;
-
-        for (int i = 0; i < parts.Length; i++)
-        {
-            sizes[i] = Measure(parts[i].Font, parts[i].Text);
-            tallest = Math.Max(tallest, sizes[i].Y);
-            width += sizes[i].X + (i > 0 ? Layout.S(parts[i].Gap) : 0);
-        }
-
-        var draw = ImGui.GetWindowDrawList();
-        float x = origin.X;
-        for (int i = 0; i < parts.Length; i++)
-        {
-            if (i > 0) x += Layout.S(parts[i].Gap);
-            bool pushed = Push(parts[i].Font);
-            draw.AddText(new Vector2(x, origin.Y + (tallest - sizes[i].Y)),
-                         Theme.U32(parts[i].Colour), parts[i].Text);
-            if (pushed) ImGui.PopFont();
-            x += sizes[i].X;
-        }
-
-        ImGui.Dummy(new Vector2(width, tallest));
+        bool pushed = Push(font);
+        draw.AddText(at, Theme.U32(colour), text);
+        if (pushed) ImGui.PopFont();
     }
 
     public static Vector2 Measure(ImFontPtr font, string text)
@@ -103,287 +59,431 @@ public static class Widgets
     }
 
     /// <summary>
-    /// A status pill: coloured text on a wash of the same colour. The wire tag is the
-    /// most important one in the app — it is how a mode that lies about being
-    /// uncompressed announces itself.
+    /// Several runs of text on one line, sitting on a common baseline. ImGui lays items out
+    /// from the top of the line, so mixing sizes with SameLine leaves the smaller ones
+    /// riding high like superscripts. Drawn directly and claimed with one Dummy.
     /// </summary>
-    public static void Pill(ImFontPtr font, string text, Vector4 colour, float bgAlpha = 0.14f)
+    public static void BaselineRow(params (ImFontPtr Font, Vector4 Colour, string Text, float Gap)[] parts)
     {
-        var size = Measure(font, text);
-        var pos = ImGui.GetCursorScreenPos();
-        var padding = new Vector2(Layout.S(8), Layout.S(3));
-        var box = size + padding * 2;
+        if (parts.Length == 0) return;
+
+        var origin = ImGui.GetCursorScreenPos();
+        Span<Vector2> sizes = stackalloc Vector2[parts.Length];
+        float tallest = 0, width = 0;
+
+        for (int i = 0; i < parts.Length; i++)
+        {
+            sizes[i] = Measure(parts[i].Font, parts[i].Text);
+            tallest = Math.Max(tallest, sizes[i].Y);
+            width += sizes[i].X + (i > 0 ? Layout.S(parts[i].Gap) : 0);
+        }
 
         var draw = ImGui.GetWindowDrawList();
-        draw.AddRectFilled(pos, pos + box, Theme.U32(Theme.Alpha(colour, bgAlpha)), Theme.RadiusPill);
+        float x = origin.X;
+        for (int i = 0; i < parts.Length; i++)
+        {
+            if (i > 0) x += Layout.S(parts[i].Gap);
+            DrawText(draw, parts[i].Font, new Vector2(x, origin.Y + (tallest - sizes[i].Y)), parts[i].Colour, parts[i].Text);
+            x += sizes[i].X;
+        }
 
-        bool pushed = Push(font);
-        draw.AddText(pos + padding, Theme.U32(colour), text);
-        if (pushed) ImGui.PopFont();
-
-        ImGui.Dummy(box);
-    }
-
-    /// <summary>A 7px status dot with the glow the design gives it.</summary>
-    public static void StatusDot(Vector4 colour, float designDiameter = 7f)
-    {
-        var pos = ImGui.GetCursorScreenPos();
-        float diameter = Layout.S(designDiameter);
-        float r = diameter / 2f;
-        var centre = new Vector2(pos.X + r, pos.Y + ImGui.GetTextLineHeight() / 2f);
-
-        var draw = ImGui.GetWindowDrawList();
-        // Stands in for `box-shadow: 0 0 10px`: two faint rings rather than a real blur.
-        draw.AddCircleFilled(centre, r * 2.6f, Theme.U32(Theme.Alpha(colour, 0.10f)));
-        draw.AddCircleFilled(centre, r * 1.7f, Theme.U32(Theme.Alpha(colour, 0.18f)));
-        draw.AddCircleFilled(centre, r, Theme.U32(colour));
-
-        ImGui.Dummy(new Vector2(diameter, ImGui.GetTextLineHeight()));
-    }
-
-    /// <summary>A full-width 1px rule in the divider colour.</summary>
-    public static void Divider(float padY = 4f)
-    {
-        padY = Layout.S(padY);
-        ImGui.Dummy(new Vector2(0, padY));
-        var pos = ImGui.GetCursorScreenPos();
-        float width = ImGui.GetContentRegionAvail().X;
-        ImGui.GetWindowDrawList().AddLine(pos, pos + new Vector2(width, 0), Theme.U32(Theme.Divider));
-        ImGui.Dummy(new Vector2(0, padY));
+        ImGui.Dummy(new Vector2(width, tallest));
     }
 
     /// <summary>
-    /// The frame budget bar: GPU, CPU and headroom as proportional segments with a 2px
-    /// gap, on a faint track. Segments that would round to nothing are dropped rather
-    /// than drawn as slivers.
+    /// The right edge of the content area in window-local coordinates, which is what
+    /// SameLine and PushTextWrapPos take. Valid at the start of a line — after an item,
+    /// before SameLine has moved the cursor — which is everywhere it is called.
     /// </summary>
-    public static void BudgetBar(double gpuMs, double cpuMs, double budgetMs, float height = 4f)
+    public static float ContentRight() => ImGui.GetCursorPosX() + ImGui.GetContentRegionAvail().X;
+
+    /// <summary>Places the next item so that <paramref name="width"/> pixels end at the content's right edge.</summary>
+    public static void RightAlign(float width) =>
+        ImGui.SameLine(Math.Max(0, ContentRight() - width));
+
+    // ── rules ────────────────────────────────────────────────────────────────────
+
+    /// <summary>A full-width 1px rule with <paramref name="padY"/> above and below.</summary>
+    public static void Divider(float padY = 12f)
+    {
+        var spacing = ImGui.GetStyle().ItemSpacing.Y;
+        float pad = Math.Max(0, Layout.S(padY) - spacing);
+        ImGui.Dummy(new Vector2(0, pad));
+        var pos = ImGui.GetCursorScreenPos();
+        float width = ImGui.GetContentRegionAvail().X;
+        ImGui.GetWindowDrawList().AddLine(pos, pos + new Vector2(width, 0), Theme.U32(Theme.Divider));
+        ImGui.Dummy(new Vector2(0, Math.Max(0, pad - spacing)));
+    }
+
+    /// <summary>The bar's group separator: a 1px stroke, 24 tall, centred on the line.</summary>
+    public static void VerticalSeparator(float lineHeight)
+    {
+        ImGui.SameLine(0, Layout.S(4));
+        var pos = ImGui.GetCursorScreenPos();
+        float h = Layout.S(24);
+        float y = pos.Y + (lineHeight - h) / 2f;
+        ImGui.GetWindowDrawList().AddLine(new Vector2(pos.X, y), new Vector2(pos.X, y + h), Theme.U32(Theme.Divider));
+        ImGui.Dummy(new Vector2(1, lineHeight));
+        ImGui.SameLine(0, Layout.S(4));
+    }
+
+    // ── buttons ──────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// The transparent button the bar is made of: nothing at rest, a faint fill on hover,
+    /// fainter while pressed, and the hover fill held while its flyout is open.
+    /// </summary>
+    public static bool SubtleButton(string id, Vector2 size, bool active, out Vector2 min)
+    {
+        min = ImGui.GetCursorScreenPos();
+        bool clicked = ImGui.InvisibleButton(id, size);
+        bool hovered = ImGui.IsItemHovered();
+        bool held = ImGui.IsItemActive();
+
+        var fill = held ? Theme.SubtlePressed : hovered || active ? Theme.SubtleHover : default;
+        if (fill.W > 0)
+            ImGui.GetWindowDrawList().AddRectFilled(min, min + size, Theme.U32(fill), Layout.S(Theme.RadiusControl));
+        return clicked;
+    }
+
+    /// <summary>A 36px square subtle button with a 16px icon in the middle.</summary>
+    public static bool IconButton(string id, Icon icon, bool active, Vector4 colour, string tooltip)
+    {
+        bool clicked = IconButtonSized(id, icon, Layout.S(36), colour, active);
+        Tooltip(tooltip);
+        return clicked;
+    }
+
+    public static bool IconButtonSized(string id, Icon icon, float side, Vector4 colour, bool active = false)
+    {
+        float glyph = Layout.S(16);
+        bool clicked = SubtleButton(id, new Vector2(side), active, out var min);
+        Icons.Draw(ImGui.GetWindowDrawList(), icon, min + new Vector2((side - glyph) / 2f), glyph, colour);
+        return clicked;
+    }
+
+    /// <summary>
+    /// Fluent's standard button, or the accent one. One accent button per surface at most;
+    /// it is the action the surface exists for.
+    /// </summary>
+    public static bool Button(string label, Vector2 size, bool accent = false, bool enabled = true)
+    {
+        var min = ImGui.GetCursorScreenPos();
+        bool clicked = ImGui.InvisibleButton(label, size) && enabled;
+        bool hovered = ImGui.IsItemHovered() && enabled;
+        bool held = ImGui.IsItemActive() && enabled;
+
+        var draw = ImGui.GetWindowDrawList();
+        float r = Layout.S(Theme.RadiusControl);
+
+        Vector4 fill, text;
+        if (accent)
+        {
+            fill = !enabled ? Theme.Alpha(Theme.TextPrimary, 0.16f)
+                 : held ? Theme.Alpha(Theme.Accent, 0.8f)
+                 : hovered ? Theme.Alpha(Theme.Accent, 0.9f)
+                 : Theme.Accent;
+            text = enabled ? Theme.TextOnAccent : Theme.TextDisabled;
+        }
+        else
+        {
+            fill = held ? Theme.ControlFillPressed : hovered ? Theme.ControlFillHover : Theme.ControlFill;
+            text = !enabled ? Theme.TextDisabled : held ? Theme.TextSecondary : Theme.TextPrimary;
+        }
+
+        draw.AddRectFilled(min, min + size, Theme.U32(fill), r);
+        if (!accent) draw.AddRect(min, min + size, Theme.U32(Theme.ControlStroke), r);
+
+        var measured = Measure(F.Body, label);
+        DrawText(draw, F.Body, min + (size - measured) * 0.5f, text, label);
+        return clicked;
+    }
+
+    /// <summary>Shows <paramref name="text"/> as a tooltip for the last item, after the usual hover delay.</summary>
+    public static void Tooltip(string text)
+    {
+        if (text.Length == 0 || !ImGui.IsItemHovered(ImGuiHoveredFlags.ForTooltip)) return;
+        ShowTooltip(text);
+    }
+
+    public static void ShowTooltip(string text)
+    {
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(Layout.S(8), Layout.S(6)));
+        ImGui.PushStyleVar(ImGuiStyleVar.PopupRounding, Layout.S(Theme.RadiusControl));
+        ImGui.PushStyleColor(ImGuiCol.PopupBg, Theme.Surface);
+        if (ImGui.BeginTooltip())
+        {
+            ImGui.PushTextWrapPos(Layout.S(320));
+            Text(F.Caption, Theme.TextPrimary, text);
+            ImGui.PopTextWrapPos();
+            ImGui.EndTooltip();
+        }
+        ImGui.PopStyleColor();
+        ImGui.PopStyleVar(2);
+    }
+
+    // ── switch and slider ────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Fluent's toggle switch, 40×20. Off is an outline with a pale knob, on is the accent
+    /// with a dark one; the knob grows by a pixel on each side under the pointer.
+    /// </summary>
+    public static bool ToggleSwitch(string id, ref bool value, bool enabled = true)
+    {
+        var pos = ImGui.GetCursorScreenPos();
+        bool clicked = ImGui.InvisibleButton(id, SwitchSize) && enabled;
+        if (clicked) value = !value;
+        DrawSwitch(ImGui.GetWindowDrawList(), pos, value, enabled,
+                   ImGui.IsItemHovered() && enabled, ImGui.IsItemActive() && enabled);
+        return clicked;
+    }
+
+    public static Vector2 SwitchSize => new(Layout.S(40), Layout.S(20));
+
+    /// <summary>The switch's pixels alone, for a caller whose hit area is larger than the track.</summary>
+    public static void DrawSwitch(ImDrawListPtr draw, Vector2 pos, bool value, bool enabled, bool hovered, bool held)
+    {
+        var size = SwitchSize;
+        float r = size.Y / 2f;
+        var centreY = pos.Y + r;
+
+        float knob = Layout.S(hovered || held ? 7f : 6f);
+        float travel = size.X - r * 2f;
+
+        if (value && enabled)
+        {
+            draw.AddRectFilled(pos, pos + size, Theme.U32(hovered ? Theme.Alpha(Theme.Accent, 0.9f) : Theme.Accent), r);
+            draw.AddCircleFilled(new Vector2(pos.X + r + travel, centreY), knob, Theme.U32(Theme.TextOnAccent));
+        }
+        else if (value)
+        {
+            draw.AddRectFilled(pos, pos + size, Theme.U32(Theme.Alpha(Theme.TextPrimary, 0.16f)), r);
+            draw.AddCircleFilled(new Vector2(pos.X + r + travel, centreY), knob, Theme.U32(Theme.TextDisabled));
+        }
+        else
+        {
+            if (hovered) draw.AddRectFilled(pos, pos + size, Theme.U32(Theme.SubtleHover), r);
+            draw.AddRect(pos, pos + size, Theme.U32(enabled ? Theme.ControlStrong : Theme.Alpha(Theme.TextPrimary, 0.16f)), r);
+            draw.AddCircleFilled(new Vector2(pos.X + r, centreY), knob,
+                Theme.U32(enabled ? Theme.TextSecondary : Theme.TextDisabled));
+        }
+    }
+
+    /// <summary>
+    /// A setting's name on the left and its switch on the right, both centred on one row —
+    /// the shape every on/off setting in Windows takes.
+    /// </summary>
+    public static bool LabelSwitch(string label, string id, ref bool value, bool enabled = true)
+    {
+        var pos = ImGui.GetCursorScreenPos();
+        float width = ImGui.GetContentRegionAvail().X;
+        float row = Layout.S(32);
+        var size = SwitchSize;
+
+        var text = Measure(F.Body, label);
+        DrawText(ImGui.GetWindowDrawList(), F.Body, new Vector2(pos.X, pos.Y + (row - text.Y) / 2f),
+                 enabled ? Theme.TextPrimary : Theme.TextDisabled, label);
+
+        ImGui.SetCursorScreenPos(new Vector2(pos.X + width - size.X, pos.Y + (row - size.Y) / 2f));
+        bool clicked = ToggleSwitch(id, ref value, enabled);
+        ImGui.SetCursorScreenPos(new Vector2(pos.X, pos.Y));
+        ImGui.Dummy(new Vector2(width, row));
+        return clicked;
+    }
+
+    /// <summary>A label on the left and a value right-aligned on the same line, as a slider's header.</summary>
+    public static void LabelValue(string label, string value, Vector4 valueColour, bool enabled = true) =>
+        LabelValueWidth(label, value, valueColour, ImGui.GetContentRegionAvail().X, enabled);
+
+    public static void LabelValueWidth(string label, string value, Vector4 valueColour, float width, bool enabled = true)
+    {
+        var pos = ImGui.GetCursorScreenPos();
+        var draw = ImGui.GetWindowDrawList();
+
+        var l = Measure(F.Body, label);
+        var v = Measure(F.Body, value);
+        DrawText(draw, F.Body, pos, enabled ? Theme.TextPrimary : Theme.TextDisabled, label);
+        DrawText(draw, F.Body, new Vector2(pos.X + width - v.X, pos.Y), enabled ? valueColour : Theme.TextDisabled, value);
+        ImGui.Dummy(new Vector2(width, Math.Max(l.Y, v.Y)));
+    }
+
+    /// <summary>
+    /// Fluent's slider: a 4px track filled with the accent up to the value, and a 20px
+    /// thumb whose accent centre swells under the pointer and shrinks while dragged.
+    /// </summary>
+    public static bool Slider(string id, ref float value, float min, float max, bool enabled = true, float width = 0f)
+    {
+        if (width <= 0) width = ImGui.GetContentRegionAvail().X;
+        float thumb = Layout.S(20);
+        var pos = ImGui.GetCursorScreenPos();
+
+        ImGui.InvisibleButton(id, new Vector2(width, thumb));
+        bool hovered = ImGui.IsItemHovered() && enabled;
+        bool held = ImGui.IsItemActive() && enabled;
+
+        // The thumb's centre travels between half a thumb from either end, so it never
+        // hangs over the edge of whatever the slider sits in.
+        float left = pos.X + thumb / 2f, right = pos.X + width - thumb / 2f;
+        bool changed = false;
+        if (held && right > left)
+        {
+            float t = Math.Clamp((ImGui.GetIO().MousePos.X - left) / (right - left), 0f, 1f);
+            float next = min + t * (max - min);
+            if (Math.Abs(next - value) > float.Epsilon) { value = next; changed = true; }
+        }
+
+        float frac = max > min ? Math.Clamp((value - min) / (max - min), 0f, 1f) : 0f;
+        float x = left + frac * (right - left);
+        float cy = pos.Y + thumb / 2f;
+        float track = Layout.S(4);
+
+        var draw = ImGui.GetWindowDrawList();
+        var fill = enabled ? Theme.Accent : Theme.TextDisabled;
+        draw.AddRectFilled(new Vector2(left, cy - track / 2f), new Vector2(right, cy + track / 2f),
+            Theme.U32(enabled ? Theme.ControlStrong : Theme.Alpha(Theme.TextPrimary, 0.16f)), track / 2f);
+        draw.AddRectFilled(new Vector2(left, cy - track / 2f), new Vector2(x, cy + track / 2f), Theme.U32(fill), track / 2f);
+
+        draw.AddCircleFilled(new Vector2(x, cy), thumb / 2f, Theme.U32(new Vector4(0.271f, 0.271f, 0.271f, 1f)));
+        draw.AddCircle(new Vector2(x, cy), thumb / 2f, Theme.U32(Theme.ControlStroke));
+        float inner = Layout.S(held ? 5f : hovered ? 7f : 6f);
+        draw.AddCircleFilled(new Vector2(x, cy), inner, Theme.U32(fill));
+
+        return changed;
+    }
+
+    // ── combo box and list rows ──────────────────────────────────────────────────
+
+    /// <summary>
+    /// Fluent's combo box: a 32px control with the value and a chevron, opening a list of
+    /// rows under it — or over it, when there is no room below, which there usually is
+    /// not in a flyout that sits on the bottom edge.
+    /// </summary>
+    public static bool Combo(string id, string preview, IReadOnlyList<string> options, int current, out int chosen)
+    {
+        chosen = current;
+        float width = ImGui.GetContentRegionAvail().X;
+        var size = new Vector2(width, Layout.S(32));
+        var min = ImGui.GetCursorScreenPos();
+
+        bool clicked = ImGui.InvisibleButton(id, size);
+        bool hovered = ImGui.IsItemHovered();
+        bool held = ImGui.IsItemActive();
+        if (clicked) ImGui.OpenPopup(id + "##list");
+
+        var draw = ImGui.GetWindowDrawList();
+        float r = Layout.S(Theme.RadiusControl);
+        draw.AddRectFilled(min, min + size, Theme.U32(held ? Theme.ControlFillPressed : hovered ? Theme.ControlFillHover : Theme.ControlFill), r);
+        draw.AddRect(min, min + size, Theme.U32(Theme.ControlStroke), r);
+
+        float pad = Layout.S(11), chevron = Layout.S(12);
+        var textSize = Measure(F.Body, preview);
+        draw.PushClipRect(min, min + new Vector2(width - pad - chevron - Layout.S(4), size.Y), true);
+        DrawText(draw, F.Body, new Vector2(min.X + pad, min.Y + (size.Y - textSize.Y) / 2f), Theme.TextPrimary, preview);
+        draw.PopClipRect();
+        Icons.Draw(draw, Icon.ChevronDown, new Vector2(min.X + width - pad - chevron, min.Y + (size.Y - chevron) / 2f),
+                   chevron, Theme.TextSecondary);
+
+        float rowH = Layout.S(36), padY = Layout.S(4);
+        float listH = Math.Min(rowH * options.Count + padY * 2, Layout.S(360));
+        float display = ImGui.GetIO().DisplaySize.Y;
+        bool above = min.Y + size.Y + Layout.S(4) + listH > display - Layout.S(8);
+
+        ImGui.SetNextWindowPos(above ? new Vector2(min.X, min.Y - Layout.S(4)) : new Vector2(min.X, min.Y + size.Y + Layout.S(4)),
+                               ImGuiCond.Always, above ? new Vector2(0, 1) : Vector2.Zero);
+        ImGui.SetNextWindowSize(new Vector2(width, listH));
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(Layout.S(4), padY));
+        ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, Vector2.Zero);
+
+        bool changed = false;
+        if (ImGui.BeginPopup(id + "##list"))
+        {
+            for (int i = 0; i < options.Count; i++)
+            {
+                if (ListRow($"{id}#{i}", rowH, i == current, true, out var rowMin, out var rowMax) && i != current)
+                {
+                    chosen = i;
+                    changed = true;
+                    ImGui.CloseCurrentPopup();
+                }
+                var t = Measure(F.Body, options[i]);
+                DrawText(ImGui.GetWindowDrawList(), F.Body,
+                         new Vector2(rowMin.X + Layout.S(12), rowMin.Y + (rowMax.Y - rowMin.Y - t.Y) / 2f),
+                         Theme.TextPrimary, options[i]);
+            }
+            ImGui.EndPopup();
+        }
+
+        ImGui.PopStyleVar(2);
+        return changed;
+    }
+
+    /// <summary>
+    /// A full-width list row: transparent at rest, a faint fill under the pointer, and when
+    /// selected that fill plus the accent pill on the left edge — Fluent's list selection.
+    /// The caller draws the content into the returned rectangle.
+    /// </summary>
+    public static bool ListRow(string id, float height, bool selected, bool enabled, out Vector2 min, out Vector2 max)
+    {
+        float width = ImGui.GetContentRegionAvail().X;
+        min = ImGui.GetCursorScreenPos();
+        max = min + new Vector2(width, height);
+
+        bool clicked = ImGui.InvisibleButton(id, new Vector2(width, height)) && enabled;
+        bool hovered = ImGui.IsItemHovered() && enabled;
+        bool held = ImGui.IsItemActive() && enabled;
+
+        var draw = ImGui.GetWindowDrawList();
+        var fill = held ? Theme.SubtlePressed : selected || hovered ? Theme.SubtleHover : default;
+        if (fill.W > 0) draw.AddRectFilled(min, max, Theme.U32(fill), Layout.S(Theme.RadiusControl));
+
+        if (selected)
+        {
+            float pill = Layout.S(16), w = Layout.S(3);
+            float y = min.Y + (height - pill) / 2f;
+            draw.AddRectFilled(new Vector2(min.X, y), new Vector2(min.X + w, y + pill), Theme.U32(Theme.Accent), w / 2f);
+        }
+
+        return clicked;
+    }
+
+    // ── measurement graphics ─────────────────────────────────────────────────────
+
+    /// <summary>
+    /// GPU, CPU and headroom against the frame budget, as segments on a 6px track. Over
+    /// budget is drawn as a full bar of cost, which is the honest picture: there is no
+    /// headroom.
+    /// </summary>
+    public static void BudgetBar(double gpuMs, double cpuMs, double budgetMs, float height = 6f)
     {
         height = Layout.S(height);
         float width = ImGui.GetContentRegionAvail().X;
         var pos = ImGui.GetCursorScreenPos();
         var draw = ImGui.GetWindowDrawList();
 
-        draw.AddRectFilled(pos, pos + new Vector2(width, height),
-            Theme.U32(new Vector4(1, 1, 1, 0.06f)), Theme.RadiusPill);
+        draw.AddRectFilled(pos, pos + new Vector2(width, height), Theme.U32(Theme.Alpha(Theme.TextPrimary, 0.12f)), height / 2f);
 
         if (budgetMs > 0)
         {
-            double headroom = Math.Max(0, budgetMs - gpuMs - cpuMs);
-            // Over budget is drawn as a full bar of cost with no headroom, which is the
-            // honest picture: there is none.
-            (double ms, Vector4 colour)[] segments =
-            [
-                (gpuMs, Theme.Alpha(Theme.Warn, 0.8f)),
-                (cpuMs, Theme.Alpha(Theme.TextPrimary, 0.35f)),
-                (headroom, Theme.Alpha(Theme.Good, 0.8f))
-            ];
-
             float x = pos.X;
-            foreach (var (ms, colour) in segments)
+            float gap = Layout.S(2);
+            Segment(gpuMs, gpuMs + cpuMs > budgetMs ? Theme.Critical : Theme.Accent);
+            Segment(cpuMs, new Vector4(0.54f, 0.54f, 0.54f, 1f));
+
+            void Segment(double ms, Vector4 colour)
             {
-                float w = (float)(ms / budgetMs) * width;
-                if (w < 1.5f) continue;
-                draw.AddRectFilled(new Vector2(x, pos.Y), new Vector2(x + w - Layout.S(2), pos.Y + height),
-                    Theme.U32(colour), Theme.RadiusPill);
-                x += w;
+                float w = (float)Math.Min(ms / budgetMs * width, pos.X + width - x);
+                if (w < 1.5f) return;
+                draw.AddRectFilled(new Vector2(x, pos.Y), new Vector2(x + w, pos.Y + height), Theme.U32(colour), height / 2f);
+                x += w + gap;
             }
         }
 
         ImGui.Dummy(new Vector2(width, height));
     }
 
-    /// <summary>One cell of the metric grid: label above, value and unit below.</summary>
-    public static void Metric(Fonts fonts, string label, string value, string unit, Vector4? valueColour = null)
-    {
-        ImGui.BeginGroup();
-        Text(fonts.Micro, Theme.Alpha(Theme.TextPrimary, 0.62f), label);
-        Text(fonts.MonoValue, valueColour ?? Theme.TextPrimary, value);
-        if (unit.Length > 0)
-        {
-            ImGui.SameLine(0, 3);
-            Text(fonts.Micro, Theme.TextMuted, unit);
-        }
-        ImGui.EndGroup();
-    }
-
     /// <summary>
-    /// A rounded surface to group controls on. Returns the draw-list index so the caller
-    /// can close it with <see cref="EndCard"/> once the height is known — ImGui does not
-    /// know how tall a group is until it has been laid out.
-    /// </summary>
-    public static Vector2 BeginCard(Vector4 background, float paddingX = 11f, float paddingY = 9f)
-    {
-        paddingX = Layout.S(paddingX); paddingY = Layout.S(paddingY);
-        var start = ImGui.GetCursorScreenPos();
-        var draw = ImGui.GetWindowDrawList();
-        draw.ChannelsSplit(2);
-        draw.ChannelsSetCurrent(1);
-        ImGui.Dummy(new Vector2(0, Math.Max(0, paddingY - ImGui.GetStyle().ItemSpacing.Y)));
-
-        // Indent both edges, so a right-aligned value lands inside the card rather than
-        // on its border. Only the left is an Indent; the right comes off the item width.
-        ImGui.Indent(paddingX);
-        ImGui.PushItemWidth(-paddingX);
-        _cardInsetRight = paddingX;
-        return start;
-    }
-
-    public static void EndCard(Vector2 start, Vector4 background, float paddingX = 11f, float paddingY = 9f, float radius = Theme.RadiusCard)
-    {
-        paddingX = Layout.S(paddingX); paddingY = Layout.S(paddingY);
-        _cardInsetRight = 0;
-        ImGui.PopItemWidth();
-        ImGui.Unindent(paddingX);
-        ImGui.Dummy(new Vector2(0, Math.Max(0, paddingY - ImGui.GetStyle().ItemSpacing.Y)));
-
-        // The card spans the content width exactly. Adding the padding back on here was a
-        // bug: the padding is inside the card, not extra width around it, and the cards
-        // spilled past the panel edge because of it.
-        float width = ImGui.GetContentRegionAvail().X;
-        var end = new Vector2(start.X + width, ImGui.GetCursorScreenPos().Y);
-
-        var draw = ImGui.GetWindowDrawList();
-        draw.ChannelsSetCurrent(0);
-        draw.AddRectFilled(start, end, Theme.U32(background), Layout.S(radius));
-        draw.ChannelsMerge();
-
-        // A gap after every card, always. Without it two cards share an edge and read as
-        // one block — which is how the audio card looked like part of the HDR card once
-        // the brightness row disappeared and the HDR card shrank to a single line.
-        ImGui.Dummy(new Vector2(0, Layout.S(5)));
-    }
-
-    /// <summary>
-    /// Label on the left, value right-aligned on the same line. Used everywhere a card
-    /// has a name and a number, which is most of them.
-    /// </summary>
-    public static void LabelValue(ImFontPtr labelFont, Vector4 labelColour, string label,
-                                  ImFontPtr valueFont, Vector4 valueColour, string value,
-                                  float rightInset = 0f)
-    {
-        Text(labelFont, labelColour, label);
-        float w = Measure(valueFont, value).X;
-        ImGui.SameLine(Math.Max(0, RightEdge() - w - rightInset));
-        Text(valueFont, valueColour, value);
-    }
-
-    /// <summary>
-    /// A radio row from the design: full-width, rounded, with a ring-and-dot on the left
-    /// and a cost on the right. The note underneath is what the row will do, not what it
-    /// is — inactive rows warn that they take the frame path over from the current one.
-    /// </summary>
-    /// <param name="scale">
-    /// Shown immediately left of the cost, on the active row only. Empty otherwise — the
-    /// design puts it there so the number that decides whether an upscaler does anything
-    /// sits next to what it costs.
-    /// </param>
-    public static bool RadioRow(Fonts fonts, string label, string note, string cost,
-                                bool selected, bool enabled = true,
-                                string scale = "", Vector4? scaleColour = null)
-    {
-        float padX = Layout.S(11), padY = Layout.S(8), gap = Layout.S(9);
-        float ringOuter = Layout.S(15) / 2f;
-
-        // A note only earns its line when it says something. Repeating "this replaces the
-        // current one" under every unselected row was three lines of the same sentence,
-        // and it pushed everything else off the panel.
-        bool hasNote = note.Length > 0;
-
-        var start = ImGui.GetCursorScreenPos();
-        float width = ImGui.GetContentRegionAvail().X;
-        float labelH = Measure(fonts.Heading, label).Y;
-        float height = labelH + padY * 2 + (hasNote ? Measure(fonts.Micro, note).Y + Layout.S(2) : 0);
-
-        bool clicked = ImGui.InvisibleButton(label, new Vector2(width, height)) && enabled;
-        bool hovered = ImGui.IsItemHovered() && enabled;
-
-        var background = selected ? Theme.CardActive
-                       : hovered ? Theme.CardHover
-                       : Theme.RowInactive;
-
-        var draw = ImGui.GetWindowDrawList();
-        draw.AddRectFilled(start, start + new Vector2(width, height), Theme.U32(background), Layout.S(Theme.RadiusRow));
-
-        // A 15px ring at 1.5px with a 7px dot, per the control anatomy — all scaled.
-        var ringCentre = new Vector2(start.X + padX + ringOuter, start.Y + height / 2f);
-        draw.AddCircle(ringCentre, ringOuter, Theme.U32(selected ? Theme.Accent : new Vector4(1, 1, 1, 0.22f)),
-                       0, Math.Max(1f, Layout.S(1.5f)));
-        if (selected) draw.AddCircleFilled(ringCentre, Layout.S(7) / 2f, Theme.U32(Theme.Accent));
-
-        float textX = start.X + padX + ringOuter * 2 + gap;
-        var labelColour = !enabled ? Theme.Alpha(Theme.TextPrimary, 0.35f)
-                        : selected ? Theme.AccentText : Theme.TextPrimary;
-
-        bool pushed = Push(fonts.Heading);
-        draw.AddText(new Vector2(textX, start.Y + padY), Theme.U32(labelColour), label);
-        if (pushed) ImGui.PopFont();
-
-        if (hasNote)
-        {
-            pushed = Push(fonts.Micro);
-            var noteColour = !enabled ? Theme.Alpha(Theme.Warn, 0.5f) : Theme.TextMuted;
-            draw.AddText(new Vector2(textX, start.Y + padY + labelH + Layout.S(2)), Theme.U32(noteColour), note);
-            if (pushed) ImGui.PopFont();
-        }
-
-        float right = start.X + width - Layout.S(11);
-        float costY = start.Y + (height - Measure(fonts.MonoCost, "0").Y) / 2f;
-
-        if (cost.Length > 0)
-        {
-            var costSize = Measure(fonts.MonoCost, cost);
-            right -= costSize.X;
-            pushed = Push(fonts.MonoCost);
-            draw.AddText(new Vector2(right, costY),
-                         Theme.U32(selected ? Theme.AccentText : Theme.TextMuted), cost);
-            if (pushed) ImGui.PopFont();
-        }
-
-        // The scale factor sits immediately left of the cost, on the active row only.
-        if (scale.Length > 0)
-        {
-            var scaleSize = Measure(fonts.MonoCost, scale);
-            right -= scaleSize.X + Layout.S(9);
-            pushed = Push(fonts.MonoCost);
-            draw.AddText(new Vector2(right, costY), Theme.U32(scaleColour ?? Theme.TextMuted), scale);
-            if (pushed) ImGui.PopFont();
-        }
-
-        return clicked && !selected;
-    }
-
-    /// <summary>The 32x18 switch, with the knob travel the design specifies.</summary>
-    public static bool Toggle(string id, ref bool value, bool enabled = true)
-    {
-        var pos = ImGui.GetCursorScreenPos();
-        var size = new Vector2(Layout.S(36), Layout.S(20));
-
-        bool clicked = ImGui.InvisibleButton(id, size) && enabled;
-        if (clicked) value = !value;
-
-        var track = !enabled ? new Vector4(1, 1, 1, 0.06f)
-                  : value ? Theme.Alpha(Theme.Accent, 0.60f)
-                  : new Vector4(1, 1, 1, 0.11f);
-
-        var draw = ImGui.GetWindowDrawList();
-        draw.AddRectFilled(pos, pos + size, Theme.U32(track), size.Y / 2f);
-
-        // `knob` is a radius. The previous version subtracted it from the track width as
-        // though it were a diameter, so the "on" position pushed half the knob outside the
-        // track — which is what made every switch look crooked.
-        float inset = size.Y * 0.14f;
-        float knob = size.Y / 2f - inset;
-        float knobX = value ? pos.X + size.X - inset - knob : pos.X + inset + knob;
-        draw.AddCircleFilled(new Vector2(knobX, pos.Y + size.Y / 2f),
-            knob, Theme.U32(Theme.Alpha(Theme.TextPrimary, enabled ? 0.95f : 0.4f)));
-
-        return clicked;
-    }
-
-    /// <summary>
-    /// The frame-time graph: 70 samples against a dashed budget line. Deliberately not a
-    /// ImGui.PlotLines — the budget line is the whole point, and PlotLines cannot draw it.
+    /// Frame time against a dashed budget line. Not ImGui.PlotLines: the budget line is
+    /// the point, and PlotLines cannot draw it.
     /// </summary>
     public static void FrameGraph(ReadOnlySpan<float> samples, double budgetMs, float height = 44f)
     {
@@ -395,10 +495,10 @@ public static class Widgets
         float scale = (float)Math.Max(budgetMs * 1.25, 0.001);
         float budgetY = pos.Y + height * (1f - (float)budgetMs / scale);
 
-        // Dashed, because a solid line here reads as data rather than as a threshold.
+        // Dashed, because a solid line reads as data rather than as a threshold.
         for (float x = pos.X; x < pos.X + width; x += Layout.S(8))
             draw.AddLine(new Vector2(x, budgetY), new Vector2(Math.Min(x + Layout.S(3), pos.X + width), budgetY),
-                         Theme.U32(Theme.Alpha(Theme.Bad, 0.45f)), 1f);
+                         Theme.U32(Theme.TextTertiary), 1f);
 
         if (samples.Length >= 2)
         {
@@ -409,16 +509,8 @@ public static class Widgets
                 float v = Math.Clamp(samples[i] / scale, 0f, 1f);
                 points[i] = new Vector2(pos.X + i * step, pos.Y + height * (1f - v));
             }
-
-            // Area fill first, as a strip of quads down to the baseline.
-            uint fill = Theme.U32(Theme.Alpha(Theme.Accent, 0.10f));
-            float baseline = pos.Y + height;
             for (int i = 0; i < samples.Length - 1; i++)
-                draw.AddQuadFilled(points[i], points[i + 1],
-                    new Vector2(points[i + 1].X, baseline), new Vector2(points[i].X, baseline), fill);
-
-            for (int i = 0; i < samples.Length - 1; i++)
-                draw.AddLine(points[i], points[i + 1], Theme.U32(Theme.Alpha(Theme.Accent, 0.8f)), Layout.S(1.4f));
+                draw.AddLine(points[i], points[i + 1], Theme.U32(Theme.Accent), Math.Max(1f, Layout.S(1.5f)));
         }
 
         ImGui.Dummy(new Vector2(width, height));

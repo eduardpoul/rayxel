@@ -54,7 +54,13 @@ public static class Brand
         }
     }
 
+    /// <summary>
+    /// The mark's own blue, <c>#8ab4ff</c>. Not the theme accent: that follows the user's
+    /// Windows colour, and a logo that changes colour with the desktop is not a logo.
+    /// </summary>
+    public static readonly Vector4 Colour = new(0x8a / 255f, 0xb4 / 255f, 1f, 1f);
+
     /// <inheritdoc cref="Mark(ImDrawListPtr, Vector2, float, Vector4)"/>
     public static void Mark(ImDrawListPtr draw, Vector2 topLeft, float size) =>
-        Mark(draw, topLeft, size, Theme.Accent);
+        Mark(draw, topLeft, size, Colour);
 }

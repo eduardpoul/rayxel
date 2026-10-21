@@ -63,11 +63,6 @@
          the icon <ApplicationIcon> puts in the executable's resources belongs to the
          apphost, not to us. Embedded rather than copied, for the reason above. -->
     <EmbeddedResource Include="Assets\Brand\rayxel.ico" />
-
-    <!-- The designed typefaces, if whoever builds this has put them there. Absent by
-         default: bundling someone else's font binaries is a licensing decision, and the
-         app falls back to system faces that carry the same Cyrillic. -->
-    <Content Include="Assets\Fonts\*.ttf" Link="Assets\Fonts\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

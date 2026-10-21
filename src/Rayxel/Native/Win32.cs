@@ -84,6 +84,8 @@ public static unsafe class Win32
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
     [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
     [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
+    [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT p);
+    [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
     [DllImport("user32.dll")] public static extern IntPtr SetForegroundWindow(IntPtr h);
     [DllImport("user32.dll")] public static extern IntPtr LoadCursorW(IntPtr inst, IntPtr name);
     [DllImport("user32.dll")] public static extern int GetSystemMetrics(int index);
@@ -110,6 +112,17 @@ public static unsafe class Win32
     public static extern IntPtr SetWindowLongPtr(IntPtr h, int index, IntPtr value);
     [DllImport("user32.dll")] public static extern IntPtr MonitorFromWindow(IntPtr h, uint flags);
     [DllImport("user32.dll")] public static extern bool GetMonitorInfoW(IntPtr monitor, ref MONITORINFO info);
+
+    public const int WM_MOVE = 0x0003, WM_DISPLAYCHANGE = 0x007E;
+
+    /// <summary>Height in pixels of the monitor the window is mostly on, or 0 if it cannot be read.</summary>
+    public static int MonitorHeight(IntPtr hwnd)
+    {
+        var info = new MONITORINFO { cbSize = (uint)Marshal.SizeOf<MONITORINFO>() };
+        return GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), ref info)
+            ? info.Monitor.Bottom - info.Monitor.Top
+            : 0;
+    }
 
     [StructLayout(LayoutKind.Sequential)]
     public struct MONITORINFO

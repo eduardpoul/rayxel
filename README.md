@@ -32,21 +32,25 @@ uncompressed mode, and follows the Windows HDR state.
 
 | Key | |
 |---|---|
-| `Tab` | settings panel |
-| `T` | telemetry readout |
-| `M` | capture-mode table |
+| `Esc` / `Tab` | the control bar; `Esc` closes whatever is open on it first |
+| `T` | telemetry: off → one line → the full card |
+| `M` | capture-mode list |
 | `F11` | borderless full screen |
 | `1` / `2` / `3` | no processing / NIS / RTX VSR |
 | `H` | RTX HDR |
-| `Esc` | quit, with a confirmation |
+
+Closing the window asks first.
 
 **Press F11.** In a window the desktop compositor adds a whole frame — 8.3 ms at 120 fps,
 more than RTX VSR (4.50 ms) and RTX HDR (0.66 ms) together. Borderless reaches a hardware
 overlay plane instead. The telemetry's `present:` field says which one you have:
 `Overlay` good, `Composed` costly.
 
-The settings panel hides itself after five seconds of not being touched; the faint gear in
-the top-right corner brings it back.
+The controls are one bar along the bottom edge. It comes up when the mouse moves over the
+picture and goes away, with the pointer, five seconds after it stops — a gamepad never
+moves it, so playing never brings it up. Capture mode and scaler are dropdowns on the bar;
+device, audio, HDR brightness, window and language are behind `…`. Right-clicking the
+title bar or `Alt+Space` offers the same settings from the window's own menu.
 
 ## Where it keeps things
 
@@ -54,10 +58,6 @@ the top-right corner brings it back.
 %LOCALAPPDATA%\Rayxel\settings.json     what you last chose
 %LOCALAPPDATA%\Rayxel\logs\             one rolling log per run
 ```
-
-Beside the executable, not in it: `Assets\Fonts\`. Drop `SpaceGrotesk-Medium.ttf` and
-`RobotoMono-Regular.ttf` there for the designed typefaces. Without them it falls back to
-Segoe UI and Cascadia Mono, which carry the same Cyrillic, and says so in the log.
 
 ## Command line
 
@@ -74,7 +74,7 @@ Everything below is optional; the app needs no arguments.
 | `--verbose` | debug-level logging |
 | `--shot=<file.png>` | render for a few seconds, write the frame to a PNG, exit |
 | `--no-auto-hdr` | do not follow the Windows HDR state at start-up |
-| `--screen=splash\|devices\|app\|nosignal\|modes\|quit` | force a screen, for inspecting it |
+| `--screen=<name>` | force a state, for inspecting it: `splash`, `devices`, `app`, `nosignal`, `busy`, `composed`, `modes`, `scaler`, `more`, `quit` |
 
 `--shot` captures the **back buffer**, not the screen, so it works when the window is
 occluded or on a display nobody is looking at. It is how the interface was checked.

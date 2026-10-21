@@ -89,6 +89,12 @@ WindowKind? pendingWindowKind = null;
 bool pendingAudioRestart = false;
 WindowMode? windowMode = null;
 
+// The last pointer position seen, so a WM_MOUSEMOVE that Windows sends without the mouse
+// having moved — it does, when a window under a still pointer changes — does not bring
+// the bar back up by itself.
+IntPtr lastPointer = new(-1);
+bool cursorWasHidden = false;
+
 // Every device Windows currently offers, refreshed whenever the menu opens so a card
 // plugged in mid-session shows up. Separate from what we have actually opened: enumerating
 // is free, opening is not, and opening a device is what makes a webcam's light come on.
@@ -182,6 +188,7 @@ try
     const int WindowWidth = 1600, WindowHeight = 900;
     hwnd = Win32.CreateAppWindow("Rayxel", wndProc, WindowWidth, WindowHeight,
                                  AppIcon.Large, AppIcon.Small);
+    Layout.DisplayHeight = Win32.MonitorHeight(hwnd);
     // A way into the panel that needs no hotkey and draws nothing over the video.
     Win32.AddSystemMenuItem(hwnd, Win32.SC_APP_SETTINGS, Strings.T("params"));
     // A swapchain behind another window is not composed at all, which shows up as
@@ -210,7 +217,7 @@ try
     if (startBorderless) pendingWindowKind = WindowKind.BorderlessFullscreen;
     model.RestartAudio = () => pendingAudioRestart = true;
     model.ShowTelemetry = startWithTelemetry || settings.ShowTelemetry;
-    model.ShowSettings = settings.ShowSettings;
+    model.TelemetryDetailed = settings.TelemetryDetailed;
     model.OverlayNits = settings.OverlayNits;
     model.VideoNits = settings.VideoNits;
     model.AudioEnabled = settings.AudioEnabled;
@@ -235,8 +242,12 @@ try
             _ => Screen.App
         };
     if (forcedScreen == "nosignal") model.ForceNoSignal = true;
+    if (forcedScreen == "busy") model.ForceBusy = true;
+    if (forcedScreen == "composed") model.ForceComposed = true;
     // Opens the states that need a click to reach, so they can be checked without one.
-    if (forcedScreen == "modes") model.ModeTableOpen = true;
+    if (forcedScreen == "modes") model.Flyout = Flyout.Mode;
+    if (forcedScreen == "scaler") model.Flyout = Flyout.Scaler;
+    if (forcedScreen == "more") model.Flyout = Flyout.More;
     if (forcedScreen == "quit") model.ConfirmQuit = true;
 
     var initial = ForcedMode(active, forcedMode) ?? RememberedMode(active, settings) ?? PickInitialMode(active);
@@ -961,6 +972,15 @@ void RunLoop()
 
         AppShell.Tick(model, dt * 1000.0, advance: forcedScreen is null);
 
+        // The pointer goes when the bar goes. WM_SETCURSOR keeps it hidden once the bar
+        // is away, but it only arrives when the mouse moves — which brings the bar back —
+        // so the moment of hiding has to be acted on here. Only while the pointer is over
+        // our own client area: the cursor is shared, and blanking it over another window
+        // would be someone else's problem to explain.
+        if (model.CursorHidden && !cursorWasHidden && PointerOverClient())
+            Win32.SetCursor(IntPtr.Zero);
+        cursorWasHidden = model.CursorHidden;
+
         // The graph keeps its 5 Hz trace, but the numbers beside it are only replaced once
         // a second. Repainting them at frame rate left every trailing digit permanently in
         // motion, which reads as instability rather than as measurement.
@@ -1123,6 +1143,8 @@ void RunLoop()
             lastLoggedNewFrames = newFramesPresented;
 
             double budgetMs = pump.CurrentFps > 0 ? 1000.0 / pump.CurrentFps : 0;
+
+
             var age = s.PipelineDelayValid && budgetMs > 0
                 ? $"{s.PipelineDelayMs,5:0.0}ms/{s.PipelineDelayMs / budgetMs:0.00}fr"
                 : "        n/a";
@@ -1357,6 +1379,11 @@ IntPtr WindowProcCore(IntPtr h, uint msg, IntPtr wParam, IntPtr lParam)
         // WM_SETCURSOR is the only place a cursor change sticks; Windows resets it on
         // every move, so ImGui's requested cursor has to be re-applied from here.
         const int HTCLIENT = 1;
+        if (msg == Win32.WM_SETCURSOR && Win32.LoWord(lParam) == HTCLIENT && model is { CursorHidden: true })
+        {
+            Win32.SetCursor(IntPtr.Zero);
+            return 1;
+        }
         if (msg == Win32.WM_SETCURSOR && Win32.LoWord(lParam) == HTCLIENT && ui.WantsMouse)
         {
             ImGuiInput.ApplyCursor(ui);
@@ -1376,8 +1403,6 @@ IntPtr WindowProcCore(IntPtr h, uint msg, IntPtr wParam, IntPtr lParam)
             if (model is { ConfirmQuit: false })
             {
                 model.ConfirmQuit = true;
-                model.ShowSettings = true;
-                model.PanelActivity();
                 return IntPtr.Zero;
             }
             quit = true;
@@ -1390,15 +1415,37 @@ IntPtr WindowProcCore(IntPtr h, uint msg, IntPtr wParam, IntPtr lParam)
             return IntPtr.Zero;
 
         case Win32.WM_SIZE:
+            Layout.DisplayHeight = Win32.MonitorHeight(h);
             renderer?.Resize(Win32.LoWord(lParam), Win32.HiWord(lParam));
             return IntPtr.Zero;
+
+        // The interface is sized for the monitor the window is on, so it has to know when
+        // the window has been dragged to another one, or the display itself has changed.
+        case Win32.WM_MOVE:
+        case Win32.WM_DISPLAYCHANGE:
+            Layout.DisplayHeight = Win32.MonitorHeight(h);
+            break;
 
         // The window's own menu, from a right-click on the title bar or Alt+Space. With the
         // corner gear gone this is the only way back to the panel that does not need a
         // hotkey to be known first. Windows uses the low four bits of wParam itself, hence
         // the mask.
         case Win32.WM_SYSCOMMAND when ((int)wParam & 0xFFF0) == Win32.SC_APP_SETTINGS:
-            if (model is not null) { model.ShowSettings = true; model.PanelActivity(); }
+            if (model is not null) { model.Flyout = Flyout.None; model.ToggleFlyout(Flyout.More); }
+            return IntPtr.Zero;
+
+        // Any real movement of the pointer over the picture brings the bar up for five
+        // seconds. A gamepad never sends this, so playing never does.
+        case Win32.WM_MOUSEMOVE:
+            if (model is not null && lParam != lastPointer)
+            {
+                bool wasHidden = model.CursorHidden;
+                lastPointer = lParam;
+                model.PointerMoved();
+                // WM_SETCURSOR for this same movement came first and blanked it, so the
+                // pointer would stay invisible until the next move without this.
+                if (wasHidden) Win32.SetCursor(Win32.LoadCursorW(IntPtr.Zero, Win32.IDC_ARROW));
+            }
             return IntPtr.Zero;
 
         case Win32.WM_KEYDOWN:
@@ -1423,19 +1470,17 @@ void HandleKey(int vk, IntPtr h)
     {
         case Win32.VK_ESCAPE:
             // Esc never closes the app. It backs out of the innermost thing that is open,
-            // and once nothing is nested it toggles the panel: same key in, same key out.
-            if (model is { ModeTableOpen: true }) { model.ModeTableOpen = false; break; }
+            // and once nothing is nested it toggles the bar: same key in, same key out.
             if (model is { ConfirmQuit: true }) { model.ConfirmQuit = false; break; }
-            if (model is not null)
-            {
-                model.ShowSettings = !model.ShowSettings;
-                if (model.ShowSettings) model.PanelActivity();
-            }
+            if (model is not null && model.Flyout != Flyout.None) { model.Flyout = Flyout.None; break; }
+            // From the picker it goes back to the picture, if there is one to go back to.
+            if (model is { Screen: Screen.Devices } && pump?.State == CaptureState.Streaming) { model.Screen = Screen.App; break; }
+            if (model is not null) ToggleBar(model);
             break;
 
-        case 0x09: if (model is not null) model.ShowSettings = !model.ShowSettings; break;   // Tab
-        case 'T': if (model is not null) model.ShowTelemetry = !model.ShowTelemetry; break;
-        case 'M': if (model is not null) model.ModeTableOpen = !model.ModeTableOpen; break;
+        case 0x09: if (model is not null) ToggleBar(model); break;   // Tab
+        case 'T': model?.CycleTelemetry(); break;
+        case 'M': model?.ToggleFlyout(Flyout.Mode); break;
         case 'H': pendingHdrToggle = true; break;
         // F11 walks the three window modes, in the order the panel lists them.
         case 0x7A: pendingWindowKind = windowMode?.Kind switch
@@ -1457,6 +1502,23 @@ void HandleKey(int vk, IntPtr h)
         case 0xDB: pendingSharpness = -0.1f; break; // [
         case 0xDD: pendingSharpness = +0.1f; break; // ]
     }
+}
+
+static void ToggleBar(AppModel model)
+{
+    model.ShowBar = !model.ShowBar;
+    model.PanelActivity();
+}
+
+/// <summary>Whether the pointer is over this window's client area right now.</summary>
+bool PointerOverClient()
+{
+    if (!Win32.GetCursorPos(out var pt) || Win32.WindowFromPoint(pt) != hwnd) return false;
+    var origin = new Win32.POINT();
+    Win32.ClientToScreen(hwnd, ref origin);
+    Win32.GetClientRect(hwnd, out var client);
+    return pt.X >= origin.X && pt.Y >= origin.Y
+        && pt.X < origin.X + client.Right && pt.Y < origin.Y + client.Bottom;
 }
 
 /// <summary>Applies a radio choice through the toggles, which enforce the mutual exclusion.</summary>

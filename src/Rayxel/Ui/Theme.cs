@@ -1,16 +1,21 @@
 using System.Numerics;
 using ImGuiNET;
+using Microsoft.Win32;
 
 namespace Rayxel.Ui;
 
 /// <summary>
-/// The design tokens, verbatim from the handoff.
+/// Windows 11's own dark theme (Fluent 2), as far as an immediate-mode renderer can carry it.
 /// <para>
-/// One deliberate departure: the design specifies <c>backdrop-filter: blur()</c> on both
-/// panels, which an immediate-mode renderer cannot do without a second render pass over
-/// the frame — and this overlay sits inside an 8.33 ms budget. The surfaces are instead
-/// given slightly more alpha than specified, so they still read as glass rather than as
-/// a film. Everything else is the specified value.
+/// The previous palette was a navy base with pastel accents and glows, and it read as a
+/// generated dashboard rather than as something that belongs on Windows. These are the
+/// Fluent dark tokens instead: neutral greys, the user's own accent colour, 4px controls
+/// and 8px surfaces, strokes rather than tinted fills.
+/// </para>
+/// <para>
+/// What it cannot carry is Mica and acrylic. Both are a blur of what is behind the
+/// surface, and that is a second pass over the frame inside an 8.33 ms budget. Surfaces
+/// are opaque instead; over moving video that is also simply more readable.
 /// </para>
 /// </summary>
 public static class Theme
@@ -18,124 +23,146 @@ public static class Theme
     private static Vector4 Rgb(int hex, float a = 1f) => new(
         ((hex >> 16) & 0xFF) / 255f, ((hex >> 8) & 0xFF) / 255f, (hex & 0xFF) / 255f, a);
 
-    public static readonly Vector4 Base = Rgb(0x080b11);
-    public static readonly Vector4 TextPrimary = Rgb(0xe8ecf4);
-    public static readonly Vector4 TextSecondary = Rgb(0xe8ecf4, 0.70f);
-    public static readonly Vector4 TextMuted = Rgb(0xe8ecf4, 0.45f);
-    public static readonly Vector4 TextFaint = Rgb(0xe8ecf4, 0.32f);
+    private static Vector4 White(float a) => new(1f, 1f, 1f, a);
 
-    public static readonly Vector4 TextDim = Rgb(0xe8ecf4, 0.35f);
+    // Backgrounds, darkest first.
+    public static readonly Vector4 Stage = Rgb(0x1c1c1c);      // behind the no-signal and picker screens
+    public static readonly Vector4 Layer = Rgb(0x202020);      // dialogs' footer, telemetry
+    public static readonly Vector4 Card = Rgb(0x2b2b2b);       // cards, dialogs
+    public static readonly Vector4 Surface = Rgb(0x2c2c2c);    // the bar and its flyouts
 
-    public static readonly Vector4 Accent = Rgb(0x8ab4ff);
-    public static readonly Vector4 AccentText = Rgb(0xbcd3ff);
+    public static readonly Vector4 SurfaceStroke = Rgb(0x757575, 0.40f);
+    public static readonly Vector4 CardStroke = Rgb(0x000000, 0.25f);
+    public static readonly Vector4 Divider = White(0.08f);
 
-    public static readonly Vector4 Good = Rgb(0x7ddcb0);
-    public static readonly Vector4 Warn = Rgb(0xe3bd80);
-    public static readonly Vector4 Bad = Rgb(0xe08a7a);
+    // Text. Tertiary is the quietest colour still allowed to carry information.
+    public static readonly Vector4 TextPrimary = White(1f);
+    public static readonly Vector4 TextSecondary = White(0.786f);
+    public static readonly Vector4 TextTertiary = White(0.544f);
+    public static readonly Vector4 TextDisabled = White(0.363f);
+    public static readonly Vector4 TextOnAccent = Rgb(0x000000);
 
-    public static readonly Vector4 Divider = new(1f, 1f, 1f, 0.08f);
-    public static readonly Vector4 CardInset = new(1f, 1f, 1f, 0.045f);
-    public static readonly Vector4 CardRow = new(1f, 1f, 1f, 0.05f);
-    public static readonly Vector4 CardHover = new(1f, 1f, 1f, 0.09f);
-    public static readonly Vector4 CardActive = Rgb(0x8ab4ff, 0.13f);
-    public static readonly Vector4 RowInactive = new(1f, 1f, 1f, 0.03f);
+    // Control fills. "Subtle" is the transparent kind that only shows on hover.
+    public static readonly Vector4 ControlFill = White(0.061f);
+    public static readonly Vector4 ControlFillHover = White(0.084f);
+    public static readonly Vector4 ControlFillPressed = White(0.033f);
+    public static readonly Vector4 ControlStroke = White(0.07f);
+    public static readonly Vector4 SubtleHover = White(0.061f);
+    public static readonly Vector4 SubtlePressed = White(0.042f);
+    public static readonly Vector4 ControlStrong = White(0.544f);   // unfilled slider track, switch outline
+
+    // Semantic colours, used sparingly: a status, never decoration.
+    public static readonly Vector4 Success = Rgb(0x6ccb5f);
+    public static readonly Vector4 Caution = Rgb(0xfce100);
+    public static readonly Vector4 Critical = Rgb(0xff99a4);
+    public static readonly Vector4 CautionBackground = Rgb(0x433519);
 
     /// <summary>
-    /// The settings panel is opaque. The design asks for glass over the video, and over a
-    /// still mock-up that reads beautifully — over a moving picture the text sits on top of
-    /// whatever colour happens to be behind it that frame and becomes unreadable.
+    /// A solid red for the one badge that has to be seen at a glance. Fluent's own critical
+    /// colour on dark is a pale pink, which at 16px reads as decoration rather than as "!".
     /// </summary>
-    public static readonly Vector4 PanelSolid = Rgb(0x0d1420, 0.985f);
+    public static readonly Vector4 Alert = Rgb(0xe5484d);
+    public static readonly Vector4 CriticalBackground = Rgb(0x442726);
 
     /// <summary>
-    /// The telemetry block. The design asks for .30 over a 4px blur; without the blur that
-    /// is unreadable over a bright frame, so the alpha carries what the blur would have.
-    /// Blur is not coming back — it needs a second pass over the frame, inside an 8.33 ms
-    /// budget, to make text prettier.
+    /// The user's accent, in the lighter variant Windows itself uses on dark surfaces.
+    /// Read once at start-up; Windows' default blue if the palette is not there.
     /// </summary>
-    public static readonly Vector4 TelemetryBg = Rgb(0x080b11, 0.93f);
+    public static readonly Vector4 Accent;
 
-    /// <summary>Mode table. Specified as .96 over blur 22; opaque instead, same reason.</summary>
-    public static readonly Vector4 Popover = Rgb(0x101621, 1.0f);
+    /// <summary>The lightest accent variant, for accent-coloured text on dark.</summary>
+    public static readonly Vector4 AccentText;
 
-    /// <summary>The "Параметры" chip that brings the panel back.</summary>
-    public static readonly Vector4 ChipBg = Rgb(0x141b28, 0.94f);
+    public const float RadiusControl = 4f;
+    public const float RadiusOverlay = 8f;
 
-    // The revision's radii, at zoom 1.
-    public const float RadiusPill = 99f;
-    public const float RadiusModal = 16f;      // no-signal / confirm card
-    public const float RadiusBlock = 13f;      // telemetry block
-    public const float RadiusPopover = 12f;    // mode table
-    public const float RadiusCard = 10f;       // cards, rows, selects, buttons
-    public const float RadiusRow = 10f;
-    public const float RadiusTableRow = 8f;
-    public const float RadiusSelect = 9f;      // audio selects, popover rows
+    static Theme()
+    {
+        (Accent, AccentText) = ReadAccent() ?? (Rgb(0x60cdff), Rgb(0x99ebff));
+    }
 
-    // Kept so existing call sites keep compiling; the design no longer distinguishes it.
-    public const float RadiusOverlay = RadiusModal;
+    /// <summary>
+    /// The accent palette Windows derives from the chosen colour: eight RGBA entries,
+    /// lightest first. Light2 is what dark-theme controls fill with, Light3 what accent
+    /// text uses — the base colour itself is too dark to read on a dark surface.
+    /// </summary>
+    private static (Vector4, Vector4)? ReadAccent()
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(
+                @"Software\Microsoft\Windows\CurrentVersion\Explorer\Accent");
+            if (key?.GetValue("AccentPalette") is not byte[] { Length: >= 32 } palette) return null;
+
+            static Vector4 At(byte[] p, int i) => new(p[i * 4] / 255f, p[i * 4 + 1] / 255f, p[i * 4 + 2] / 255f, 1f);
+            return (At(palette, 1), At(palette, 0));
+        }
+        catch
+        {
+            return null;
+        }
+    }
 
     public static uint U32(Vector4 c) => ImGui.ColorConvertFloat4ToU32(c);
 
-    /// <summary>Same colour at a different alpha, for disabled and hover variants.</summary>
+    /// <summary>Same colour at a different alpha.</summary>
     public static Vector4 Alpha(Vector4 c, float a) => new(c.X, c.Y, c.Z, a);
 
     /// <summary>
-    /// Applies the parts of the design that ImGui can express as global style, so
-    /// individual widgets do not each have to push the same values.
+    /// What ImGui can take as global style. Most of the interface draws its own controls
+    /// onto the draw list; this covers the parts ImGui still draws itself — combo popups,
+    /// tooltips, scrollbars.
     /// </summary>
     public static void Apply()
     {
         var s = ImGui.GetStyle();
 
-        // Every metric goes through the scale, so the panel keeps its proportions on a
-        // 3440-wide display instead of turning into fine print.
-        s.WindowRounding = Layout.S(RadiusModal);
-        s.ChildRounding = Layout.S(RadiusCard);
-        s.FrameRounding = Layout.S(RadiusCard);
-        s.PopupRounding = Layout.S(RadiusPopover);
-        s.GrabRounding = RadiusPill;
-        s.ScrollbarRounding = RadiusPill;
+        s.WindowRounding = Layout.S(RadiusOverlay);
+        s.ChildRounding = Layout.S(RadiusControl);
+        s.FrameRounding = Layout.S(RadiusControl);
+        s.PopupRounding = Layout.S(RadiusOverlay);
+        s.GrabRounding = 99f;
+        s.ScrollbarRounding = 99f;
 
-        // The revision's spacing: panel padding 12/13, panel gap 8, card padding 8–11.
-        s.WindowPadding = new Vector2(Layout.S(13), Layout.S(12));
-        s.FramePadding = new Vector2(Layout.S(10), Layout.S(8));
+        s.WindowPadding = new Vector2(Layout.S(12), Layout.S(12));
+        s.FramePadding = new Vector2(Layout.S(11), Layout.S(6));
         s.ItemSpacing = new Vector2(Layout.S(8), Layout.S(8));
-        s.ItemInnerSpacing = new Vector2(Layout.S(5), Layout.S(3));
-        s.ScrollbarSize = Layout.S(7);
+        s.ItemInnerSpacing = new Vector2(Layout.S(6), Layout.S(4));
+        s.ScrollbarSize = Layout.S(6);
         s.GrabMinSize = Layout.S(12);
+        s.SelectableTextAlign = new Vector2(0f, 0.5f);
 
-        s.WindowBorderSize = 0;
+        s.WindowBorderSize = 1f;
+        s.PopupBorderSize = 1f;
         s.FrameBorderSize = 0;
-        s.PopupBorderSize = 0;
         s.ChildBorderSize = 0;
 
         Set(ImGuiCol.Text, TextPrimary);
-        Set(ImGuiCol.TextDisabled, TextMuted);
-        Set(ImGuiCol.WindowBg, PanelSolid);
+        Set(ImGuiCol.TextDisabled, TextDisabled);
+        Set(ImGuiCol.WindowBg, Surface);
         Set(ImGuiCol.ChildBg, new Vector4(0, 0, 0, 0));
-        Set(ImGuiCol.PopupBg, Popover);
-        Set(ImGuiCol.FrameBg, CardInset);
-        Set(ImGuiCol.FrameBgHovered, CardHover);
-        Set(ImGuiCol.FrameBgActive, CardActive);
+        Set(ImGuiCol.PopupBg, Surface);
+        Set(ImGuiCol.Border, SurfaceStroke);
+        Set(ImGuiCol.FrameBg, ControlFill);
+        Set(ImGuiCol.FrameBgHovered, ControlFillHover);
+        Set(ImGuiCol.FrameBgActive, ControlFillPressed);
         Set(ImGuiCol.Separator, Divider);
-        Set(ImGuiCol.Border, Divider);
+        Set(ImGuiCol.Button, ControlFill);
+        Set(ImGuiCol.ButtonHovered, ControlFillHover);
+        Set(ImGuiCol.ButtonActive, ControlFillPressed);
+        Set(ImGuiCol.Header, SubtleHover);
+        Set(ImGuiCol.HeaderHovered, SubtleHover);
+        Set(ImGuiCol.HeaderActive, SubtlePressed);
+        Set(ImGuiCol.ScrollbarBg, new Vector4(0, 0, 0, 0));
+        Set(ImGuiCol.ScrollbarGrab, White(0.25f));
+        Set(ImGuiCol.ScrollbarGrabHovered, White(0.4f));
+        Set(ImGuiCol.ScrollbarGrabActive, White(0.5f));
+        Set(ImGuiCol.CheckMark, Accent);
         Set(ImGuiCol.SliderGrab, Accent);
         Set(ImGuiCol.SliderGrabActive, AccentText);
-        Set(ImGuiCol.CheckMark, Accent);
-        Set(ImGuiCol.Button, CardInset);
-        Set(ImGuiCol.ButtonHovered, CardHover);
-        Set(ImGuiCol.ButtonActive, CardActive);
-        Set(ImGuiCol.Header, CardActive);
-        Set(ImGuiCol.HeaderHovered, CardHover);
-        Set(ImGuiCol.HeaderActive, CardActive);
-        Set(ImGuiCol.ScrollbarBg, new Vector4(0, 0, 0, 0));
-        Set(ImGuiCol.ScrollbarGrab, new Vector4(1, 1, 1, 0.10f));
-        Set(ImGuiCol.ScrollbarGrabHovered, new Vector4(1, 1, 1, 0.16f));
-        Set(ImGuiCol.ScrollbarGrabActive, Alpha(Accent, 0.4f));
         Set(ImGuiCol.TitleBg, new Vector4(0, 0, 0, 0));
         Set(ImGuiCol.TitleBgActive, new Vector4(0, 0, 0, 0));
-        Set(ImGuiCol.PlotLines, Accent);
-        Set(ImGuiCol.PlotHistogram, Accent);
+        Set(ImGuiCol.ModalWindowDimBg, new Vector4(0, 0, 0, 0.3f));
 
         static void Set(ImGuiCol which, Vector4 colour) => ImGui.GetStyle().Colors[(int)which] = colour;
     }
