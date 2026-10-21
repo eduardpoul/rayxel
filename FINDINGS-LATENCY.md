@@ -131,3 +131,35 @@ The one route that could beat the wire is not a faster stack but an earlier star
 uploading rows to the GPU as they arrive rather than waiting for a whole frame. That
 changes *when* displaying begins rather than how fast the bytes move, and it is a much
 larger change than it sounds.
+
+## Pacing: one present per captured frame
+
+The frame loop used to wait at most 8 ms for the card, which delivers every 8.33 ms at 120
+fps. It gave up just before many frames, presented the previous one, and then the new one a
+fraction of a millisecond later. On a VRR display every present is a refresh, so the screen
+was refreshed at uneven intervals, and with tearing allowed the second present landed in
+the middle of the first one's scanout. It now presents once per captured frame (and on a
+~60 Hz timer when no frames come, so the interface keeps moving); `--pacing=refresh` brings
+the old behaviour back for comparison.
+
+`--bench=30`, RTX VSR + RTX HDR, 1080p120 raw, Odyssey G85SB at 175 Hz with Adaptive-Sync on:
+
+| | presents per new frame | our frames held > 1 period | process CPU per frame | delay p50 / p99 | arrival p99 / max |
+|---|---|---|---|---|---|
+| borderless, arrival | **1.00** | 0 | 1.01 ms | 7.68 / 11.80 ms | 12.74 / 15.39 ms |
+| borderless, refresh (old) | 1.31 | 0 | 1.11 ms | 7.68 / 11.64 ms | 12.32 / 14.81 ms |
+| windowed, arrival | **1.00** | 0 | 0.83 ms | 7.68 / 11.71 ms | 12.34 / 14.83 ms |
+| windowed, refresh (old) | 1.08 | 0 | 1.01 ms | 7.69 / 11.71 ms | 12.35 / 16.20 ms |
+
+- **A third of the presents were spare**, borderless. They are gone, and nothing was paid
+  for it: the delay from the card's timestamp to our process is identical in all four.
+- **The remaining unevenness is the card's**, not ours. In every run about two frames a
+  second arrive 12–15 ms after the previous one instead of 8.3 (the `late` counter), and in
+  none did we hold a frame for longer than a period (`slow 0`). With VRR such a frame is
+  shown a few milliseconds late; on a fixed-rate display it costs a whole extra refresh.
+- **Whether VRR engaged cannot be read from software here.** DXGI's vblank count read
+  175.0 Hz in every run, at 120 and at 157 presents a second, and nothing documents
+  whether that counter follows a variable refresh at all. It is logged as `vblank`, not
+  shown in the interface. NVIDIA's G-SYNC indicator or the monitor's own refresh readout is
+  the check; VRR also needs G-SYNC Compatible enabled for the display in the NVIDIA
+  control panel, and is not expected in a composed window.

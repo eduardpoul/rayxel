@@ -106,6 +106,12 @@ public sealed class Renderer : IDisposable
     public long LastScanoutQpc { get; private set; }
 
     /// <summary>
+    /// DXGI's count of display refreshes at <see cref="LastScanoutQpc"/>. Two readings a
+    /// second apart give the rate the display actually ran at, which is how VRR shows up.
+    /// </summary>
+    public uint LastSyncRefreshCount { get; private set; }
+
+    /// <summary>
     /// The VSR/RTX-HDR path. Null until <see cref="Initialize"/> runs. When either
     /// feature is on, frames go through VideoProcessorBlt instead of our own shader,
     /// because that is the only place the driver exposes them.
@@ -614,8 +620,9 @@ public sealed class Renderer : IDisposable
         {
             _swapChain.GetFrameStatistics(out var stats);
             LastScanoutQpc = stats.SyncQPCTime;
+            LastSyncRefreshCount = stats.SyncRefreshCount;
         }
-        catch (SharpGenException) { LastScanoutQpc = 0; }
+        catch (SharpGenException) { LastScanoutQpc = 0; LastSyncRefreshCount = 0; }
     }
 
     /// <summary>Blocks until DXGI is ready for the next frame. No-op without a waitable swapchain.</summary>

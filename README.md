@@ -74,6 +74,7 @@ Everything below is optional; the app needs no arguments.
 | `--verbose` | debug-level logging |
 | `--shot=<file.png>` | render for a few seconds, write the frame to a PNG, exit |
 | `--no-auto-hdr` | do not follow the Windows HDR state at start-up |
+| `--pacing=arrival\|refresh` | present once per captured frame (default, lets VRR pace the video), or on every swapchain slot as before |
 | `--screen=<name>` | force a state, for inspecting it: `splash`, `devices`, `app`, `nosignal`, `busy`, `composed`, `modes`, `scaler`, `more`, `quit` |
 
 `--shot` captures the **back buffer**, not the screen, so it works when the window is

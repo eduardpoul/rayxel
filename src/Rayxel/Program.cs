@@ -33,6 +33,9 @@ double benchSeconds = 0;
 bool startWithTelemetry = false;
 bool noAutoHdr = false;
 bool startBorderless = false;
+// Present once per captured frame (the default), or on every swapchain slot as before.
+// Kept switchable because "is it smoother?" is a comparison, and a comparison needs both.
+bool presentOnArrival = true;
 foreach (var arg in args)
 {
     if (arg is "--list" or "-l") listOnly = true;
@@ -68,6 +71,9 @@ foreach (var arg in args)
             "vsr" or "rtx" or "2" => 2,
             _ => -1
         };
+    // --pacing=arrival|refresh. See the frame wait in RunLoop for what the two mean.
+    else if (arg.StartsWith("--pacing=", StringComparison.OrdinalIgnoreCase))
+        presentOnArrival = !arg[9..].Equals("refresh", StringComparison.OrdinalIgnoreCase);
     // Forces a screen so the splash and picker can be inspected without racing them.
     else if (arg.StartsWith("--screen=", StringComparison.OrdinalIgnoreCase)) forcedScreen = arg[9..];
     else if (!arg.StartsWith('-')) deviceSelector = arg;
@@ -897,6 +903,16 @@ void RunLoop()
     long presented = 0, lastLoggedPresent = 0;
     long lastTimedArrival = 0, newFramesPresented = 0, lastLoggedNewFrames = 0;
     double appCpuMs = 0;
+    // Frames that took us longer than a whole frame period to get from arrival to Present.
+    // The card's own late frames are counted by the pump; these are ours, and the two
+    // have to be told apart before anyone can say whose stutter it is.
+    long slowFrames = 0;
+    // What the display actually did between two heartbeats, from DXGI's own counters.
+    uint lastSyncRefresh = 0;
+    long lastSyncQpc = 0;
+    Log.Info(presentOnArrival
+        ? "pacing: one present per captured frame - with VRR the display refreshes when a frame arrives"
+        : "pacing: present on every swapchain slot, stale frames included (--pacing=refresh)");
     // Seeded from the pump rather than from Idle, so the first frame is not announced as
     // a recovery from a problem that never happened.
     var lastState = pump!.State;
@@ -947,10 +963,25 @@ void RunLoop()
             Log.Info($"NIS sharpness {nis.Sharpness:0.0}");
         }
 
-        // Wait for the swapchain first so we never queue ahead of the display, then
-        // take whatever frame the capture thread has most recently delivered.
+        // Wait for the swapchain first so we never queue ahead of the display, then for a
+        // frame from the card.
+        //
+        // The frame wait used to give up after 8 ms. The card delivers every 8.33 ms at
+        // 120 fps, so it gave up just before most frames, presented the old one, and then
+        // the new one a fraction of a millisecond later: about 180 presents a second for
+        // 120 pictures. On a VRR display every present is a refresh, so the screen was
+        // refreshed at uneven intervals and the second present tore into the first.
+        //
+        // Now it presents once per captured frame, and with VRR the display refreshes
+        // exactly when a picture arrives. With nothing arriving — no signal, the picker,
+        // a mode switch — the interface still has to move, so it falls back to ~60 Hz.
+        // Input does not need a present of its own: it waits at most a frame for the next
+        // picture, which carries the redrawn overlay with it.
         renderer!.WaitForNextFrame(8);
-        pump!.FrameReady.WaitOne(8);
+        if (presentOnArrival)
+            pump!.FrameReady.WaitOne(pump.State == CaptureState.Streaming ? 50 : 16);
+        else
+            pump!.FrameReady.WaitOne(8);
 
         // Time our own segment: from the frame landing in our process to Present returning.
         // Only frames we have not presented before count — we present faster than the
@@ -1053,6 +1084,7 @@ void RunLoop()
             double ms = (System.Diagnostics.Stopwatch.GetTimestamp() - arrival) * 1000.0
                         / System.Diagnostics.Stopwatch.Frequency;
             if (ms is > 0 and < 200) appCpuMs = appCpuMs == 0 ? ms : appCpuMs * 0.9 + ms * 0.1;
+            if (pump.CurrentFps > 0 && ms > 1000.0 / pump.CurrentFps && ms < 200) slowFrames++;
         }
 
         // A lost device does not come back on its own — the read loop has stopped — so it
@@ -1144,6 +1176,19 @@ void RunLoop()
 
             double budgetMs = pump.CurrentFps > 0 ? 1000.0 / pump.CurrentFps : 0;
 
+            // DXGI's vblank count over the last second. Logged, not shown: on a 175 Hz
+            // panel with VRR on it read 175.0 in every run, whether we presented 120 or 157
+            // times a second, and nothing documents whether this counter follows a variable
+            // refresh at all. It cannot tell whether VRR engaged, so it does not get to
+            // look as though it can; NVIDIA's G-SYNC indicator or the monitor's own
+            // refresh readout can.
+            uint syncRefresh = renderer!.LastSyncRefreshCount;
+            long syncQpc = renderer.LastScanoutQpc;
+            double vblankHz = lastSyncQpc != 0 && syncQpc > lastSyncQpc && syncRefresh > lastSyncRefresh
+                ? (syncRefresh - lastSyncRefresh) / ((syncQpc - lastSyncQpc) / (double)System.Diagnostics.Stopwatch.Frequency)
+                : 0;
+            lastSyncRefresh = syncRefresh;
+            lastSyncQpc = syncQpc;
 
             var age = s.PipelineDelayValid && budgetMs > 0
                 ? $"{s.PipelineDelayMs,5:0.0}ms/{s.PipelineDelayMs / budgetMs:0.00}fr"
@@ -1155,8 +1200,10 @@ void RunLoop()
                 $"budget {budgetMs,5:0.00}ms  age {age}  " +
                 $"cpu {appCpuMs,5:0.00}  gpu {renderer!.LastGpuMs,5:0.00}  " +
                 $"free {budgetMs - appCpuMs - renderer.LastGpuMs,5:0.00}ms  " +
-                $"capture {s.MeasuredFps,6:0.0}fps  present {presentFps,6:0.0}fps (unique {uniqueFps,5:0.0})  " +
-                $"late {s.FramesLate} dropped {s.FramesDropped}  {model.Composition}");
+                $"capture {s.MeasuredFps,6:0.0}fps  present {presentFps,6:0.0}fps (unique {uniqueFps,5:0.0}, " +
+                $"x{(uniqueFps > 0 ? presentFps / uniqueFps : 0),4:0.00})  " +
+                $"vblank {(vblankHz > 0 ? $"{vblankHz,5:0.0}Hz" : "  n/a")}  " +
+                $"late {s.FramesLate} slow {slowFrames} dropped {s.FramesDropped}  {model.Composition}");
         }
     }
 }
