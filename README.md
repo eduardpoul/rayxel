@@ -92,7 +92,7 @@ Move the mouse over the picture to bring up the control bar:
 - **Capture mode** — resolution, rate and whether it is `raw` or `zip`; opens the list of
   modes.
 - **Scaling** — none, NIS, RTX VSR or DLSS, with the cost of each; NIS brings a sharpness
-  slider.
+  slider, DLSS a choice of model and a note of which one the driver actually ran.
 - **HDR** — RTX Video HDR on or off; explains itself when it is unavailable.
 - **Frame budget** — what our own work costs out of the frame.
 - **Audio, telemetry, full screen**, and **…** for device, audio routing, HDR brightness,

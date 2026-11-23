@@ -565,6 +565,42 @@ public static class BottomBar
             ImGui.Unindent(inset);
         }
 
+        if (model.ScalerIndex == 3 && model.Renderer.Dlss is { } dlss)
+        {
+            ImGui.Dummy(new Vector2(0, Layout.S(8)));
+            ImGui.Indent(inset);
+            float gap = Layout.S(6);
+            ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, new Vector2(gap, Layout.S(6)));
+            float width = ImGui.GetContentRegionAvail().X - inset;
+
+            // What is running, which is not always what was asked for: the driver's own
+            // "DLSS override" names a network for every program and wins. Amber then,
+            // because the buttons below are not being obeyed.
+            string inUse = dlss.ModelInUse is not { } letter ? "—"
+                : dlss.ModelForced ? string.Format(Strings.T("dlssForced"), letter) : letter;
+            Widgets.LabelValueWidth(Strings.T("dlssModel"), inUse,
+                                    dlss.ModelForced ? Theme.Caution : Theme.TextSecondary, width);
+
+            (DlssModel Value, string Label)[] choices =
+            [
+                (DlssModel.Auto, Strings.T("dlssAuto")), (DlssModel.K, "K"), (DlssModel.L, "L"), (DlssModel.M, "M")
+            ];
+            var size = new Vector2((width - gap * (choices.Length - 1)) / choices.Length, Layout.S(28));
+            ImGui.PushID("dlssmodel");
+            for (int i = 0; i < choices.Length; i++)
+            {
+                if (i > 0) ImGui.SameLine();
+                if (Widgets.Button(choices[i].Label, size, accent: dlss.Model == choices[i].Value))
+                {
+                    dlss.Model = choices[i].Value;
+                    model.Touch();
+                }
+            }
+            ImGui.PopID();
+            ImGui.PopStyleVar();
+            ImGui.Unindent(inset);
+        }
+
         // How much enlarging there is to do at all. At ×1 or below nothing is enlarged and
         // every upscaler only costs.
         ImGui.Dummy(new Vector2(0, Layout.S(6)));
@@ -594,7 +630,8 @@ public static class BottomBar
         {
             model.SelectScaler(index);
             // NIS stays open: choosing it is when its sharpness becomes the next question.
-            if (index != 1) model.Flyout = Flyout.None;
+            // DLSS likewise, for its network.
+            if (index != 1 && index != 3) model.Flyout = Flyout.None;
         }
 
         var draw = ImGui.GetWindowDrawList();

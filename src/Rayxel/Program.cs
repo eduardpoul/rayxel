@@ -30,6 +30,7 @@ bool shotCompares = false;
 string? forcedScreen = null;
 string? forcedMode = null;
 int forcedScaler = -1;
+DlssModel? forcedDlssModel = null;
 bool listOnly = false;
 bool usbCheck = false;
 double benchSeconds = 0;
@@ -79,6 +80,10 @@ foreach (var arg in args)
             "dlss" or "3" => 3,
             _ => -1
         };
+    // And the network DLSS is asked for: --dlss-model=auto|k|l|m.
+    else if (arg.StartsWith("--dlss-model=", StringComparison.OrdinalIgnoreCase))
+        forcedDlssModel = Enum.TryParse<DlssModel>(arg[13..], true, out var asked) && Enum.IsDefined(asked)
+            ? asked : null;
     // --pacing=arrival|refresh. See the frame wait in RunLoop for what the two mean.
     else if (arg.StartsWith("--pacing=", StringComparison.OrdinalIgnoreCase))
         presentOnArrival = !arg[9..].Equals("refresh", StringComparison.OrdinalIgnoreCase);
@@ -268,6 +273,9 @@ try
     model.AudioEnabled = settings.AudioEnabled;
     model.AudioOutputId = settings.AudioOutputId;
     if (renderer.Nis is { } nisScaler) nisScaler.Sharpness = settings.NisSharpness;
+    if (renderer.Dlss is { } dlssScaler)
+        dlssScaler.Model = forcedDlssModel
+            ?? (Enum.IsDefined((DlssModel)settings.DlssModel) ? (DlssModel)settings.DlssModel : DlssModel.Auto);
 
     // Audio endpoints are listed once here and refreshed when the user opens a combo, so a
     // headset plugged in mid-session shows up without polling WASAPI every frame.

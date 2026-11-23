@@ -214,6 +214,7 @@ public sealed class AppModel
         s.Scaler = ScalerIndex;
         s.Hdr = HdrOn;
         s.NisSharpness = Renderer.Nis?.Sharpness ?? s.NisSharpness;
+        s.DlssModel = (int)(Renderer.Dlss?.Model ?? (DlssModel)s.DlssModel);
         s.OverlayNits = OverlayNits;
         s.VideoNits = VideoNits;
         s.ShowTelemetry = ShowTelemetry;

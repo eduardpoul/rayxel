@@ -8,6 +8,20 @@ using Vortice.DXGI;
 namespace Rayxel.Render;
 
 /// <summary>
+/// Which of DLSS's networks to ask for. They go by letter, in the order they came out: K
+/// with DLSS 4, L and M with DLSS 4.5, where L is the heavier of the two and M the quicker.
+/// The values are NVSDK_NGX_DLSS_Hint_Render_Preset.
+/// </summary>
+public enum DlssModel
+{
+    /// <summary>Whichever DLSS takes by itself for the enlargement in hand.</summary>
+    Auto = 0,
+    K = 11,
+    L = 12,
+    M = 13
+}
+
+/// <summary>
 /// DLSS Super Resolution, run on a video instead of on a game.
 /// <para>
 /// DLSS is a temporal upscaler: it builds each output frame from the new picture and from
@@ -120,10 +134,31 @@ public sealed unsafe class DlssScaler : IDisposable
     /// </summary>
     public bool Possible => _nvidia && !_failed && CorePath is not null;
 
-    /// <summary>What it is doing, for the log and the readout: sizes and the mode they fall under.</summary>
+    /// <summary>
+    /// The network asked for. Changing it takes effect with the next frame, which is the
+    /// first of a new history: what one network accumulated is no use to another.
+    /// </summary>
+    public DlssModel Model { get; set; }
+
+    /// <summary>
+    /// The network in use, as a letter, by NGX's own account while it was being built;
+    /// null when it did not say. It is not always the one asked for: see <see cref="ModelForced"/>.
+    /// </summary>
+    public string? ModelInUse { get; private set; }
+
+    /// <summary>
+    /// True when the network in use was the driver's choice over ours. "DLSS override" in
+    /// the NVIDIA app names a network for every program, and takes precedence.
+    /// </summary>
+    public bool ModelForced { get; private set; }
+
+    private DlssModel _builtModel;
+
+    /// <summary>What it is doing, for the log and the readout: sizes, the mode they fall under, the network.</summary>
     public string Description => _feature == IntPtr.Zero
         ? "not running"
-        : $"{_inWidth}x{_inHeight} -> {_outWidth}x{_outHeight}, {QualityName(Quality(_inWidth, _outWidth))}";
+        : $"{_inWidth}x{_inHeight} -> {_outWidth}x{_outHeight}, {QualityName(Quality(_inWidth, _outWidth))}, " +
+          $"model {ModelInUse ?? "not reported"}{(ModelForced ? " (the driver's choice)" : "")}";
 
     public DlssScaler(ID3D11Device device)
     {
@@ -388,6 +423,43 @@ public sealed unsafe class DlssScaler : IDisposable
         _ => "ultra performance"
     };
 
+    // What NGX calls the same modes in its log.
+    private static string QualityInLog(int quality) => quality switch
+    {
+        5 => "DLAA",
+        2 => "Quality",
+        1 => "Balanced",
+        0 => "Perf",
+        _ => "UltraPerf"
+    };
+
+    // What NGX said about networks while one was being built. Its log is the only account
+    // there is of which it took: nothing in the interface reports it.
+    private static readonly List<string> Heard = [];
+    private static volatile bool _listening;
+
+    /// <summary>
+    /// Picks out of <see cref="Heard"/> the network taken for a mode. The line reads like
+    /// "(Balanced) Using DRS Overridden Preset M": the mode, how it was arrived at, the letter.
+    /// </summary>
+    private static (string? Letter, bool Forced) ModelHeard(int quality)
+    {
+        string mode = "(" + QualityInLog(quality) + ")";
+        lock (Heard)
+        {
+            for (int i = Heard.Count - 1; i >= 0; i--)
+            {
+                string line = Heard[i];
+                // DLSS Super Resolution only: Ray Reconstruction reports its own beside it.
+                if (!line.Contains("NgxDltss", StringComparison.Ordinal) || !line.Contains(mode, StringComparison.Ordinal)) continue;
+                var match = System.Text.RegularExpressions.Regex.Match(line, @"Preset[ _]?([A-Z])\b");
+                if (!match.Success) continue;
+                return (match.Groups[1].Value, line.Contains("Overrid", StringComparison.OrdinalIgnoreCase));
+            }
+        }
+        return (null, false);
+    }
+
     /// <summary>
     /// Upscales one frame into <see cref="OutputView"/>. The picture is plain SDR colour
     /// at its own size; the vectors are one per pixel of it, in its pixels, each saying
@@ -442,6 +514,9 @@ public sealed unsafe class DlssScaler : IDisposable
     /// <summary>Makes sure there is a network built for these sizes, or one still good enough.</summary>
     private bool Fit(ID3D11DeviceContext context, int inWidth, int inHeight, int outWidth, int outHeight)
     {
+        if (_feature != IntPtr.Zero && _builtModel != Model)
+            return Create(context, inWidth, inHeight, outWidth, outHeight);
+
         bool sameSource = _feature != IntPtr.Zero && inWidth == _inWidth && inHeight == _inHeight;
         if (sameSource && outWidth == _outWidth && outHeight == _outHeight)
         {
@@ -480,11 +555,26 @@ public sealed unsafe class DlssScaler : IDisposable
             p.Set("DLSS.Feature.Create.Flags"u8, FlagMotionAtInputSize);
             p.Set("DLSS.Enable.Output.Subrects"u8, 0);
 
+            // The network is asked for mode by mode. The same one is asked for under every
+            // mode, so that it does not depend on which of them the sizes fall under.
+            uint model = (uint)Model;
+            p.Set("DLSS.Hint.Render.Preset.DLAA"u8, model);
+            p.Set("DLSS.Hint.Render.Preset.Quality"u8, model);
+            p.Set("DLSS.Hint.Render.Preset.Balanced"u8, model);
+            p.Set("DLSS.Hint.Render.Preset.Performance"u8, model);
+            p.Set("DLSS.Hint.Render.Preset.UltraPerformance"u8, model);
+            p.Set("DLSS.Hint.Render.Preset.UltraQuality"u8, model);
+
+            lock (Heard) Heard.Clear();
+            _listening = true;
             IntPtr feature;
             uint result = _createFeature(context.NativePointer, FeatureSuperSampling, _parameters, &feature);
+            _listening = false;
             if (result != Success || feature == IntPtr.Zero)
                 return Fail($"DLSS could not be built for {inWidth}x{inHeight} -> {outWidth}x{outHeight}: {Describe(result)}");
             _feature = feature;
+            _builtModel = Model;
+            (ModelInUse, ModelForced) = ModelHeard(quality);
 
             // Depth, which a video does not have. Everything is said to be at the same
             // distance, half way between near and far: no part of the picture is then
@@ -606,7 +696,10 @@ public sealed unsafe class DlssScaler : IDisposable
         try
         {
             string? text = Marshal.PtrToStringUTF8((IntPtr)message)?.TrimEnd();
-            if (!string.IsNullOrEmpty(text)) Log.Debug("ngx: " + text);
+            if (string.IsNullOrEmpty(text)) return;
+            Log.Debug("ngx: " + text);
+            if (_listening && text.Contains("Preset", StringComparison.Ordinal))
+                lock (Heard) Heard.Add(text);
         }
         catch { }
     }
