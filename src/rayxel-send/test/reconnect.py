@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """Asks a `rayxel-send --listen` for the picture and leaves again, over and over.
 
-A viewer that goes away while pictures are flowing is what used to take gamescope down,
-and the Steam session with it, about once in twenty times: see capture.h. Run this while
-something on the Deck's screen is moving, then look for the gamescope process still
-being the same one. It reports any round in which no picture came.
+A viewer that goes away must not be noticed by gamescope at all: stopping the capture
+while pictures are flowing can take gamescope down, and the Steam session with it (see
+capture.h), so the sender keeps its capture from one viewer to the next. Run this, then
+look in the Deck's journal for what gamescope said meanwhile:
+
+    journalctl --since "-5 min" | grep "pipewire: stream state"
+
+There should be one line at most, "streaming", from the first round; a "paused" means a
+viewer leaving still reaches gamescope. It reports any round in which no picture came,
+which with a kept capture includes rounds where nothing on the screen was moving.
 
 It speaks the protocol in src/wire.h and has no dependencies beyond Python itself.
 """

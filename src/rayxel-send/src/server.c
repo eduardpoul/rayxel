@@ -65,7 +65,22 @@ struct server {
 	uint64_t last_refusal_ns;
 	struct wire_hello wanted;
 
+	/* The capture, which is not the viewer's but this program's: opened for the first
+	 * viewer and then kept, viewer or no viewer, because stopping one is what can bring
+	 * gamescope down - see capture.h. While nobody watches its frames are dropped as they
+	 * arrive. It is given up only when it has failed, when a viewer wants another size,
+	 * or when the program ends. */
 	struct capture *capture;
+	uint32_t held_width, held_height; /* the size it was asked for; 0 is the Deck's own */
+	bool have_format;
+	bool capture_broken; /* set from inside a callback; acted on by the next tick */
+
+	/* The newest picture, copied out as it arrives: what a viewer that turns up while
+	 * the screen is still is given to begin with. */
+	uint8_t *kept;
+	size_t kept_size;
+	uint32_t kept_stride;
+	bool kept_valid;
 
 	/* A capture that has been paused and is waiting out CAPTURE_SETTLE_MS before it may
 	 * be closed - see capture.h. No other is opened while there is one: a request that
@@ -116,20 +131,28 @@ static const char *viewer_name(const struct server *s, char *out, size_t cap)
 	return out;
 }
 
+/* Gives the capture up: paused now, closed a moment later by the tick - see capture.h.
+ * This is the step that can take gamescope down, so it is only for a capture that is no
+ * use any more. */
+static void release_capture(struct server *s)
+{
+	if (!s->capture) return;
+	capture_pause(s->capture);
+	s->leaving = s->capture;
+	s->leaving_since_ns = now_ns();
+	s->capture = NULL;
+	s->have_format = false;
+	s->kept_valid = false;
+	s->capture_broken = false;
+}
+
+/* The viewer is gone, or is being replaced. The capture stays as it is. */
 static void stop_stream(struct server *s, const char *why)
 {
-	if (!s->watching && !s->capture) return;
+	if (!s->watching) return;
 	char name[64];
 	printf("stopped  : %s (%s)\n", why, viewer_name(s, name, sizeof(name)));
 
-	/* Pausing the capture is what makes gamescope stop producing pictures for us. It is
-	 * closed a moment later, by the tick, and not here: see capture.h. */
-	if (s->capture) {
-		capture_pause(s->capture);
-		s->leaving = s->capture;
-		s->leaving_since_ns = now_ns();
-		s->capture = NULL;
-	}
 	encoder_close(s->encoder);
 	s->encoder = NULL;
 	cursor_close(s->cursor);
@@ -168,10 +191,20 @@ static void on_failed(void *user, const char *error)
 	snprintf(s->broken_reason, sizeof(s->broken_reason), "%s", error);
 }
 
+/* The capture itself has failed, as opposed to something done with its frames. */
+static void on_capture_failed(void *user, const char *error)
+{
+	struct server *s = user;
+	s->capture_broken = true;
+	on_failed(s, error);
+}
+
 static void on_format(void *user, const struct capture_format *f)
 {
 	struct server *s = user;
 	s->format = *f;
+	s->have_format = true;
+	s->kept_valid = false;
 	s->format_changed = true;
 }
 
@@ -255,18 +288,11 @@ static bool send_frame(struct server *s, const struct encoded_frame *frame, uint
 	return true;
 }
 
-static void on_frame(void *user, const struct capture_frame *f)
+/* One picture to the viewer: encoded, cut into datagrams and sent. `arrival_ns` is when
+ * it reached this program, which is what its age is counted from. */
+static void send_picture(struct server *s, const uint8_t *data, uint32_t stride, uint64_t arrival_ns)
 {
-	struct server *s = user;
 	struct encoded_frame out;
-
-	if (!s->watching || s->broken) return;
-	if (f->corrupted || f->data == NULL) return;
-	if (s->format_changed && !open_encoder(s)) return;
-	if (!s->encoder) return;
-
-	uint32_t stride = f->stride ? f->stride : s->format.width;
-	if (f->size < (size_t)stride * s->format.height + (size_t)stride * (s->format.height / 2)) return;
 
 	/* Asked for as late as it can be: where the pointer is now, not where it was when
 	 * gamescope drew the frame. */
@@ -276,13 +302,13 @@ static void on_frame(void *user, const struct capture_frame *f)
 
 	bool keyframe = s->keyframe_wanted;
 	s->keyframe_wanted = false;
-	if (!encoder_encode(s->encoder, f->data, stride, keyframe, pointer, &out)) {
+	if (!encoder_encode(s->encoder, data, stride, keyframe, pointer, &out)) {
 		on_failed(s, encoder_error(s->encoder));
 		return;
 	}
 	uint64_t encoded = now_ns();
 
-	bool sent = send_frame(s, &out, f->arrival_ns, encoded);
+	bool sent = send_frame(s, &out, arrival_ns, encoded);
 	uint64_t done = now_ns();
 	s->last_sent_ns = done;
 
@@ -292,8 +318,8 @@ static void on_frame(void *user, const struct capture_frame *f)
 		t->bytes += out.size;
 		if (out.keyframe) t->keyframes++;
 		if (out.size > t->largest) t->largest = out.size;
-		t->encode_ns += encoded - f->arrival_ns;
-		if (encoded - f->arrival_ns > t->encode_max_ns) t->encode_max_ns = encoded - f->arrival_ns;
+		t->encode_ns += encoded - arrival_ns;
+		if (encoded - arrival_ns > t->encode_max_ns) t->encode_max_ns = encoded - arrival_ns;
 		t->send_ns += done - encoded;
 		if (done - encoded > t->send_max_ns) t->send_max_ns = done - encoded;
 	} else {
@@ -304,12 +330,58 @@ static void on_frame(void *user, const struct capture_frame *f)
 	s->frame++;
 }
 
+static void on_frame(void *user, const struct capture_frame *f)
+{
+	struct server *s = user;
+
+	if (f->corrupted || f->data == NULL || !s->have_format) return;
+
+	uint32_t stride = f->stride ? f->stride : s->format.width;
+	size_t needed = (size_t)stride * s->format.height + (size_t)stride * (s->format.height / 2);
+	if (f->size < needed) return;
+
+	/* Kept whether or not anybody is watching: it is the one after the last viewer left
+	 * that the next viewer needs. */
+	if (needed != s->kept_size) {
+		free(s->kept);
+		s->kept = malloc(needed);
+		s->kept_size = s->kept ? needed : 0;
+		s->kept_valid = false;
+	}
+	if (s->kept) {
+		memcpy(s->kept, f->data, needed);
+		s->kept_stride = stride;
+		s->kept_valid = true;
+	}
+
+	if (!s->watching || s->broken) return;
+	if (s->format_changed && !open_encoder(s)) return;
+	if (!s->encoder) return;
+
+	send_picture(s, f->data, stride, f->arrival_ns);
+}
+
 static void start_stream(struct server *s, const struct sockaddr_in *from, const struct wire_hello *hello)
 {
 	char name[64];
 
 	if (s->quitting) return;
 	stop_stream(s, "replaced by a new request");
+
+	/* Too small to encode is treated as "no preference"; gamescope would refuse nothing. */
+	uint32_t width = hello->width >= 160 && hello->height >= 128 ? hello->width : 0;
+	uint32_t height = width ? hello->height : 0;
+
+	/* The capture kept from before serves any viewer that wants the same size. One that
+	 * is for another size, or that has stopped delivering - gamescope was restarted under
+	 * it - has to go first. */
+	if (s->capture && (width != s->held_width || height != s->held_height)) {
+		printf("capture  : let go, a different size is wanted\n");
+		release_capture(s);
+	} else if (s->capture && !capture_streaming(s->capture)) {
+		printf("capture  : let go, it is no longer connected to the source\n");
+		release_capture(s);
+	}
 	if (s->leaving) {
 		s->pending = true;
 		s->pending_from = *from;
@@ -328,13 +400,11 @@ static void start_stream(struct server *s, const struct sockaddr_in *from, const
 	s->keys_heard = s->mouse_heard = false;
 	s->key_seen = s->motion_seen = false;
 	s->keyframe_wanted = false;
-	s->format_changed = false;
+	/* With a capture already running its format is known and will not be announced
+	 * again, so the encoder is opened for it by the first frame. */
+	s->format_changed = s->capture != NULL && s->have_format;
 	memset(&s->tally, 0, sizeof(s->tally));
 	s->tally.since_ns = s->last_hello_ns;
-
-	/* Too small to encode is treated as "no preference"; gamescope would refuse nothing. */
-	uint32_t width = hello->width >= 160 && hello->height >= 128 ? hello->width : 0;
-	uint32_t height = width ? hello->height : 0;
 
 	printf("viewer   : %s asks for ", viewer_name(s, name, sizeof(name)));
 	if (width) printf("%ux%u", width, height);
@@ -349,12 +419,22 @@ static void start_stream(struct server *s, const struct sockaddr_in *from, const
 		.height = height,
 		.on_format = on_format,
 		.on_frame = on_frame,
-		.on_failed = on_failed,
+		.on_failed = on_capture_failed,
 		.user = s,
 		.loop = s->loop,
 	};
 	s->cursor = cursor_open();
+	if (s->capture) {
+		/* gamescope draws only when something on screen changes, and a new viewer of a
+		 * capture that is already running changes nothing. The newest picture is still
+		 * what is on screen, so the viewer is given that one to begin with. */
+		if (s->kept_valid && open_encoder(s)) send_picture(s, s->kept, s->kept_stride, now_ns());
+		return;
+	}
+
 	s->capture = capture_open(&config);
+	s->held_width = width;
+	s->held_height = height;
 	if (!s->capture) stop_stream(s, "the video source could not be opened");
 }
 
@@ -542,8 +622,17 @@ static void on_tick(void *data, uint64_t expirations)
 	struct server *s = data;
 	uint64_t now = now_ns();
 
-	if (s->broken) stop_stream(s, s->broken_reason);
-	else if (s->watching && now - s->last_hello_ns > VIEWER_TIMEOUT_NS) stop_stream(s, "the viewer went quiet");
+	if (s->capture_broken) {
+		/* With or without a viewer: a capture that has failed is no use to the next one. */
+		if (s->watching) stop_stream(s, s->broken_reason);
+		else printf("capture  : lost while nobody was watching (%s)\n", s->broken_reason);
+		release_capture(s);
+		s->broken = false;
+	} else if (s->broken) {
+		stop_stream(s, s->broken_reason);
+	} else if (s->watching && now - s->last_hello_ns > VIEWER_TIMEOUT_NS) {
+		stop_stream(s, "the viewer went quiet");
+	}
 
 	if (s->leaving && now - s->leaving_since_ns >= CAPTURE_SETTLE_MS * 1000000ull) {
 		capture_close(s->leaving);
@@ -589,6 +678,7 @@ static void on_signal(void *data, int number)
 
 	/* Not at once while a picture is flowing: the tick quits once the capture is closed. */
 	stop_stream(s, "shutting down");
+	release_capture(s);
 	s->pending = false;
 	if (s->leaving) s->quitting = true;
 	else pw_main_loop_quit(s->loop);
@@ -634,13 +724,17 @@ int server_run(const struct server_options *options)
 	pw_loop_update_timer(loop, timer, &period, &period, false);
 
 	printf("listening: UDP port %u, source '%s', send buffer %d kB\n", options->port, options->source, granted / 1024);
-	printf("           waiting for a viewer; nothing is captured until one asks\n");
+	printf("           waiting for a viewer; nothing is captured until the first one asks,\n");
+	printf("           and from then on the capture stays attached until this program ends\n");
 	printf("           %s\n", options->allow_input ? "the viewer may play with its own gamepad, keyboard and mouse (--allow-input)"
 						       : "input from the viewer is not accepted");
 
 	pw_main_loop_run(s->loop);
 
-	capture_close(s->leaving); /* only if the loop ended some other way than by a signal */
+	/* Only if the loop ended some other way than by a signal. */
+	capture_close(s->leaving);
+	capture_close(s->capture);
+	free(s->kept);
 	pw_loop_destroy_source(loop, sigterm);
 	pw_loop_destroy_source(loop, sigint);
 	pw_loop_destroy_source(loop, timer);

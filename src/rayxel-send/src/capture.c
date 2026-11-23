@@ -286,6 +286,11 @@ const char *capture_error(const struct capture *c)
 	return c->error;
 }
 
+bool capture_streaming(const struct capture *c)
+{
+	return c && !c->paused && c->stream && pw_stream_get_state(c->stream, NULL) == PW_STREAM_STATE_STREAMING;
+}
+
 void capture_pause(struct capture *c)
 {
 	if (!c || c->paused) return;

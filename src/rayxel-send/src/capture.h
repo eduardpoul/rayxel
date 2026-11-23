@@ -73,20 +73,34 @@ void capture_stop(struct capture *capture);
 const char *capture_error(const struct capture *capture);
 
 /*
- * A capture is never closed while pictures are flowing. gamescope (3.16, src/pipewire.cpp)
- * hands its buffers to its compositor thread without a lock, and a consumer that vanishes
- * mid-stream has the buffers freed on one thread while the other is still picking one up.
- * That takes gamescope down, and the whole Steam session and the game in it with it. What
- * it survives is being paused first: it then stops handing buffers out, and once the one
- * in flight has come back there is nothing left to race over.
+ * Stopping a capture is dangerous to the source, and is done as seldom as possible.
  *
- * So: capture_pause, then the loop runs for CAPTURE_SETTLE_MS, then capture_close. On a
- * loop of its own capture_close does all three. On a borrowed loop the owner does the
- * first two, because the waiting is the loop's to do and close may be called from inside
- * one of its callbacks.
+ * gamescope (3.16, src/pipewire.cpp) takes a buffer from its PipeWire stream on its
+ * compositor thread, once for every frame it draws, with no lock against the thread the
+ * stream itself runs on. When the stream leaves its streaming state while a frame is being
+ * drawn, the two collide over the stream's buffers, and gamescope aborts in destroy_buffer
+ * - taking the whole Steam session down, and the game in it. It happens at the moment the
+ * consumer stops, whether it stops by pausing or by disconnecting, and only when a frame
+ * happens to be on its way just then: rarely on an idle screen, once in some tens of times
+ * under a game drawing 60 frames a second.
+ *
+ * Nothing done from this side makes that moment safe. Pausing before closing was tried as
+ * a cure and is not one: gamescope has since been seen to die on the pause itself. So the
+ * owner of a capture should keep it for as long as it can, and the server does - see
+ * server.c - which leaves the moment to come once, when the program ends.
+ *
+ * When a capture does have to go: capture_pause, then the loop runs for CAPTURE_SETTLE_MS,
+ * then capture_close, so that at least the disconnect finds no frame in flight. On a loop
+ * of its own capture_close does all three. On a borrowed loop the owner does the first
+ * two, because the waiting is the loop's to do and close may be called from inside one of
+ * its callbacks.
  *
  * After capture_pause no callback is made again.
  */
 #define CAPTURE_SETTLE_MS 200
 void capture_pause(struct capture *capture);
 void capture_close(struct capture *capture);
+
+/* Whether pictures can arrive: connected to the source and not paused. A capture that has
+ * been kept while the source went away and came back is not, and is no use any more. */
+bool capture_streaming(const struct capture *capture);
