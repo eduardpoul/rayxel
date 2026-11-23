@@ -1220,6 +1220,8 @@ void RunLoop()
         if (shotPath is not null && presented > 400)
         {
             renderer.SaveBackBuffer(shotPath);
+            // With the motion drawn in the picture, the vectors themselves go beside it.
+            renderer.SaveFlow(Path.ChangeExtension(shotPath, ".flow"));
             shotPath = null;
             quit = true;
         }

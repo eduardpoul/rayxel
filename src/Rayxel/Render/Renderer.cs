@@ -799,6 +799,24 @@ public sealed class Renderer : IDisposable
         }
     }
 
+    /// <summary>The estimated motion as numbers, beside a diagnostic capture; see <see cref="OpticalFlow.Save"/>.</summary>
+    public bool SaveFlow(string path)
+    {
+        if (Flow is not { Ready: true } flow) return false;
+        try
+        {
+            bool written;
+            lock (_context) written = flow.Save(_context, path);
+            if (written) Log.Info($"motion vectors written to {path}");
+            return written;
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"motion vectors not written: {ex.Message}");
+            return false;
+        }
+    }
+
     private static unsafe void WritePng(MappedSubresource map, int width, int height, bool pq, string path)
     {
         using var bmp = new Bitmap(width, height, PixelFormat.Format32bppArgb);

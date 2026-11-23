@@ -36,14 +36,26 @@ public enum FlowView
 /// doubled and only corrects it by a pixel or two more. Each level also measures the
 /// fraction of a pixel left over, from how brightness slopes across the patch, because in
 /// the small copies most movement is less than a pixel and whole-pixel matching would
-/// call it none. The result is one vector for every 4x4 block of the picture.
+/// call it none; the last such correction is made against a copy twice as detailed as the
+/// vectors. The result is one vector for every 4x4 block of the picture.
 /// </para>
 /// <para>
-/// This is a guess, and it guesses wrong in known places: where something came out from
-/// behind something else and has nothing to match, on repeating patterns, on flat areas,
-/// and wherever two things move in the same place, such as a game's interface over its
-/// world. The cost of the match is kept beside each vector so that a later stage can tell
-/// a confident one from a doubtful one.
+/// This is a guess, and where it has nothing to go on it says so rather than invent. Each
+/// level also asks whether the patch moved at all, because a still thing seen together
+/// with what moves around it - a game's interface over its world - would otherwise be
+/// handed the movement. And each vector ends up marked with how surely its patch moved
+/// and which halves of it, sideways and up-and-down, were measured. The halves that were
+/// not - a flat patch, an edge sliding along itself, a patch with two things in it - are
+/// settled from the measured ones around them, and a stray among its neighbours is
+/// removed.
+/// </para>
+/// <para>
+/// It still guesses wrong in known places: where something came out from behind something
+/// else and has nothing to match, on repeating patterns, on a flat thing cut off by the
+/// edge of the picture, and by a fraction of a pixel wherever the movement is not a whole
+/// number of the quarter-size copy's pixels. <c>--shot</c> writes the vectors out as
+/// numbers beside its picture, and <c>src/rayxel-send/test/flowtest-*</c> is a picture
+/// with known movement to check them against.
 /// </para>
 /// </summary>
 public sealed class OpticalFlow : IDisposable
@@ -57,7 +69,7 @@ public sealed class OpticalFlow : IDisposable
 
     private readonly ID3D11Device _device;
     private ID3D11VertexShader? _vs;
-    private ID3D11PixelShader? _reducePs, _matchPs, _refinePs, _showPs;
+    private ID3D11PixelShader? _reducePs, _matchPs, _refinePs, _finerPs, _resolvePs, _medianPs, _showPs;
     private ID3D11Buffer? _constants;
     private ID3D11SamplerState? _point;
     private bool _compiled, _failed;
@@ -69,14 +81,16 @@ public sealed class OpticalFlow : IDisposable
     private int _current;
     private bool _havePrevious;
 
-    // One vector field per pyramid level searched, coarsest last, plus the refined result.
+    // One vector field per pyramid level searched, coarsest last; the finest refined, and
+    // refined again on a finer copy of the picture; that with every vector settled; and that
+    // with the strays removed, which is the result.
     private ID3D11Texture2D?[] _field = [];
     private ID3D11RenderTargetView?[] _fieldTarget = [];
     private ID3D11ShaderResourceView?[] _fieldView = [];
     private (int Width, int Height)[] _levelSize = [];
-    private ID3D11Texture2D? _result;
-    private ID3D11RenderTargetView? _resultTarget;
-    private ID3D11ShaderResourceView? _resultView;
+    private ID3D11Texture2D? _refined, _finer, _settled, _result;
+    private ID3D11RenderTargetView? _refinedTarget, _finerTarget, _settledTarget, _resultTarget;
+    private ID3D11ShaderResourceView? _refinedView, _finerView, _settledView, _resultView;
 
     private int _videoWidth, _videoHeight;
 
@@ -104,6 +118,9 @@ public sealed class OpticalFlow : IDisposable
             _reducePs = _device.CreatePixelShader(Build("ReducePS", "ps_5_0"));
             _matchPs = _device.CreatePixelShader(Build("MatchPS", "ps_5_0"));
             _refinePs = _device.CreatePixelShader(Build("RefinePS", "ps_5_0"));
+            _finerPs = _device.CreatePixelShader(Build("FinerPS", "ps_5_0"));
+            _resolvePs = _device.CreatePixelShader(Build("ResolvePS", "ps_5_0"));
+            _medianPs = _device.CreatePixelShader(Build("MedianPS", "ps_5_0"));
             _showPs = _device.CreatePixelShader(Build("ShowPS", "ps_5_0"));
 
             _constants = _device.CreateBuffer(new BufferDescription(64, BindFlags.ConstantBuffer,
@@ -183,6 +200,9 @@ public sealed class OpticalFlow : IDisposable
         _fieldView = new ID3D11ShaderResourceView?[_levelSize.Length];
         for (int i = 0; i < _levelSize.Length; i++)
             (_field[i], _fieldTarget[i], _fieldView[i]) = Field(_levelSize[i].Width, _levelSize[i].Height);
+        (_refined, _refinedTarget, _refinedView) = Field(_levelSize[0].Width, _levelSize[0].Height);
+        (_finer, _finerTarget, _finerView) = Field(_levelSize[0].Width, _levelSize[0].Height);
+        (_settled, _settledTarget, _settledView) = Field(_levelSize[0].Width, _levelSize[0].Height);
         (_result, _resultTarget, _resultView) = Field(_levelSize[0].Width, _levelSize[0].Height);
 
         _havePrevious = false;
@@ -199,8 +219,9 @@ public sealed class OpticalFlow : IDisposable
 
     private (ID3D11Texture2D, ID3D11RenderTargetView, ID3D11ShaderResourceView) Field(int width, int height)
     {
-        // xy is the vector in this level's own pixels, z the cost of the match it won with,
-        // w how much texture there was to judge by: near zero means the vector was inherited.
+        // xy is the vector in this level's own pixels, z how surely the patch moved at all
+        // (+1) or stood still (-1), w how much there was to match by - or, in the finest
+        // two, which halves of the vector are measurements. The shader says more.
         var texture = _device.CreateTexture2D(new Texture2DDescription
         {
             Width = (uint)width,
@@ -272,13 +293,41 @@ public sealed class OpticalFlow : IDisposable
 
         // One more round of the sub-pixel correction on the finest level.
         Unbind(context);
-        context.OMSetRenderTargets(_resultTarget!);
+        context.OMSetRenderTargets(_refinedTarget!);
         context.RSSetViewport(0, 0, _levelSize[0].Width, _levelSize[0].Height);
         SetConstants(context, _levelSize[0].Width, _levelSize[0].Height, FinestMip, hasParent: true);
         context.PSSetShader(_refinePs);
         context.PSSetShaderResource(0, _pyramidView[_current]!);
         context.PSSetShaderResource(1, _pyramidView[previous]!);
         context.PSSetShaderResource(2, _fieldView[0]!);
+        context.Draw(4, 0);
+
+        // And once more against the copy of the picture one step finer than the vectors.
+        int finerMip = FinestMip - 1;
+        Unbind(context);
+        context.OMSetRenderTargets(_finerTarget!);
+        SetConstants(context, Math.Max(1, _videoWidth / 2) >> finerMip, Math.Max(1, _videoHeight / 2) >> finerMip,
+                     finerMip, hasParent: true);
+        context.PSSetShader(_finerPs);
+        context.PSSetShaderResource(0, _pyramidView[_current]!);
+        context.PSSetShaderResource(1, _pyramidView[previous]!);
+        context.PSSetShaderResource(2, _refinedView!);
+        context.Draw(4, 0);
+
+        // The vectors that are not measurements settled from those that are.
+        Unbind(context);
+        context.OMSetRenderTargets(_settledTarget!);
+        SetConstants(context, _levelSize[0].Width, _levelSize[0].Height, FinestMip, hasParent: true);
+        context.PSSetShader(_resolvePs);
+        context.PSSetShaderResource(0, _pyramidView[_current]!);
+        context.PSSetShaderResource(2, _finerView!);
+        context.Draw(4, 0);
+
+        // And the strays among them removed.
+        Unbind(context);
+        context.OMSetRenderTargets(_resultTarget!);
+        context.PSSetShader(_medianPs);
+        context.PSSetShaderResource(2, _settledView!);
         context.Draw(4, 0);
 
         Unbind(context);
@@ -328,6 +377,63 @@ public sealed class OpticalFlow : IDisposable
         context.PSSetShaderResource(2, null!);
     }
 
+    /// <summary>
+    /// Writes the vectors out as numbers, so that they can be checked against a picture whose
+    /// motion is known - which the coloured view cannot be, once the display's own tone curve
+    /// has been through it. Diagnostic only: it waits for the GPU.
+    /// <para>
+    /// The file is "RXFL", then as int32 the field's width and height and the picture's, then
+    /// four float32 per vector, row by row: x and y in picture pixels (where that patch was
+    /// in the frame before, relative to where it is now), how surely it moved (+1) or stood
+    /// still (-1), and which halves of the vector were measured rather than settled from
+    /// its neighbours (1 sideways, 2 up-and-down, 3 both).
+    /// </para>
+    /// </summary>
+    public bool Save(ID3D11DeviceContext context, string path)
+    {
+        if (!Ready || _result is null) return false;
+
+        var (width, height) = _levelSize[0];
+        using var staging = _device.CreateTexture2D(new Texture2DDescription
+        {
+            Width = (uint)width,
+            Height = (uint)height,
+            MipLevels = 1,
+            ArraySize = 1,
+            Format = Format.R16G16B16A16_Float,
+            SampleDescription = new SampleDescription(1, 0),
+            Usage = ResourceUsage.Staging,
+            CPUAccessFlags = CpuAccessFlags.Read
+        });
+        context.CopyResource(staging, _result);
+
+        // A vector is in pixels of its own level; the picture's are this many times smaller.
+        float toPicture = _videoWidth / (float)width;
+        var map = context.Map(staging, 0, MapMode.Read);
+        try
+        {
+            using var file = new BinaryWriter(File.Create(path));
+            file.Write("RXFL"u8);
+            file.Write(width); file.Write(height); file.Write(_videoWidth); file.Write(_videoHeight);
+            unsafe
+            {
+                for (int y = 0; y < height; y++)
+                {
+                    var row = (Half*)((byte*)map.DataPointer + y * (long)map.RowPitch);
+                    for (int x = 0; x < width; x++)
+                    {
+                        file.Write((float)row[x * 4 + 0] * toPicture);
+                        file.Write((float)row[x * 4 + 1] * toPicture);
+                        file.Write((float)row[x * 4 + 2]);
+                        file.Write((float)row[x * 4 + 3]);
+                    }
+                }
+            }
+        }
+        finally { context.Unmap(staging, 0); }
+        return true;
+    }
+
     private void SetConstants(ID3D11DeviceContext context, int width, int height, int mip, bool hasParent)
     {
         var mapped = context.Map(_constants!, 0, MapMode.WriteDiscard);
@@ -371,6 +477,15 @@ public sealed class OpticalFlow : IDisposable
             _field[i]?.Dispose();
         }
         _field = []; _fieldTarget = []; _fieldView = []; _levelSize = [];
+        _finerView?.Dispose(); _finerView = null;
+        _finerTarget?.Dispose(); _finerTarget = null;
+        _finer?.Dispose(); _finer = null;
+        _settledView?.Dispose(); _settledView = null;
+        _settledTarget?.Dispose(); _settledTarget = null;
+        _settled?.Dispose(); _settled = null;
+        _refinedView?.Dispose(); _refinedView = null;
+        _refinedTarget?.Dispose(); _refinedTarget = null;
+        _refined?.Dispose(); _refined = null;
         _resultView?.Dispose(); _resultView = null;
         _resultTarget?.Dispose(); _resultTarget = null;
         _result?.Dispose(); _result = null;
@@ -382,7 +497,7 @@ public sealed class OpticalFlow : IDisposable
     {
         Release();
         _point?.Dispose(); _constants?.Dispose();
-        _showPs?.Dispose(); _refinePs?.Dispose(); _matchPs?.Dispose(); _reducePs?.Dispose(); _vs?.Dispose();
+        _showPs?.Dispose(); _medianPs?.Dispose(); _resolvePs?.Dispose(); _finerPs?.Dispose(); _refinePs?.Dispose(); _matchPs?.Dispose(); _reducePs?.Dispose(); _vs?.Dispose();
     }
 
     // NOTE: keep this shader pure ASCII. Non-ASCII bytes truncate the source.
@@ -425,15 +540,26 @@ public sealed class OpticalFlow : IDisposable
             return Current.SampleLevel(Linear, i.uv, 0);
         }
 
+        // An offset that is not a whole number of pixels has the previous frame read
+        // between its pixels, which softens it, and a softened patch does not match a
+        // sharp one even where it belongs. So the fraction is shared out: each frame is
+        // read half of it off its pixels, in opposite directions, and both are softened
+        // alike. This is that half - what the new frame's patch is read back by.
+        float2 Shared(float2 d)
+        {
+            return 0.5 * (d - round(d));
+        }
+
         // How unlike two 5x5 patches are: the sum of absolute differences, of the patch
         // around `at` in the new frame and the one displaced by `d` in the previous frame.
         float PatchCost(float2 at, float2 d)
         {
+            float2 back = Shared(d);
             float cost = 0.0;
             for (int y = -2; y <= 2; y++)
             for (int x = -2; x <= 2; x++)
             {
-                float2 o = float2(x, y);
+                float2 o = float2(x, y) - back;
                 float a = Current.SampleLevel(Linear, (at + o) / LevelSize, Mip);
                 float b = Previous.SampleLevel(Linear, (at + o + d) / LevelSize, Mip);
                 cost += abs(a - b);
@@ -446,9 +572,22 @@ public sealed class OpticalFlow : IDisposable
         // moving away from the prediction costs a little.
         static const float Reluctance = 0.012;
 
-        // How much better, per pixel of the patch, a movement has to match than no movement
-        // at all before it is believed: about one grey level of an 8-bit picture.
-        static const float Stillness = 0.004;
+        // What two matches of the same patch can differ by through noise alone, per pixel:
+        // about one grey level of an 8-bit picture.
+        static const float Noise = 0.004;
+
+        // How surely a patch moved, from how well it matches at its offset and how well
+        // where it was: towards +1 when the offset explains it and staying put does not,
+        // towards -1 the other way round, and near zero when the two match about equally.
+        // That last is a flat patch, an edge sliding along itself - or a patch with two
+        // things in it going different ways, which neither answer explains.
+        float Surely(float moved, float still)
+        {
+            return (still - moved) / (still + moved + 2.0 * 25.0 * Noise);
+        }
+
+        // Beyond this, either way, the question counts as settled.
+        static const float Settled = 0.45;
 
         // Matching whole pixels cannot see a movement smaller than one, and in the small
         // copies of the picture nearly every movement is. This finds the remainder from
@@ -458,14 +597,17 @@ public sealed class OpticalFlow : IDisposable
         // directions at once. On a flat patch there are no slopes and the answer is "no
         // correction"; along a plain edge only the movement across the edge can be told,
         // and the damping term makes it return just that rather than something wild.
-        // `strength` is how well both directions were pinned down.
-        float2 Slopes(float2 at, float2 d, out float strength)
+        // `grip` is how much brightness changes across the patch sideways and up and down:
+        // what there was to hold on to in each direction. A level edge has none sideways,
+        // and no sideways offset of it can be told from another.
+        float2 Slopes(float2 at, float2 d, out float2 grip)
         {
+            float2 back = Shared(d);
             float gxx = 0.0, gxy = 0.0, gyy = 0.0, bx = 0.0, by = 0.0;
             for (int y = -2; y <= 2; y++)
             for (int x = -2; x <= 2; x++)
             {
-                float2 q = at + float2(x, y);
+                float2 q = at + float2(x, y) - back;
                 float c  = Current.SampleLevel(Linear, q / LevelSize, Mip);
                 float ix = 0.5 * (Current.SampleLevel(Linear, (q + float2(1.0, 0.0)) / LevelSize, Mip)
                                 - Current.SampleLevel(Linear, (q - float2(1.0, 0.0)) / LevelSize, Mip));
@@ -476,59 +618,220 @@ public sealed class OpticalFlow : IDisposable
                 bx  += ix * it; by  += iy * it;
             }
 
-            float trace = gxx + gyy;
-            float det   = gxx * gyy - gxy * gxy;
-            strength = 0.5 * (trace - sqrt(max(trace * trace - 4.0 * det, 0.0)));
+            grip = float2(gxx, gyy);
 
             const float Damping = 0.003;
             gxx += Damping; gyy += Damping;
-            det = gxx * gyy - gxy * gxy;
+            float det = gxx * gyy - gxy * gxy;
             float2 delta = -float2(gyy * bx - gxy * by, gxx * by - gxy * bx) / det;
             return clamp(delta, -1.0, 1.0);
         }
 
+        // Each level answers two questions and keeps both answers. Where was this patch,
+        // if it moved: the best of the offsets around where the level above said to look.
+        // And did it move at all: how that match compares with the patch simply being
+        // where it was. The second matters because a coarse level sees a still thing
+        // together with what moves around it - the background behind something crossing
+        // it, a game's HUD over its world - and hands the movement down to both.
+        //
+        // Out: xy the offset, z how surely the patch moved (see Surely).
         float4 MatchPS(VSOut i) : SV_Target
         {
             float2 at = i.uv * LevelSize;
             // The level above answered in its own pixels, which are twice the size of these.
             float2 start = HasParent > 0.5 ? Field.SampleLevel(Linear, i.uv, 0).xy * 2.0 : float2(0.0, 0.0);
 
-            float  best = 1e9;
+            float  best = 1e9, bestRaw = 0.0;
             float2 bestD = start;
             for (int y = -2; y <= 2; y++)
             for (int x = -2; x <= 2; x++)
             {
                 float2 delta = float2(x, y);
-                float cost = PatchCost(at, start + delta) + Reluctance * 25.0 * length(delta);
-                if (cost < best) { best = cost; bestD = start + delta; }
+                float raw = PatchCost(at, start + delta);
+                float cost = raw + Reluctance * 25.0 * length(delta);
+                if (cost < best) { best = cost; bestRaw = raw; bestD = start + delta; }
             }
 
-            // Whatever the level above said, the patch may simply not have moved: the
-            // background behind something that crossed it, a game's HUD over the world it
-            // is drawn on. The coarser level saw those together with their moving
-            // surroundings and handed that movement down, and on a flat patch nothing here
-            // contradicts it. So standing still is always tried as well, and wins unless
-            // moving matches better by more than noise would explain.
-            if (HasParent > 0.5)
-            {
-                float still = PatchCost(at, float2(0.0, 0.0));
-                if (still <= best + Stillness * 25.0) { best = still; bestD = float2(0.0, 0.0); }
-            }
+            float sure = Surely(bestRaw, PatchCost(at, float2(0.0, 0.0)));
 
-            float strength;
-            bestD += Slopes(at, bestD, strength);
-            return float4(bestD, best / 25.0, strength);
+            // Only a patch that surely stood still gives its offset up, and then it is
+            // exactly still: the slopes would pull it towards whatever else is in the patch
+            // and does move. In doubt the offset is kept, because a finer level may yet
+            // confirm it and can only look near where it is told to; z carries the doubt.
+            float2 grip;
+            float2 fine = Slopes(at, bestD, grip);
+            bestD = sure < -Settled ? float2(0.0, 0.0) : bestD + fine;
+            return float4(bestD, sure, grip.x + grip.y);
         }
 
-        // A second round of the same correction on the finest level, from the first's answer.
+        // Below this, in one direction, a patch has nothing to match by: brightness changing
+        // by a grey level or two a pixel, summed over the patch.
+        static const float Grip = 0.00125;
+
+        // Offsets closer together than this, in this level's pixels, are the same answer.
+        static const float Same = 0.0625;
+
+        // A second round of the same correction on the finest level, from the first's
+        // answer. It also notes, in w, in which directions the patch had something to match
+        // by: 4 for sideways, 8 for up and down.
         float4 RefinePS(VSOut i) : SV_Target
         {
             float2 at = i.uv * LevelSize;
             float4 coarse = Field.SampleLevel(Point, i.uv, 0);
 
-            float strength;
-            float2 d = coarse.xy + Slopes(at, coarse.xy, strength);
-            return float4(d, coarse.z, strength);
+            float2 grip;
+            float2 fine = Slopes(at, coarse.xy, grip);
+            float2 d = coarse.z < -Settled ? coarse.xy : coarse.xy + fine;
+            return float4(d, coarse.z, (grip.x >= Grip ? 4.0 : 0.0) + (grip.y >= Grip ? 8.0 : 0.0));
+        }
+
+        // The correction once more, on the copy of the picture with twice the detail. The
+        // vectors are worked out on a quarter-size copy, where a quarter of a pixel is a
+        // whole pixel of the picture; this halves what is left over. The patch is smaller
+        // there, so it is only trusted to adjust an answer, not to find one.
+        //
+        // With the offset now as good as it will get, how surely the patch moved is asked
+        // again, and the verdict given on what each half of the vector is worth, sideways
+        // and up-and-down apart. A half is a measurement when the patch had something to
+        // match by in that direction, and either it is settled whether the patch moved or
+        // the half is the same both ways. That is added to w as 1 for the sideways half
+        // and 2 for the other.
+        float4 FinerPS(VSOut i) : SV_Target
+        {
+            float4 f = Field.SampleLevel(Point, i.uv, 0);
+            int held = (int)(f.w + 0.5);
+            float2 d = f.xy;
+            float sure = f.z;
+
+            if (sure >= -Settled)
+            {
+                // LevelSize and Mip are the finer copy's here; a vector is two of its pixels.
+                float2 at = i.uv * LevelSize;
+                float2 grip;
+                float2 there = d * 2.0;
+                there += Slopes(at, there, grip);
+                sure = Surely(PatchCost(at, there), PatchCost(at, float2(0.0, 0.0)));
+                d = sure < -Settled ? float2(0.0, 0.0) : there * 0.5;
+            }
+
+            bool settled = abs(sure) > Settled;
+            float verdict = held;
+            if ((held & 4) != 0 && (settled || abs(d.x) < Same)) verdict += 1.0;
+            if ((held & 8) != 0 && (settled || abs(d.y) < Same)) verdict += 2.0;
+            return float4(d, sure, verdict);
+        }
+
+        // Two patches no further apart than this in brightness are taken to be the same
+        // surface.
+        static const float SameSurface = 0.04;
+
+        // How far, in vectors, a patch with nothing to match by looks along its surface for
+        // one that knows, and how far a patch that had something but came to no verdict
+        // looks around itself.
+        static const int Reach = 64;
+        static const int Near = 8;
+
+        // Walks from a patch in one direction to the first patch whose vector is a
+        // measurement in the half asked about (`bit` 1 sideways, 2 up-and-down). With
+        // `surface` set it gives up where the brightness stops being that of `here`.
+        bool Ask(float2 at, float2 step, int bit, bool surface, float here, out float2 found, out float distance)
+        {
+            found = float2(0.0, 0.0);
+            distance = 0.0;
+            bool got = false;
+            int reach = surface ? Reach : Near;
+            [loop] for (int k = 1; k <= reach; k++)
+            {
+                float2 q = at + step * k;
+                if (any(q < 0.0) || any(q >= LevelSize)) break;
+                float2 uv = q / LevelSize;
+                if (surface && abs(Current.SampleLevel(Point, uv, Mip) - here) > SameSurface) break;
+                float4 f = Field.SampleLevel(Point, uv, 0);
+                if (((int)(f.w + 0.5) & bit) != 0) { found = f.xy; distance = k; got = true; break; }
+            }
+            return got;
+        }
+
+        // One half of a vector that is not a measurement, settled from those that are.
+        //
+        // A patch with nothing to match by in that direction belongs to whatever it is part
+        // of, so it asks along its surface, both ways, for the nearest patches that know.
+        // Those sit at the surface's edges, and an edge can only tell of movement across
+        // itself - slide a flat strip along its own length and nothing changes - which is
+        // why the sideways half is asked along the row, whose ends are the edges to the
+        // left and right, and the other half along the column. With a patch that knows on
+        // both sides it takes what lies between them: the inside of a moving thing moves
+        // with its outline. With one side only it is taken to be still - that is the
+        // background beside something crossing it, not part of the thing.
+        //
+        // A patch that had something to match by and still came to no verdict - two things
+        // in it, a faint or a repeating pattern - asks its near neighbours whatever they
+        // are, and failing them keeps what it had.
+        float Settle(float2 at, float2 step, int bit, bool flat, float here, float own)
+        {
+            float2 a, b;
+            float da, db;
+            bool ha = Ask(at, -step, bit, flat, here, a, da);
+            bool hb = Ask(at,  step, bit, flat, here, b, db);
+            float va = bit == 1 ? a.x : a.y;
+            float vb = bit == 1 ? b.x : b.y;
+
+            if (ha && hb) return (va * db + vb * da) / (da + db);
+            if (flat) return 0.0;
+            return ha ? va : hb ? vb : own;
+        }
+
+        // The last word on each vector: its measured halves stand, the others are settled.
+        float4 ResolvePS(VSOut i) : SV_Target
+        {
+            float4 own = Field.SampleLevel(Point, i.uv, 0);
+            int verdict = (int)(own.w + 0.5);
+            if ((verdict & 3) == 3) return own;
+
+            float2 at = i.uv * LevelSize;
+            float here = Current.SampleLevel(Point, i.uv, Mip);
+            if ((verdict & 1) == 0) own.x = Settle(at, float2(1.0, 0.0), 1, (verdict & 4) == 0, here, own.x);
+            if ((verdict & 2) == 0) own.y = Settle(at, float2(0.0, 1.0), 2, (verdict & 8) == 0, here, own.y);
+            return own;
+        }
+
+        // Orders two vectors a half at a time: the smaller sideways and the smaller
+        // up-and-down into the first, the larger into the second.
+        void Order(inout float2 a, inout float2 b)
+        {
+            float2 low = min(a, b);
+            b = max(a, b);
+            a = low;
+        }
+
+        // A match can simply be wrong - a dark, noisy corner finds itself somewhere else -
+        // and a wrong vector stands alone among right ones. Each vector is replaced by the
+        // middle one of itself and its eight neighbours, each half apart, which removes a
+        // lone stray and leaves an edge between two movements where it was.
+        float4 MedianPS(VSOut i) : SV_Target
+        {
+            float2 px = 1.0 / LevelSize;
+            float4 own = Field.SampleLevel(Point, i.uv, 0);
+            float2 v0 = Field.SampleLevel(Point, i.uv + px * float2(-1.0, -1.0), 0).xy;
+            float2 v1 = Field.SampleLevel(Point, i.uv + px * float2( 0.0, -1.0), 0).xy;
+            float2 v2 = Field.SampleLevel(Point, i.uv + px * float2( 1.0, -1.0), 0).xy;
+            float2 v3 = Field.SampleLevel(Point, i.uv + px * float2(-1.0,  0.0), 0).xy;
+            float2 v4 = own.xy;
+            float2 v5 = Field.SampleLevel(Point, i.uv + px * float2( 1.0,  0.0), 0).xy;
+            float2 v6 = Field.SampleLevel(Point, i.uv + px * float2(-1.0,  1.0), 0).xy;
+            float2 v7 = Field.SampleLevel(Point, i.uv + px * float2( 0.0,  1.0), 0).xy;
+            float2 v8 = Field.SampleLevel(Point, i.uv + px * float2( 1.0,  1.0), 0).xy;
+
+            // The shortest known sequence of comparisons that leaves the middle of nine in
+            // the middle.
+            Order(v1, v2); Order(v4, v5); Order(v7, v8);
+            Order(v0, v1); Order(v3, v4); Order(v6, v7);
+            Order(v1, v2); Order(v4, v5); Order(v7, v8);
+            Order(v0, v3); Order(v5, v8); Order(v4, v7);
+            Order(v3, v6); Order(v1, v4); Order(v2, v5);
+            Order(v4, v7); Order(v4, v2); Order(v6, v4);
+            Order(v4, v2);
+            return float4(v4, own.zw);
         }
 
         float3 LinearToPQ(float3 L)
