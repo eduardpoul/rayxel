@@ -51,7 +51,7 @@ public readonly record struct FsrChoice(string Label, FsrModel Model, string? Ve
 /// offered on Radeon RX 6000, 7000 and 9000 cards and some Ryzen processors, in a full or
 /// a lighter model that the library picks by itself. On anything else - a GeForce - the
 /// same call gets FSR 3.1, which is worked out by formula. <see cref="Versions"/> is what
-/// the library offered here and <see cref="VersionInUse"/> what it is running.
+/// the library offered here, less FSR 2, and <see cref="VersionInUse"/> what it is running.
 /// </para>
 /// <para>
 /// That is a decision, not a limit of the card. The networks that work in whole numbers
@@ -307,7 +307,7 @@ public sealed unsafe class FsrScaler : IDisposable
     public IReadOnlyList<FsrVersion> Versions => _versions;
 
     /// <summary>
-    /// The upscaler asked for, by the name it is offered under ("3.1.5"), or by the start
+    /// The upscaler asked for, by the name it is offered under ("3.1.6"), or by the start
     /// of one ("3", "4.1"). Null leaves the choice to the library, which takes the newest
     /// it can run here. Changing it takes effect with the next frame, as the first of a
     /// new history.
@@ -581,7 +581,9 @@ public sealed unsafe class FsrScaler : IDisposable
 
     /// <summary>
     /// Asks which upscalers there are for this device. The answer depends on the card:
-    /// the library leaves out the ones it will not run there.
+    /// the library leaves out the ones it will not run there. FSR 2, which it still
+    /// carries, is left out here as well: FSR 3 does the same thing better on every card
+    /// that could run it, so it is not something to be offered or asked for.
     /// </summary>
     private void ReadVersions(List<FsrVersion> into)
     {
@@ -603,7 +605,11 @@ public sealed unsafe class FsrScaler : IDisposable
 
         // The names are the library's own memory, and it may write over them: copied at once.
         for (int i = 0; i < (int)count; i++)
-            into.Add(new FsrVersion(ids[i], Marshal.PtrToStringUTF8((IntPtr)names[i]) ?? $"0x{ids[i]:X}"));
+        {
+            string name = Marshal.PtrToStringUTF8((IntPtr)names[i]) ?? $"0x{ids[i]:X}";
+            if (!name.StartsWith("2.", StringComparison.Ordinal)) into.Add(new FsrVersion(ids[i], name));
+        }
+        if (into.Count == 0) throw new InvalidOperationException("FSR offers nothing newer than FSR 2 here");
     }
 
     /// <summary>

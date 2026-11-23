@@ -90,7 +90,7 @@ foreach (var arg in args)
         forcedDlssModel = Enum.TryParse<DlssModel>(arg[13..], true, out var asked) && Enum.IsDefined(asked)
             ? asked : null;
     // And the upscaler FSR is asked for, by the name AMD's library offers it under or the
-    // start of one: --fsr-version=auto|4|3.1|2.3.4. What it offers depends on the card.
+    // start of one: --fsr-version=auto|4|3.1. What it offers depends on the card.
     else if (arg.StartsWith("--fsr-version=", StringComparison.OrdinalIgnoreCase))
     {
         fsrVersionForced = true;

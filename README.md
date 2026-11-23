@@ -203,8 +203,8 @@ and why.
 - **Left to itself, FSR is whichever version AMD's library will run on the card.** FSR 4,
   the one built on a neural network, is offered on Radeon RX 6000, 7000 and 9000 cards and
   some Ryzen processors, and its lighter model is picked by the library itself. On anything
-  else - a GeForce - the same library offers FSR 3.1 and 2.3, which are worked out by
-  formula. Like DLSS it works from estimated motion and a flat depth; unlike DLSS it also
+  else - a GeForce - the same library offers FSR 3.1, which is worked out by formula (and
+  FSR 2, which Rayxel does not list). Like DLSS it works from estimated motion and a flat depth; unlike DLSS it also
   needs the picture shifted by part of a pixel each frame, which Rayxel does for it and
   which costs a little sharpness that FSR's own sharpening then puts back.
 - **FSR 4 on a card AMD does not offer it for is not AMD's doing.** The networks that work
