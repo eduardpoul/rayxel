@@ -26,10 +26,12 @@ public static class BottomBar
     // Measured on this machine with --bench rather than taken from a vendor sheet: against
     // our own blit NIS is free to inside the noise and RTX VSR costs 4.1 ms, HDR on top of
     // it 0.66. DLSS is 1.1 ms and the motion estimate it cannot do without 0.35, taking
-    // 1280x800 to 2304x1440 on an RTX 5080 with the network the driver picked. Shown as
-    // fixed figures, because a cost that moves while it is being read cannot be compared
-    // with the one beside it.
-    private const double NisCostMs = 0.1, VsrCostMs = 4.1, DlssCostMs = 1.5, HdrCostMs = 0.66;
+    // 1280x800 to 2304x1440 on an RTX 5080 with the network the driver picked. FSR 3.1 over
+    // the same sizes is 2.9 ms with 0.4 for the estimate - not for the work, which is 0.6,
+    // but because that is light enough for the driver to drop the card into a lower power
+    // state, where it settles. Shown as fixed figures, because a cost that moves while it
+    // is being read cannot be compared with the one beside it.
+    private const double NisCostMs = 0.1, VsrCostMs = 4.1, DlssCostMs = 1.5, FsrCostMs = 3.4, HdrCostMs = 0.66;
 
     // This frame's layout, for anchoring what opens above the bar. The bar is always
     // drawn first, so these are current by the time a flyout reads them.
@@ -179,6 +181,7 @@ public static class BottomBar
             1 => Strings.T("pNis"),
             2 => model.Renderer.Processor?.Vendor == VideoProcessor.GpuVendor.Intel ? Strings.T("pVsrIntel") : Strings.T("pVsr"),
             3 => "DLSS",
+            4 => "FSR",
             _ => Strings.T("pNone")
         };
         string cost = index switch
@@ -186,6 +189,7 @@ public static class BottomBar
             1 => "< " + Strings.Ms(NisCostMs, "0.0"),
             2 => "+" + Strings.Ms(VsrCostMs, "0.0"),
             3 => "+" + Strings.Ms(DlssCostMs, "0.0"),
+            4 => "+" + Strings.Ms(FsrCostMs, "0.0"),
             _ => ""
         };
 
@@ -543,6 +547,11 @@ public static class BottomBar
                   dlssOk ? Strings.T("dDlss") : Strings.Sentence(Strings.T("naVendor")),
                   "+" + Strings.Ms(DlssCostMs, "0.0"), dlssOk);
 
+        bool fsrOk = model.Renderer.Fsr is { Possible: true };
+        ScalerRow(model, 4, "AMD FSR",
+                  fsrOk ? Strings.T("dFsr") : Strings.Sentence(Strings.T("naFsr")),
+                  "+" + Strings.Ms(FsrCostMs, "0.0"), fsrOk);
+
         float inset = Layout.S(12);
         if (model.ScalerIndex == 1 && model.Renderer.Nis is { } nis)
         {
@@ -601,6 +610,41 @@ public static class BottomBar
             ImGui.Unindent(inset);
         }
 
+        if (model.ScalerIndex == 4 && model.Renderer.Fsr is { } fsr)
+        {
+            ImGui.Dummy(new Vector2(0, Layout.S(8)));
+            ImGui.Indent(inset);
+            float gap = Layout.S(6);
+            ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, new Vector2(gap, Layout.S(6)));
+            float width = ImGui.GetContentRegionAvail().X - inset;
+
+            // What is running, and the choice of what AMD's library offers on this card:
+            // FSR 4 on a Radeon, FSR 3 and 2 on anything.
+            Widgets.LabelValueWidth(Strings.T("fsrVersion"), fsr.VersionInUse ?? "—", Theme.TextSecondary, width);
+
+            var offered = fsr.Versions;
+            int count = offered.Count + 1;
+            var size = new Vector2((width - gap * (count - 1)) / count, Layout.S(28));
+            ImGui.PushID("fsrversion");
+            if (Widgets.Button(Strings.T("dlssAuto"), size, accent: fsr.Version is null))
+            {
+                fsr.Version = null;
+                model.Touch();
+            }
+            for (int i = 0; i < offered.Count; i++)
+            {
+                ImGui.SameLine();
+                if (Widgets.Button(offered[i].Name, size, accent: fsr.Asks(offered[i])))
+                {
+                    fsr.Version = offered[i].Name;
+                    model.Touch();
+                }
+            }
+            ImGui.PopID();
+            ImGui.PopStyleVar();
+            ImGui.Unindent(inset);
+        }
+
         // How much enlarging there is to do at all. At ×1 or below nothing is enlarged and
         // every upscaler only costs.
         ImGui.Dummy(new Vector2(0, Layout.S(6)));
@@ -630,8 +674,8 @@ public static class BottomBar
         {
             model.SelectScaler(index);
             // NIS stays open: choosing it is when its sharpness becomes the next question.
-            // DLSS likewise, for its network.
-            if (index != 1 && index != 3) model.Flyout = Flyout.None;
+            // DLSS likewise, for its network, and FSR for its version.
+            if (index != 1 && index != 3 && index != 4) model.Flyout = Flyout.None;
         }
 
         var draw = ImGui.GetWindowDrawList();

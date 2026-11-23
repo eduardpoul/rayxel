@@ -31,6 +31,8 @@ string? forcedScreen = null;
 string? forcedMode = null;
 int forcedScaler = -1;
 DlssModel? forcedDlssModel = null;
+string? forcedFsrVersion = null;
+bool fsrVersionForced = false;
 bool listOnly = false;
 bool usbCheck = false;
 double benchSeconds = 0;
@@ -51,9 +53,10 @@ foreach (var arg in args)
     // Diagnostic: run for a few seconds, write what was rendered to a PNG, exit. Captures
     // the back buffer rather than the screen, so it works when the window is not visible.
     else if (arg.StartsWith("--shot=", StringComparison.OrdinalIgnoreCase)) shotPath = arg[7..];
-    // With --shot: the same frame written three ways (-none, -vsr, -dlss in the name)
-    // instead of the one picture. Wants --scaler=dlss, so that DLSS is already running, and
-    // --no-auto-hdr, so that the three are the same kind of picture.
+    // With --shot: the same frame written each way there is (-none, -vsr, -dlss, -fsr in
+    // the name) instead of the one picture. Wants --scaler=dlss or --scaler=fsr, so that
+    // one of the two is already running - the other is then run beside it - and
+    // --no-auto-hdr, so that they are all the same kind of picture.
     else if (arg is "--compare") shotCompares = true;
     else if (arg is "--tele") startWithTelemetry = true;
     // Runs a fixed measurement and exits: warm up, record every frame for N seconds,
@@ -70,7 +73,7 @@ foreach (var arg in args)
     // Pins the starting mode, as --mode=1280x720@60. A comparison needs a control, and
     // "whatever was remembered from last time" is not one.
     else if (arg.StartsWith("--mode=", StringComparison.OrdinalIgnoreCase)) forcedMode = arg[7..];
-    // Pins the scaler for the same reason: --scaler=none|nis|vsr|dlss.
+    // Pins the scaler for the same reason: --scaler=none|nis|vsr|dlss|fsr.
     else if (arg.StartsWith("--scaler=", StringComparison.OrdinalIgnoreCase))
         forcedScaler = arg[9..].ToLowerInvariant() switch
         {
@@ -78,12 +81,24 @@ foreach (var arg in args)
             "nis" or "1" => 1,
             "vsr" or "rtx" or "2" => 2,
             "dlss" or "3" => 3,
+            "fsr" or "4" => 4,
             _ => -1
         };
     // And the network DLSS is asked for: --dlss-model=auto|k|l|m.
     else if (arg.StartsWith("--dlss-model=", StringComparison.OrdinalIgnoreCase))
         forcedDlssModel = Enum.TryParse<DlssModel>(arg[13..], true, out var asked) && Enum.IsDefined(asked)
             ? asked : null;
+    // And the upscaler FSR is asked for, by the name AMD's library offers it under or the
+    // start of one: --fsr-version=auto|4|3.1|2.3.4. What it offers depends on the card.
+    else if (arg.StartsWith("--fsr-version=", StringComparison.OrdinalIgnoreCase))
+    {
+        fsrVersionForced = true;
+        forcedFsrVersion = arg[14..] is { Length: > 0 } named && !named.Equals("auto", StringComparison.OrdinalIgnoreCase)
+            ? named : null;
+    }
+    // Where to look for that library before the usual places: --fsr-dir=FOLDER.
+    else if (arg.StartsWith("--fsr-dir=", StringComparison.OrdinalIgnoreCase))
+        FsrScaler.FolderOverride = arg[10..].Trim('"');
     // --pacing=arrival|refresh. See the frame wait in RunLoop for what the two mean.
     else if (arg.StartsWith("--pacing=", StringComparison.OrdinalIgnoreCase))
         presentOnArrival = !arg[9..].Equals("refresh", StringComparison.OrdinalIgnoreCase);
@@ -276,6 +291,10 @@ try
     if (renderer.Dlss is { } dlssScaler)
         dlssScaler.Model = forcedDlssModel
             ?? (Enum.IsDefined((DlssModel)settings.DlssModel) ? (DlssModel)settings.DlssModel : DlssModel.Auto);
+    if (renderer.Fsr is { } fsrScaler)
+        fsrScaler.Version = fsrVersionForced ? forcedFsrVersion
+            : string.IsNullOrWhiteSpace(settings.FsrVersion) ? null : settings.FsrVersion;
+    renderer.CompareScalers = shotCompares;
 
     // Audio endpoints are listed once here and refreshed when the user opens a combo, so a
     // headset plugged in mid-session shows up without polling WASAPI every frame.
@@ -339,7 +358,7 @@ try
         ? "Windows has this display in HDR - will enable HDR output once the first frame lands"
         : "Windows has this display in SDR - HDR toggle disabled");
 
-    Log.Info("Tab settings · T telemetry · M modes · H HDR · 1/2/3/4 scaler · Esc quit");
+    Log.Info("Tab settings · T telemetry · M modes · H HDR · 1/2/3/4/5 scaler · Esc quit");
     RunLoop();
     return 0;
 }
@@ -749,7 +768,7 @@ bool FrameServerEnabled()
 /// </summary>
 void ReportBench(FramePump pump, TimeSpan window, TimeSpan cpu,
                  double[] gpuMs, double[] cpuMs, string scalerPath, string composition, double[] flowMs,
-                 double[] dlssMs)
+                 double[] dlssMs, double[] fsrMs)
 {
     var (delays, intervals) = pump.Recording();
     var d = delays.Where(x => !double.IsNaN(x)).OrderBy(x => x).ToArray();
@@ -810,6 +829,12 @@ void ReportBench(FramePump pump, TimeSpan window, TimeSpan cpu,
     if (dl.Length >= 30)
         Log.Info($"  of which DLSS     min {P(dl, 0):0.00}   p50 {P(dl, 50):0.00}   p95 {P(dl, 95):0.00}   " +
                  $"p99 {P(dl, 99):0.00}   max {P(dl, 100):0.00} ms");
+
+    // And FSR, counted the same way, with its crossing to Direct3D 12 and back.
+    var fs = fsrMs.Where(x => x > 0).OrderBy(x => x).ToArray();
+    if (fs.Length >= 30)
+        Log.Info($"  of which FSR      min {P(fs, 0):0.00}   p50 {P(fs, 50):0.00}   p95 {P(fs, 95):0.00}   " +
+                 $"p99 {P(fs, 99):0.00}   max {P(fs, 100):0.00} ms");
 
     // For a sender on the network the pipeline delay above is a sum, and these are what it
     // is the sum of. They are measured separately: the first on the Deck, the last here,
@@ -1002,6 +1027,7 @@ void RunLoop()
     var benchGpu = new List<double>();
     var benchFlow = new List<double>();
     var benchDlss = new List<double>();
+    var benchFsr = new List<double>();
     var benchCpu = new List<double>();
     var audioRetryClock = System.Diagnostics.Stopwatch.StartNew();
     var displayClock = System.Diagnostics.Stopwatch.StartNew();
@@ -1117,8 +1143,10 @@ void RunLoop()
         {
             benchGpu.Add(renderer.LastGpuMs);
             benchCpu.Add(appCpuMs);
-            if (renderer.Flow is { View: not FlowView.Off } || renderer.UseDlss) benchFlow.Add(renderer.LastFlowMs);
+            if (renderer.Flow is { View: not FlowView.Off } || renderer.UseDlss || renderer.UseFsr)
+                benchFlow.Add(renderer.LastFlowMs);
             if (renderer.UseDlss) benchDlss.Add(renderer.LastDlssMs);
+            if (renderer.UseFsr) benchFsr.Add(renderer.LastFsrMs);
         }
         renderer.OverlayNits = model.OverlayNits;
         renderer.VideoNits = model.VideoNits;
@@ -1172,7 +1200,7 @@ void RunLoop()
                 catch (Exception ex) { Log.Error("restoring the scaler failed", ex); }
             }
             // Only the driver path can produce HDR, so a remembered NIS choice takes it away.
-            if (autoHdrPending && settings.Hdr && !renderer.UseNis && !renderer.UseDlss)
+            if (autoHdrPending && settings.Hdr && !renderer.UseNis && !renderer.UseDlss && !renderer.UseFsr)
             {
                 try { ToggleHdr(); } catch (Exception ex) { Log.Error("auto HDR failed", ex); }
             }
@@ -1265,7 +1293,8 @@ void RunLoop()
             }
             else if (benchRecording && benchClock.Elapsed.TotalSeconds >= benchSeconds)
             {
-                string path = renderer.UseDlss ? $"DLSS ({renderer.Dlss!.Description})"
+                string path = renderer.UseFsr ? $"FSR ({renderer.Fsr!.Description})"
+                    : renderer.UseDlss ? $"DLSS ({renderer.Dlss!.Description})"
                     : renderer.NisEnabled ? "NIS"
                     : renderer.Processor?.SuperResolutionEnabled == true ? "RTX VSR"
                     : "no scaler";
@@ -1274,7 +1303,7 @@ void RunLoop()
                 ReportBench(pump, benchClock.Elapsed,
                             System.Diagnostics.Process.GetCurrentProcess().TotalProcessorTime - benchCpuStart,
                             [.. benchGpu], [.. benchCpu], path, renderer.DescribeCompositionMode(), [.. benchFlow],
-                            [.. benchDlss]);
+                            [.. benchDlss], [.. benchFsr]);
                 quit = true;
             }
         }
@@ -1345,13 +1374,15 @@ void RunLoop()
                          $"lost {net.FramesLost}  late packets {net.PacketsLate}  keyframes asked {net.KeyframesRequested}");
 
             // What estimating the motion costs. It is inside the gpu figure above, not beside it.
-            if (renderer.Flow is { } shownFlow && (shownFlow.View != FlowView.Off || renderer.UseDlss))
+            if (renderer.Flow is { } shownFlow && (shownFlow.View != FlowView.Off || renderer.UseDlss || renderer.UseFsr))
                 Log.Info($"flow {renderer.LastFlowMs,5:0.00}ms  {shownFlow.FieldSize.Width}x{shownFlow.FieldSize.Height} vectors" +
                          (shownFlow.LastError is { } flowError ? $"  unavailable: {flowError}" : ""));
 
             // And DLSS, which is inside it as well.
             if (renderer.UseDlss)
                 Log.Info($"dlss {renderer.LastDlssMs,5:0.00}ms  {renderer.Dlss!.Description}");
+            if (renderer.UseFsr)
+                Log.Info($"fsr  {renderer.LastFsrMs,5:0.00}ms  {renderer.Fsr!.Description}");
         }
     }
 }
@@ -1738,6 +1769,7 @@ void HandleKey(int vk, IntPtr h)
         case '2': pendingScaler = 1; break;
         case '3': pendingScaler = 2; break;
         case '4': pendingScaler = 3; break;
+        case '5': pendingScaler = 4; break;
 
         // The original keys, kept because they are in muscle memory by now.
         case 'V': pendingVsrToggle = true; break;
@@ -1776,12 +1808,16 @@ void SelectScaler(int want)
             if (renderer.NisEnabled) ToggleNis();
             if (p?.SuperResolutionEnabled == true) ToggleVsr();
             if (renderer.DlssEnabled) ToggleDlss();
+            if (renderer.FsrEnabled) ToggleFsr();
             break;
         case 1:
             if (!renderer.NisEnabled) ToggleNis();
             break;
         case 3:
             if (!renderer.DlssEnabled) ToggleDlss();
+            break;
+        case 4:
+            if (!renderer.FsrEnabled) ToggleFsr();
             break;
         default:
             if (p?.SuperResolutionEnabled != true) ToggleVsr();
@@ -1803,6 +1839,11 @@ void ToggleVsr()
     {
         renderer.DlssEnabled = false;
         Log.Info("DLSS off: RTX VSR takes the scaling path");
+    }
+    if (!p.SuperResolutionEnabled && renderer!.FsrEnabled)
+    {
+        renderer.FsrEnabled = false;
+        Log.Info("FSR off: RTX VSR takes the scaling path");
     }
     p.ToggleSuperResolution();
     Log.Info($"VSR now {(p.SuperResolutionEnabled ? "ON" : "OFF")}" +
@@ -1831,6 +1872,11 @@ void ToggleNis()
         renderer.DlssEnabled = false;
         Log.Info("DLSS off: NIS takes the scaling path");
     }
+    if (want && renderer.FsrEnabled)
+    {
+        renderer.FsrEnabled = false;
+        Log.Info("FSR off: NIS takes the scaling path");
+    }
 
     renderer.NisEnabled = want;
     Log.Info($"NIS now {(want ? "ON" : "OFF")}");
@@ -1858,6 +1904,7 @@ void ToggleDlss()
             return;
         }
         if (renderer.NisEnabled) { renderer.NisEnabled = false; Log.Info("NIS off: DLSS takes the scaling path"); }
+        if (renderer.FsrEnabled) { renderer.FsrEnabled = false; Log.Info("FSR off: DLSS takes the scaling path"); }
         if (renderer.UseProcessor)
         {
             var p = renderer.Processor!;
@@ -1868,6 +1915,37 @@ void ToggleDlss()
 
     renderer.DlssEnabled = want;
     Log.Info($"DLSS now {(want ? "ON" : "OFF")}");
+}
+
+/// <summary>
+/// FSR is a fourth owner of the scale, under the same rule as DLSS and started ahead of
+/// its first frame for the same reason: without AMD's library, or with one that will not
+/// start here, the choice stays where it was.
+/// </summary>
+void ToggleFsr()
+{
+    if (renderer is null) return;
+    bool want = !renderer.FsrEnabled;
+
+    if (want)
+    {
+        if (!renderer.StartFsr())
+        {
+            Log.Warn($"FSR stays off: {renderer.Fsr?.LastError ?? "unavailable"}");
+            return;
+        }
+        if (renderer.NisEnabled) { renderer.NisEnabled = false; Log.Info("NIS off: FSR takes the scaling path"); }
+        if (renderer.DlssEnabled) { renderer.DlssEnabled = false; Log.Info("DLSS off: FSR takes the scaling path"); }
+        if (renderer.UseProcessor)
+        {
+            var p = renderer.Processor!;
+            if (p.SuperResolutionEnabled) { p.ToggleSuperResolution(); Log.Info("RTX VSR off: FSR takes the scaling path"); }
+            if (p.HdrEnabled) { renderer.SetHdrOutput(false); p.ToggleHdr(); Log.Info("RTX Video HDR off: it requires the driver path"); }
+        }
+    }
+
+    renderer.FsrEnabled = want;
+    Log.Info($"FSR now {(want ? "ON" : "OFF")}");
 }
 
 void ToggleHdr()

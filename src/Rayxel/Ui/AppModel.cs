@@ -215,6 +215,7 @@ public sealed class AppModel
         s.Hdr = HdrOn;
         s.NisSharpness = Renderer.Nis?.Sharpness ?? s.NisSharpness;
         s.DlssModel = (int)(Renderer.Dlss?.Model ?? (DlssModel)s.DlssModel);
+        if (Renderer.Fsr is { } fsr) s.FsrVersion = fsr.Version;
         s.OverlayNits = OverlayNits;
         s.VideoNits = VideoNits;
         s.ShowTelemetry = ShowTelemetry;
@@ -240,9 +241,10 @@ public sealed class AppModel
     /// <summary>Headroom as displayed — from the held sample, so it does not flicker.</summary>
     public double HeadroomMs => BudgetMs - ShownCpuMs - ShownGpuMs;
 
-    /// <summary>0 = own shader, 1 = NIS, 2 = the driver filter, 3 = DLSS.</summary>
+    /// <summary>0 = own shader, 1 = NIS, 2 = the driver filter, 3 = DLSS, 4 = FSR.</summary>
     public int ScalerIndex =>
-        Renderer.UseDlss ? 3 : Renderer.UseNis ? 1 : Renderer.Processor?.SuperResolutionEnabled == true ? 2 : 0;
+        Renderer.UseFsr ? 4
+        : Renderer.UseDlss ? 3 : Renderer.UseNis ? 1 : Renderer.Processor?.SuperResolutionEnabled == true ? 2 : 0;
 
     public bool HdrOn => Renderer.Processor?.HdrEnabled == true;
 
@@ -256,7 +258,7 @@ public sealed class AppModel
     {
         if (!DriverPathAvailable) return (false, Strings.T("hdrVendor"));
         if (!Renderer.DisplaySupportsHdr) return (false, Strings.T("hdrNa"));
-        if (Renderer.UseNis || Renderer.UseDlss) return (false, Strings.T("hdrPath"));
+        if (Renderer.UseNis || Renderer.UseDlss || Renderer.UseFsr) return (false, Strings.T("hdrPath"));
         return (true, HdrOn ? Strings.T("hdrOn") : Strings.T("hdrOff"));
     }
 

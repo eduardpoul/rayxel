@@ -91,8 +91,9 @@ Move the mouse over the picture to bring up the control bar:
 
 - **Capture mode** — resolution, rate and whether it is `raw` or `zip`; opens the list of
   modes.
-- **Scaling** — none, NIS, RTX VSR or DLSS, with the cost of each; NIS brings a sharpness
-  slider, DLSS a choice of model and a note of which one the driver actually ran.
+- **Scaling** — none, NIS, RTX VSR, DLSS or FSR, with the cost of each; NIS brings a
+  sharpness slider, DLSS a choice of model and a note of which one the driver actually ran,
+  FSR a choice of the versions AMD's library offers on the card.
 - **HDR** — RTX Video HDR on or off; explains itself when it is unavailable.
 - **Frame budget** — what our own work costs out of the frame.
 - **Audio, telemetry, full screen**, and **…** for device, audio routing, HDR brightness,
@@ -103,7 +104,7 @@ Move the mouse over the picture to bring up the control bar:
 | `Esc` / `Tab` | show or hide the bar; `Esc` closes whatever is open first |
 | `T` | telemetry: off → one line → full card |
 | `M` | capture-mode list |
-| `1` / `2` / `3` / `4` | no scaling / NIS / RTX VSR / DLSS |
+| `1` / `2` / `3` / `4` / `5` | no scaling / NIS / RTX VSR / DLSS / FSR |
 | `H` | RTX Video HDR |
 | `[` / `]` | NIS sharpness |
 | `F11` | window → borderless full screen → topmost full screen |
@@ -170,9 +171,10 @@ runtime rather than at build time.
 
 Media Foundation reads the card straight into Direct3D 11 textures. From there the frame
 goes through the driver's video processor (RTX VSR and RTX Video HDR), the NIS compute
-shader, DLSS, or Rayxel's own YUV-to-RGB shader, and is presented on a flip-model swapchain.
-DLSS needs to be told how the picture moved, which a video does not say, so Rayxel
-estimates it from one frame to the next with a shader of its own. The
+shader, DLSS, FSR, or Rayxel's own YUV-to-RGB shader, and is presented on a flip-model
+swapchain. DLSS and FSR need to be told how the picture moved, which a video does not say,
+so Rayxel estimates it from one frame to the next with a shader of its own. FSR exists only
+for Direct3D 12, so it runs on a second device beside the first, on textures the two share. The
 interface is Dear ImGui, drawn into the same swapchain rather than in a window of its own —
 a second window over the video would take it off its overlay plane and cost a frame.
 
@@ -198,6 +200,18 @@ and why.
   or its own copy - which it only lends to a program it does not know while DLSS override
   is switched on for all programs in the NVIDIA app. The driver's settings may also replace
   the model and mode Rayxel asks for; the log says what was used.
+- **FSR is whichever version AMD's library will run on the card.** FSR 4, the one built on a
+  neural network, is offered on Radeon RX 6000, 7000 and 9000 cards and some Ryzen
+  processors, and its lighter model is picked by the library itself, not by a setting.
+  On anything else - a GeForce - the same library offers FSR 3.1 and 2.3, which are worked
+  out by formula. Like DLSS it works from estimated motion and a flat depth; unlike DLSS it
+  also needs the picture shifted by part of a pixel each frame, which Rayxel does for it
+  and which costs a little sharpness that FSR's own sharpening then puts back.
+- **FSR needs two DLLs of AMD's,** `amd_fidelityfx_loader_dx12.dll` and
+  `amd_fidelityfx_upscaler_dx12.dll`, which are not part of Rayxel. They come with AMD's
+  [FSR SDK](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK) (`Kits/FidelityFX/signedbin`)
+  and with many games; Rayxel looks for them beside `Rayxel.exe`, then in
+  `%LOCALAPPDATA%\Rayxel\fsr`, or wherever `--fsr-dir=` says.
 - **Two identical capture cards cannot be told apart for audio:** a WASAPI endpoint does not
   expose the hardware instance under it. The audio input selector exists for that case.
 - **Hot-plug is noticed lazily,** when a device list is opened.
@@ -212,8 +226,10 @@ Rayxel is released under the [MIT License](LICENSE).
 It includes or uses NVIDIA Image Scaling (`src/Rayxel/Render/NIS/`, MIT, © NVIDIA
 Corporation), Dear ImGui through ImGui.NET (MIT), NAudio (MIT) and Vortice.Windows (MIT).
 DLSS is NVIDIA's and no part of it is included: Rayxel calls the copy the graphics driver
-runs.
+runs. FSR is AMD's and no part of it is included either: Rayxel calls AMD's own signed
+library when it finds one.
 
-NVIDIA, RTX and G-SYNC are trademarks of NVIDIA Corporation; Nintendo Switch is a trademark
+NVIDIA, RTX and G-SYNC are trademarks of NVIDIA Corporation; AMD, Radeon and FidelityFX are
+trademarks of Advanced Micro Devices, Inc.; Nintendo Switch is a trademark
 of Nintendo; Steam Deck is a trademark of Valve; ShadowCast is a trademark of Genki.
 Rayxel is not affiliated with or endorsed by any of them.

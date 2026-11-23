@@ -147,8 +147,38 @@ public sealed class Renderer : IDisposable
     /// </summary>
     public double LastDlssMs { get; private set; }
 
+    /// <summary>AMD's FSR, fed the same way as DLSS. Null until <see cref="Initialize"/> runs.</summary>
+    public FsrScaler? Fsr { get; private set; }
+
+    /// <summary>Requested by the user; see <see cref="UseFsr"/> for whether it is what runs.</summary>
+    public bool FsrEnabled { get; set; }
+
+    /// <summary>
+    /// True while FSR has the frame: asked for, none of the other three in the way, and
+    /// its library found and not yet seen to fail.
+    /// </summary>
+    public bool UseFsr => FsrEnabled && !UseProcessor && !NisEnabled && !DlssEnabled && Fsr is { Possible: true };
+
+    /// <summary>
+    /// GPU milliseconds the last FSR pass took, counted as <see cref="LastDlssMs"/> is,
+    /// and with the crossing to Direct3D 12 and back that FSR needs.
+    /// </summary>
+    public double LastFsrMs { get; private set; }
+
+    /// <summary>
+    /// Keeps whichever of DLSS and FSR is not on screen fed with the same frames as the
+    /// one that is, so that <see cref="SaveComparison"/> can show both for one frame.
+    /// Each builds its picture from the frames before, and that cannot be made up
+    /// afterwards. Costs the second scaler's whole time: for a comparison, not for watching.
+    /// </summary>
+    public bool CompareScalers { get; set; }
+
     private long _dlssSerial;
     private int _dlssSettling;
+    private int _fsrShift;
+    // Which of the two the last pass was for, and whether each timed pass was FSR's.
+    private bool _temporalWasFsr;
+    private readonly bool[] _fsrTimed = new bool[QueryDepth];
     private readonly ID3D11Query[] _tsDlssStart = new ID3D11Query[QueryDepth];
     private readonly ID3D11Query[] _tsDlssEnd = new ID3D11Query[QueryDepth];
     private readonly bool[] _dlssTimed = new bool[QueryDepth];
@@ -166,6 +196,13 @@ public sealed class Renderer : IDisposable
     {
         if (Dlss is not { } dlss) return false;
         lock (_context) return dlss.Start();
+    }
+
+    /// <summary>The same for FSR; the reason is in <see cref="FsrScaler.LastError"/>.</summary>
+    public bool StartFsr()
+    {
+        if (Fsr is not { } fsr) return false;
+        lock (_context) return fsr.Start();
     }
 
     /// <summary>
@@ -282,6 +319,7 @@ public sealed class Renderer : IDisposable
         Nis = new NisScaler(_device);
         Flow = new OpticalFlow(_device);
         Dlss = new DlssScaler(_device);
+        Fsr = new FsrScaler(_device);
 
         ReadAdapterInfo();
         Log.Info($"adapter: {AdapterName}, driver {DriverVersion}");
@@ -492,7 +530,11 @@ public sealed class Renderer : IDisposable
             && _context.GetData(_tsDlssStart[slot], out ulong dlssStart)
             && _context.GetData(_tsDlssEnd[slot], out ulong dlssEnd)
             && dlssEnd > dlssStart)
-            LastDlssMs = (dlssEnd - dlssStart) * 1000.0 / dj.Frequency;
+        {
+            double ms = (dlssEnd - dlssStart) * 1000.0 / dj.Frequency;
+            if (_fsrTimed[slot]) LastFsrMs = ms;
+            else LastDlssMs = ms;
+        }
     }
 
     /// <summary>
@@ -654,13 +696,14 @@ public sealed class Renderer : IDisposable
             _context.Begin(_disjoint[slot]);
             _context.End(_tsStart[slot]);
 
-            bool dlss = UseDlss && _lumaView is not null && _chromaView is not null && _videoWidth > 0;
+            bool fsr = UseFsr && _lumaView is not null && _chromaView is not null && _videoWidth > 0;
+            bool dlss = !fsr && UseDlss && _lumaView is not null && _chromaView is not null && _videoWidth > 0;
 
             // Motion since the previous frame: once per new frame, and only while something
-            // is using it - the view of it, or DLSS. Done first because it leaves its own
-            // targets and shaders set, and everything below sets its own again.
+            // is using it - the view of it, DLSS or FSR. Done first because it leaves its
+            // own targets and shaders set, and everything below sets its own again.
             _flowTimed[slot] = false;
-            if (Flow is { } flow && (flow.View != FlowView.Off || dlss)
+            if (Flow is { } flow && (flow.View != FlowView.Off || dlss || fsr)
                 && _lumaView is not null && _uploadSerial != _flowSerial)
             {
                 _flowSerial = _uploadSerial;
@@ -678,17 +721,18 @@ public sealed class Renderer : IDisposable
 
             var (fx, fy, fw, fh) = FitRect(_videoWidth, _videoHeight, Width, Height);
 
-            // DLSS, like NIS, wants colour in and writes colour out, and it wants the
-            // motion besides. Both passes that prepare those leave their own state set.
+            // DLSS and FSR, like NIS, want colour in and write colour out, and they want
+            // the motion besides. Both passes that prepare those leave their own state set.
             ID3D11ShaderResourceView? dlssResult = null;
             _dlssTimed[slot] = false;
-            if (dlss)
+            if (dlss || fsr)
             {
                 var (_, _, fitW, fitH) = FitPixels(_videoWidth, _videoHeight, Width, Height);
                 _context.End(_tsDlssStart[slot]);
-                dlssResult = RunDlss(fitW, fitH);
+                dlssResult = RunDlss(fitW, fitH, fsr);
                 _context.End(_tsDlssEnd[slot]);
                 _dlssTimed[slot] = true;
+                _fsrTimed[slot] = fsr;
 
                 BindPipeline();
                 _context.OMSetRenderTargets(_backBufferView);
@@ -805,35 +849,111 @@ public sealed class Renderer : IDisposable
     }
 
     /// <summary>
-    /// Puts the newest frame through DLSS and gives back what there is to show, or null
-    /// when DLSS has nothing for this frame and the plain picture should be drawn.
+    /// Puts the newest frame through DLSS, or through FSR, and gives back what there is to
+    /// show, or null when the scaler has nothing for this frame and the plain picture
+    /// should be drawn. The two are fed alike, so all that differs is which is called.
     /// <para>
     /// Once per new frame. A frame that has been through already is shown again as it
     /// came out, except for the first few times, when it goes through once more as a
     /// picture in which nothing moved: see <see cref="DlssSettleFrames"/>.
     /// </para>
     /// </summary>
-    private ID3D11ShaderResourceView? RunDlss(int fitWidth, int fitHeight)
+    private ID3D11ShaderResourceView? RunDlss(int fitWidth, int fitHeight, bool fsr)
     {
         var dlss = Dlss!;
-        bool fresh = _uploadSerial != _dlssSerial;
-        if (!fresh && (dlss.OutputView is null || _dlssSettling >= DlssSettleFrames)) return dlss.OutputView;
+        ID3D11ShaderResourceView? Shown() => fsr ? Fsr!.OutputView : dlss.OutputView;
 
-        if (!EnsureIntermediate(_videoWidth, _videoHeight) || !ConvertYuvToIntermediate()) return null;
-        // The intermediate is still bound as a render target, and is about to be read.
-        _context.OMSetRenderTargets((ID3D11RenderTargetView?)null);
+        // The other of the two has just taken over. What it remembers is from whenever it
+        // last ran, so it starts again, and with this frame even if it is not a new one.
+        bool tookOver = fsr != _temporalWasFsr;
+        _temporalWasFsr = fsr;
+        if (tookOver)
+        {
+            _dlssSettling = 0;
+            if (fsr && !CompareScalers) Fsr!.ResetHistory();
+        }
+
+        // FSR is made for the same range of enlargement as DLSS, 1 to 3 times each way.
+        var (outWidth, outHeight) = DlssScaler.OutputSize(_videoWidth, _videoHeight, fitWidth, fitHeight);
+
+        // FSR goes on being fed a picture that has stopped for as long as its round of
+        // shifts takes: each pass puts the same picture on another part of the finer grid.
+        int shifts = FsrShifts(_videoWidth, outWidth);
+        int settle = fsr ? Math.Max(DlssSettleFrames, shifts) : DlssSettleFrames;
+
+        bool fresh = _uploadSerial != _dlssSerial;
+        if (!fresh && !tookOver && (Shown() is null || _dlssSettling >= settle)) return Shown();
+
+        if (!EnsureIntermediate(_videoWidth, _videoHeight)) return null;
 
         // No field yet means this is the first frame, which has nothing before it to have
         // moved from; the same picture again has not moved either.
         var motion = fresh && Flow is { Ready: true } flow ? flow.PerPixel(_context, _sampler) : null;
 
-        _dlssSettling = fresh ? 0 : _dlssSettling + 1;
+        _dlssSettling = fresh ? 0 : Math.Min(_dlssSettling + 1, TemporalHeld);
         _dlssSerial = _uploadSerial;
 
-        var (outWidth, outHeight) = DlssScaler.OutputSize(_videoWidth, _videoHeight, fitWidth, fitHeight);
-        return dlss.Process(_context, _rgbIntermediate!, motion, _videoWidth, _videoHeight, outWidth, outHeight)
-            ? dlss.OutputView
-            : null;
+        // The colour, for whoever is about to read it. Spreading the vectors left its own
+        // shaders set, and so may a scaler that has been through before this one.
+        bool Colour(float shiftX, float shiftY)
+        {
+            BindPipeline();
+            if (!ConvertYuvToIntermediate(shiftX, shiftY)) return false;
+            // Still bound as a render target, and about to be read.
+            _context.OMSetRenderTargets((ID3D11RenderTargetView?)null);
+            return true;
+        }
+
+        bool both = CompareScalers && (fsr ? dlss.Possible : Fsr is { Possible: true });
+        bool dlssDone = true, fsrDone = true;
+
+        if (!fsr || both)
+            dlssDone = Colour(0f, 0f)
+                       && dlss.Process(_context, _rgbIntermediate!, motion, _videoWidth, _videoHeight, outWidth, outHeight);
+
+        if (fsr || both)
+        {
+            // A game moves its camera by part of a pixel from frame to frame, and that is
+            // where FSR finds what lies between the pixels: without it, it has the same
+            // few samples every time and the enlarged picture comes out in steps. A video
+            // was never moved, so the picture is, here, by FSR's own round of shifts -
+            // which adds nothing that was not sent, but lets FSR place what there is.
+            _fsrShift = _fsrShift % shifts + 1;
+            float shiftX = Halton(_fsrShift, 2) - 0.5f, shiftY = Halton(_fsrShift, 3) - 0.5f;
+            fsrDone = Colour(shiftX, shiftY)
+                      && Fsr!.Process(_context, _rgbIntermediate!, motion, shiftX, shiftY,
+                                      _videoWidth, _videoHeight, outWidth, outHeight);
+        }
+
+        return (fsr ? fsrDone : dlssDone) ? Shown() : null;
+    }
+
+    // More than any count of passes: "this frame is not to go through again".
+    private const int TemporalHeld = 1 << 20;
+
+    /// <summary>
+    /// How many different shifts FSR goes round, by its own rule: eight for a picture
+    /// shown at its own size, and as many times more as the enlarged one has pixels.
+    /// </summary>
+    private static int FsrShifts(int inWidth, int outWidth)
+    {
+        double scale = outWidth / (double)Math.Max(1, inWidth);
+        return Math.Clamp((int)(8 * scale * scale), 8, 72);
+    }
+
+    /// <summary>
+    /// The Halton sequence: points between 0 and 1 that keep apart from one another however
+    /// many are taken, which is what makes a short round of shifts cover the pixel evenly.
+    /// </summary>
+    private static float Halton(int index, int radix)
+    {
+        float fraction = 1f, result = 0f;
+        for (int i = index; i > 0; i /= radix)
+        {
+            fraction /= radix;
+            result += fraction * (i % radix);
+        }
+        return result;
     }
 
     public void Present()
@@ -914,15 +1034,16 @@ public sealed class Renderer : IDisposable
     }
 
     /// <summary>
-    /// The frame now on screen, drawn three ways - as it arrived, through the driver's
-    /// super resolution, and through DLSS - and each written beside <paramref name="path"/>
-    /// with the way in its name. Diagnostic only.
+    /// The frame now on screen, drawn each way there is - as it arrived, through the
+    /// driver's super resolution, through DLSS and through FSR - and each written beside
+    /// <paramref name="path"/> with the way in its name. Diagnostic only.
     /// <para>
     /// Two captures taken one after another are of two different frames, and a picture
     /// that moves at all cannot be compared across them. Here nothing new is let in while
-    /// the three are drawn, so they differ in the scaler and in nothing else. DLSS has to
-    /// have been the scaler in use up to this point: what it shows is built from the
-    /// frames before as well, and that cannot be made up on the spot.
+    /// they are drawn, so they differ in the scaler and in nothing else. DLSS or FSR has
+    /// to have been the scaler in use up to this point: what either shows is built from
+    /// the frames before as well, and that cannot be made up on the spot. The other of
+    /// the two is written as well when <see cref="CompareScalers"/> has kept it fed.
     /// </para>
     /// </summary>
     public bool SaveComparison(string path)
@@ -933,22 +1054,38 @@ public sealed class Renderer : IDisposable
         // Held throughout, so that no frame arrives in between.
         lock (_context)
         {
-            bool dlssWas = DlssEnabled, nisWas = NisEnabled;
+            bool dlssWas = DlssEnabled, fsrWas = FsrEnabled, nisWas = NisEnabled;
             bool vsrWas = Processor?.SuperResolutionEnabled == true;
             bool ok = true;
 
-            // DLSS first, exactly as it would have been shown: a frame that has been
-            // through already is not put through again for this.
-            if (UseDlss)
+            // The one in use first, exactly as it would have been shown: a frame that has
+            // been through already is not put through again for this.
+            if (UseDlss || UseFsr)
             {
+                bool fsrLive = UseFsr;
                 int settlingWas = _dlssSettling;
-                if (_uploadSerial == _dlssSerial) _dlssSettling = DlssSettleFrames;
+                if (_uploadSerial == _dlssSerial) _dlssSettling = TemporalHeld;
                 Render();
-                ok &= SaveBackBuffer(Named("dlss"));
+                ok &= SaveBackBuffer(Named(fsrLive ? "fsr" : "dlss"));
+
+                // Then the other, as it stands after the same frames. It is only drawn:
+                // this frame has been through it already.
+                bool otherReady = fsrLive ? Dlss is { Possible: true, OutputView: not null }
+                                          : Fsr is { Possible: true, OutputView: not null };
+                if (CompareScalers && otherReady)
+                {
+                    _dlssSettling = TemporalHeld;
+                    FsrEnabled = !fsrLive; DlssEnabled = fsrLive;
+                    _temporalWasFsr = !fsrLive;
+                    Render();
+                    ok &= SaveBackBuffer(Named(fsrLive ? "dlss" : "fsr"));
+                    _temporalWasFsr = fsrLive;
+                }
                 _dlssSettling = settlingWas;
             }
 
             DlssEnabled = false;
+            FsrEnabled = false;
             NisEnabled = false;
             if (vsrWas) Processor!.ToggleSuperResolution();
             Render();
@@ -973,6 +1110,7 @@ public sealed class Renderer : IDisposable
             if (vsrWas) Processor!.ToggleSuperResolution();
             NisEnabled = nisWas;
             DlssEnabled = dlssWas;
+            FsrEnabled = fsrWas;
             return ok;
         }
     }
@@ -1143,8 +1281,12 @@ public sealed class Renderer : IDisposable
         return true;
     }
 
-    /// <summary>Runs the YUV conversion shader full-screen into the intermediate surface.</summary>
-    private bool ConvertYuvToIntermediate()
+    /// <summary>
+    /// Runs the YUV conversion shader full-screen into the intermediate surface. With a
+    /// shift, the picture lands that many of its own pixels to the right and down - parts
+    /// of a pixel, in practice - which leaves a sliver along two edges as it was before.
+    /// </summary>
+    private bool ConvertYuvToIntermediate(float shiftX = 0f, float shiftY = 0f)
     {
         if (_rgbIntermediateRtv is null) return false;
 
@@ -1153,7 +1295,7 @@ public sealed class Renderer : IDisposable
         // NIS and DLSS apply their own colour handling, so feed them plain SDR: mode 0 with no
         // PQ encoding, which is what SetConstants produces while SwapChainIsPq is false
         // and what the explicit mode-0 path does anyway.
-        SetConstants(-1f, 1f, 2f, -2f, mode: 0, forceNoPq: true);
+        SetConstants(-1f + 2f * shiftX / _videoWidth, 1f - 2f * shiftY / _videoHeight, 2f, -2f, mode: 0, forceNoPq: true);
         _context.PSSetShaderResource(0, _lumaView);
         _context.PSSetShaderResource(1, _chromaView);
         _context.OMSetBlendState(null);
@@ -1201,6 +1343,7 @@ public sealed class Renderer : IDisposable
         Processor?.Dispose();
         Nis?.Dispose();
         Dlss?.Dispose();
+        Fsr?.Dispose();
         Flow?.Dispose();
         _rgbIntermediateSrv?.Dispose(); _rgbIntermediateRtv?.Dispose(); _rgbIntermediate?.Dispose();
         ReleaseVideoResources();

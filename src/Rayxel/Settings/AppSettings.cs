@@ -17,7 +17,7 @@ public sealed class AppSettings
 {
     public string Language { get; set; } = "ru";
 
-    /// <summary>0 = own shader, 1 = NIS, 2 = the driver filter, 3 = DLSS.</summary>
+    /// <summary>0 = own shader, 1 = NIS, 2 = the driver filter, 3 = DLSS, 4 = FSR.</summary>
     public int Scaler { get; set; }
 
     public bool Hdr { get; set; } = true;
@@ -25,6 +25,12 @@ public sealed class AppSettings
 
     /// <summary>Which network DLSS is asked for: 0 leaves it to DLSS, else 11 = K, 12 = L, 13 = M.</summary>
     public int DlssModel { get; set; }
+
+    /// <summary>
+    /// Which upscaler FSR is asked for, by the name AMD's library offers it under ("3.1.5").
+    /// Null leaves it to the library, which takes the newest it can run on the card.
+    /// </summary>
+    public string? FsrVersion { get; set; }
     public float OverlayNits { get; set; } = 230f;
 
     /// <summary>
