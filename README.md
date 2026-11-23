@@ -93,7 +93,7 @@ Move the mouse over the picture to bring up the control bar:
   modes.
 - **Scaling** — none, NIS, RTX VSR, DLSS or FSR, with the cost of each; NIS brings a
   sharpness slider, DLSS a choice of model and a note of which one the driver actually ran,
-  FSR a choice of the versions AMD's library offers on the card.
+  FSR a choice of the versions AMD's library offers on the card and of FSR 4's two networks.
 - **HDR** — RTX Video HDR on or off; explains itself when it is unavailable.
 - **Frame budget** — what our own work costs out of the frame.
 - **Audio, telemetry, full screen**, and **…** for device, audio routing, HDR brightness,
@@ -200,13 +200,22 @@ and why.
   or its own copy - which it only lends to a program it does not know while DLSS override
   is switched on for all programs in the NVIDIA app. The driver's settings may also replace
   the model and mode Rayxel asks for; the log says what was used.
-- **FSR is whichever version AMD's library will run on the card.** FSR 4, the one built on a
-  neural network, is offered on Radeon RX 6000, 7000 and 9000 cards and some Ryzen
-  processors, and its lighter model is picked by the library itself, not by a setting.
-  On anything else - a GeForce - the same library offers FSR 3.1 and 2.3, which are worked
-  out by formula. Like DLSS it works from estimated motion and a flat depth; unlike DLSS it
-  also needs the picture shifted by part of a pixel each frame, which Rayxel does for it
-  and which costs a little sharpness that FSR's own sharpening then puts back.
+- **Left to itself, FSR is whichever version AMD's library will run on the card.** FSR 4,
+  the one built on a neural network, is offered on Radeon RX 6000, 7000 and 9000 cards and
+  some Ryzen processors, and its lighter model is picked by the library itself. On anything
+  else - a GeForce - the same library offers FSR 3.1 and 2.3, which are worked out by
+  formula. Like DLSS it works from estimated motion and a flat depth; unlike DLSS it also
+  needs the picture shifted by part of a pixel each frame, which Rayxel does for it and
+  which costs a little sharpness that FSR's own sharpening then puts back.
+- **FSR 4 on a card AMD does not offer it for is not AMD's doing.** The networks that work
+  in whole numbers are ordinary compute shaders, and what keeps them from other cards is a
+  check in the library, which Rayxel answers in its place when "4.1.2" or "4.1.2 Lite" is
+  picked (`--fsr-model=full|lite|rdna2`). That this works at all was found by the
+  [OptiScaler](https://github.com/optiscaler/OptiScaler) project. AMD neither tests nor
+  supports it; on an RTX 5080 both networks run and look right, and nothing else has been
+  tried. The first frame at each new size waits for the driver to build the network -
+  about twenty seconds for the full one, one for the lighter - after which the driver
+  keeps it.
 - **FSR needs two DLLs of AMD's,** `amd_fidelityfx_loader_dx12.dll` and
   `amd_fidelityfx_upscaler_dx12.dll`, which are not part of Rayxel. They come with AMD's
   [FSR SDK](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK) (`Kits/FidelityFX/signedbin`)

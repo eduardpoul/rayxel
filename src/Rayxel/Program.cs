@@ -33,6 +33,7 @@ int forcedScaler = -1;
 DlssModel? forcedDlssModel = null;
 string? forcedFsrVersion = null;
 bool fsrVersionForced = false;
+FsrModel? forcedFsrModel = null;
 bool listOnly = false;
 bool usbCheck = false;
 double benchSeconds = 0;
@@ -96,6 +97,16 @@ foreach (var arg in args)
         forcedFsrVersion = arg[14..] is { Length: > 0 } named && !named.Equals("auto", StringComparison.OrdinalIgnoreCase)
             ? named : null;
     }
+    // And the network of FSR 4 pressed on the library where it offers none, or another
+    // than it would take: --fsr-model=auto|full|lite|rdna2.
+    else if (arg.StartsWith("--fsr-model=", StringComparison.OrdinalIgnoreCase))
+        forcedFsrModel = arg[12..].ToLowerInvariant() switch
+        {
+            "full" or "int8" => FsrModel.Full,
+            "lite" => FsrModel.Lite,
+            "rdna2" or "navi2" => FsrModel.Rdna2,
+            _ => FsrModel.Library
+        };
     // Where to look for that library before the usual places: --fsr-dir=FOLDER.
     else if (arg.StartsWith("--fsr-dir=", StringComparison.OrdinalIgnoreCase))
         FsrScaler.FolderOverride = arg[10..].Trim('"');
@@ -292,8 +303,15 @@ try
         dlssScaler.Model = forcedDlssModel
             ?? (Enum.IsDefined((DlssModel)settings.DlssModel) ? (DlssModel)settings.DlssModel : DlssModel.Auto);
     if (renderer.Fsr is { } fsrScaler)
+    {
         fsrScaler.Version = fsrVersionForced ? forcedFsrVersion
             : string.IsNullOrWhiteSpace(settings.FsrVersion) ? null : settings.FsrVersion;
+        // A version named on the command line means that version, not a network left over
+        // from the last session.
+        fsrScaler.Model = forcedFsrModel
+            ?? (fsrVersionForced ? FsrModel.Library
+                : Enum.IsDefined((FsrModel)settings.FsrModel) ? (FsrModel)settings.FsrModel : FsrModel.Library);
+    }
     renderer.CompareScalers = shotCompares;
 
     // Audio endpoints are listed once here and refreshed when the user opens a combo, so a

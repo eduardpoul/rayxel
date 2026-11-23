@@ -29,9 +29,20 @@ public static class BottomBar
     // 1280x800 to 2304x1440 on an RTX 5080 with the network the driver picked. FSR 3.1 over
     // the same sizes is 2.9 ms with 0.4 for the estimate - not for the work, which is 0.6,
     // but because that is light enough for the driver to drop the card into a lower power
-    // state, where it settles. Shown as fixed figures, because a cost that moves while it
-    // is being read cannot be compared with the one beside it.
+    // state, where it settles. FSR 4.1.2 is 1.9 ms with its full network and 1.1 with the
+    // lighter one, each with 0.35 for the estimate, and the card stays where it was. Shown
+    // as fixed figures, because a cost that moves while it is being read cannot be compared
+    // with the one beside it.
     private const double NisCostMs = 0.1, VsrCostMs = 4.1, DlssCostMs = 1.5, FsrCostMs = 3.4, HdrCostMs = 0.66;
+    private const double Fsr4CostMs = 2.2, Fsr4LiteCostMs = 1.4;
+
+    /// <summary>What FSR costs with the network asked for: the two of FSR 4 differ, and both from FSR 3.</summary>
+    private static double FsrCost(AppModel model) => model.Renderer.Fsr?.Model switch
+    {
+        FsrModel.Full or FsrModel.Rdna2 => Fsr4CostMs,
+        FsrModel.Lite => Fsr4LiteCostMs,
+        _ => FsrCostMs
+    };
 
     // This frame's layout, for anchoring what opens above the bar. The bar is always
     // drawn first, so these are current by the time a flyout reads them.
@@ -189,7 +200,7 @@ public static class BottomBar
             1 => "< " + Strings.Ms(NisCostMs, "0.0"),
             2 => "+" + Strings.Ms(VsrCostMs, "0.0"),
             3 => "+" + Strings.Ms(DlssCostMs, "0.0"),
-            4 => "+" + Strings.Ms(FsrCostMs, "0.0"),
+            4 => "+" + Strings.Ms(FsrCost(model), "0.0"),
             _ => ""
         };
 
@@ -550,7 +561,7 @@ public static class BottomBar
         bool fsrOk = model.Renderer.Fsr is { Possible: true };
         ScalerRow(model, 4, "AMD FSR",
                   fsrOk ? Strings.T("dFsr") : Strings.Sentence(Strings.T("naFsr")),
-                  "+" + Strings.Ms(FsrCostMs, "0.0"), fsrOk);
+                  "+" + Strings.Ms(FsrCost(model), "0.0"), fsrOk);
 
         float inset = Layout.S(12);
         if (model.ScalerIndex == 1 && model.Renderer.Nis is { } nis)
@@ -618,25 +629,25 @@ public static class BottomBar
             ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, new Vector2(gap, Layout.S(6)));
             float width = ImGui.GetContentRegionAvail().X - inset;
 
-            // What is running, and the choice of what AMD's library offers on this card:
-            // FSR 4 on a Radeon, FSR 3 and 2 on anything.
-            Widgets.LabelValueWidth(Strings.T("fsrVersion"), fsr.VersionInUse ?? "—", Theme.TextSecondary, width);
+            // What is running, and what there is to pick from: the versions AMD's library
+            // offers on this card, and FSR 4's networks pressed on it where it offers none.
+            Widgets.LabelValueWidth(Strings.T("fsrVersion"), fsr.InUse ?? "—", Theme.TextSecondary, width);
 
-            var offered = fsr.Versions;
-            int count = offered.Count + 1;
+            var choices = fsr.Choices;
+            int count = choices.Count + 1;
             var size = new Vector2((width - gap * (count - 1)) / count, Layout.S(28));
             ImGui.PushID("fsrversion");
-            if (Widgets.Button(Strings.T("dlssAuto"), size, accent: fsr.Version is null))
+            if (Widgets.Button(Strings.T("dlssAuto"), size, accent: fsr.AsksNothing))
             {
-                fsr.Version = null;
+                fsr.AskNothing();
                 model.Touch();
             }
-            for (int i = 0; i < offered.Count; i++)
+            for (int i = 0; i < choices.Count; i++)
             {
                 ImGui.SameLine();
-                if (Widgets.Button(offered[i].Name, size, accent: fsr.Asks(offered[i])))
+                if (Widgets.Button(choices[i].Label, size, accent: fsr.Asks(choices[i])))
                 {
-                    fsr.Version = offered[i].Name;
+                    fsr.Ask(choices[i]);
                     model.Touch();
                 }
             }

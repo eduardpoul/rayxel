@@ -165,7 +165,7 @@ public static class TelemetryOverlay
             case 1: parts.Add($"NIS {Strings.Num(model.Renderer.Nis?.Sharpness ?? 0, "0.00")}"); break;
             case 2: parts.Add(Strings.T("pVsr")); break;
             case 3: parts.Add(model.Renderer.Dlss?.ModelInUse is { } letter ? $"DLSS {letter}" : "DLSS"); break;
-            case 4: parts.Add(model.Renderer.Fsr?.VersionInUse is { } version ? $"FSR {version}" : "FSR"); break;
+            case 4: parts.Add(model.Renderer.Fsr?.InUse is { } version ? $"FSR {version}" : "FSR"); break;
             default: parts.Add(Strings.T("pNone")); break;
         }
         if (model.HdrOn) parts.Add($"HDR {model.OverlayNits:0} {Strings.T("nits")}");

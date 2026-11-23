@@ -10,6 +10,31 @@ namespace Rayxel.Render;
 public readonly record struct FsrVersion(ulong Id, string Name);
 
 /// <summary>
+/// Which of FSR 4's networks runs. The library holds several and decides by the card it
+/// finds; anything but <see cref="Library"/> takes that decision away from it.
+/// </summary>
+public enum FsrModel
+{
+    /// <summary>What the library decides - which on a card it does not list is no FSR 4 at all.</summary>
+    Library = 0,
+
+    /// <summary>The full network in whole numbers, which the library keeps for Radeon RX 7000.</summary>
+    Full = 1,
+
+    /// <summary>The lighter network, less than half the size, made for the graphics inside Ryzen processors.</summary>
+    Lite = 2,
+
+    /// <summary>The full network as it is built for Radeon RX 6000.</summary>
+    Rdna2 = 3
+}
+
+/// <summary>
+/// One thing there is to pick: a network of FSR 4 pressed on the library, or a version the
+/// library offers of its own accord.
+/// </summary>
+public readonly record struct FsrChoice(string Label, FsrModel Model, string? Version);
+
+/// <summary>
 /// AMD's FSR upscaling, run on a video instead of on a game.
 /// <para>
 /// Like DLSS it is a temporal upscaler, and it is fed the same way: the picture, the
@@ -27,6 +52,16 @@ public readonly record struct FsrVersion(ulong Id, string Name);
 /// a lighter model that the library picks by itself. On anything else - a GeForce - the
 /// same call gets FSR 3.1, which is worked out by formula. <see cref="Versions"/> is what
 /// the library offered here and <see cref="VersionInUse"/> what it is running.
+/// </para>
+/// <para>
+/// That is a decision, not a limit of the card. The networks that work in whole numbers
+/// are ordinary compute shaders, and each of them is a class in the library that answers
+/// one question for itself: will I run on this device? <see cref="Model"/> answers it in
+/// the library's place - yes for the network asked for, no for the others - and FSR 4 then
+/// runs where AMD does not offer it. AMD has not tested it there and neither promises nor
+/// supports it; that it works at all on other makers' cards was found by the OptiScaler
+/// project. What goes wrong comes back as a failure to build or to take a frame, and the
+/// choice is then handed back to the library.
 /// </para>
 /// <para>
 /// It only exists for Direct3D 12, and this program draws with Direct3D 11. So it gets a
@@ -219,6 +254,27 @@ public sealed unsafe class FsrScaler : IDisposable
     private CreateChain* _chain;
     private bool _started, _failed;
     private readonly List<FsrVersion> _versions = [];
+    private readonly List<FsrVersion> _offered = [];
+    private readonly List<FsrChoice> _choices = [];
+
+    // FSR 4's networks, by the names of the classes that run them, in the order the
+    // library asks them. The first works in 8-bit floating point, which only Radeon
+    // RX 9000 has, and is never pressed: it is only told to stand aside for one that is.
+    private static readonly (FsrModel Model, string Class)[] Networks =
+    [
+        (FsrModel.Library, "ffxProvider_FSR4"),
+        (FsrModel.Full, "ffxProvider_FSR4_Int8"),
+        (FsrModel.Rdna2, "ffxProvider_FSR4_Int8_Navi2"),
+        (FsrModel.Lite, "ffxProvider_FSR4Lite_Int8"),
+    ];
+
+    // Where "will I run on this device?" sits among a provider's virtual methods: behind
+    // the destructor and CanProvide, as AMD's own ffx_provider.h declares the class.
+    private const int SupportCheckSlot = 2;
+
+    private readonly IntPtr[] _networkTables = new IntPtr[4];
+    private readonly IntPtr[] _networkChecks = new IntPtr[4];
+    private FsrModel _pressed;
 
     private Shared? _color, _motion, _depth, _output;
     private ID3D11RenderTargetView? _motionTarget;
@@ -228,6 +284,9 @@ public sealed unsafe class FsrScaler : IDisposable
     private bool _reset;
     private long _lastFrame;
     private string? _builtFor;
+
+    // What a built upscaler was built for: the two things that, changed, mean building again.
+    private string Asked => $"{Model}|{Version}";
 
     /// <summary>The upscaled picture, once a frame has been through.</summary>
     public ID3D11ShaderResourceView? OutputView => _outputView;
@@ -259,6 +318,45 @@ public sealed unsafe class FsrScaler : IDisposable
     public string? VersionInUse { get; private set; }
 
     /// <summary>
+    /// The network of FSR 4 asked for in the library's place, or <see cref="FsrModel.Library"/>
+    /// to leave it to the library. With a network asked for, <see cref="Version"/> is not
+    /// looked at: it is FSR 4 that runs. Takes effect with the next frame.
+    /// </summary>
+    public FsrModel Model { get; set; }
+
+    /// <summary>The network that was pressed on the library and is running; null when it chose for itself.</summary>
+    public FsrModel? ModelInUse => _upscaler != IntPtr.Zero && _pressed != FsrModel.Library ? _pressed : null;
+
+    /// <summary>What is running, as it is put on a button: "3.1.6", "4.1.2", "4.1.2 Lite". Null when nothing is.</summary>
+    public string? InUse => VersionInUse is not { } version ? null
+        : ModelInUse switch
+        {
+            FsrModel.Lite => Plain(version) + " Lite",
+            FsrModel.Rdna2 => Plain(version) + " RDNA 2",
+            _ => version
+        };
+
+    /// <summary>
+    /// What there is to pick from on this card with this copy of the library, newest
+    /// first: FSR 4's networks where the library holds them, then the versions it offers
+    /// by itself. Empty until it is started.
+    /// </summary>
+    public IReadOnlyList<FsrChoice> Choices => _choices;
+
+    /// <summary>Whether this one of <see cref="Choices"/> is what is asked for now.</summary>
+    public bool Asks(FsrChoice choice) => choice.Model != FsrModel.Library
+        ? Model == choice.Model
+        : Model == FsrModel.Library && choice.Version is { } version
+          && Resolve(_versions, Version) is { } asked && Plain(asked.Name) == Plain(version);
+
+    /// <summary>True when nothing is asked for and the library chooses.</summary>
+    public bool AsksNothing => Model == FsrModel.Library && Resolve(_versions, Version) is null;
+
+    public void Ask(FsrChoice choice) { Model = choice.Model; Version = choice.Version; }
+
+    public void AskNothing() { Model = FsrModel.Library; Version = null; }
+
+    /// <summary>
     /// How much of FSR's own sharpening goes on last, from 0 for none to 1. It is part of
     /// how FSR is meant to look: what it accumulates comes out soft, and softer still from
     /// a picture that had to be moved about for it (see <see cref="Process"/>). At a half,
@@ -269,7 +367,19 @@ public sealed unsafe class FsrScaler : IDisposable
     /// <summary>What it is doing, for the log and the readout.</summary>
     public string Description => _upscaler == IntPtr.Zero
         ? "not running"
-        : $"{_inWidth}x{_inHeight} -> {_outWidth}x{_outHeight}, FSR {VersionInUse ?? "of a version not reported"}";
+        : $"{_inWidth}x{_inHeight} -> {_outWidth}x{_outHeight}, FSR {VersionInUse ?? "of a version not reported"}" +
+          (ModelInUse is { } model ? $" ({NetworkName(model)}, pressed on the library)" : "");
+
+    private static string NetworkName(FsrModel model) => model switch
+    {
+        FsrModel.Full => "INT8 network",
+        FsrModel.Lite => "INT8 Lite network",
+        FsrModel.Rdna2 => "INT8 network for RDNA 2",
+        _ => "the library's choice"
+    };
+
+    // A version the driver supplies is marked with a trailing " *".
+    private static string Plain(string name) => name.TrimEnd('*', ' ');
 
     public FsrScaler(ID3D11Device device) => _device = device;
 
@@ -328,11 +438,13 @@ public sealed unsafe class FsrScaler : IDisposable
             long began = System.Diagnostics.Stopwatch.GetTimestamp();
             StartDirect3D12();
             Load(folder);
-            ReadVersions();
+            ReadVersions(_versions);
+            ListChoices(folder);
 
             _started = true;
             Log.Info($"FSR: ready in {System.Diagnostics.Stopwatch.GetElapsedTime(began).TotalMilliseconds:0} ms " +
-                     $"({LibraryVersion(folder)} in {folder}), offering {string.Join(", ", _versions.Select(v => v.Name))}");
+                     $"({LibraryVersion(folder)} in {folder}), offering {string.Join(", ", _versions.Select(v => v.Name))}" +
+                     $"; to pick from: {string.Join(", ", _choices.Select(c => c.Label))}");
             return true;
         }
         catch (Exception ex)
@@ -389,6 +501,77 @@ public sealed unsafe class FsrScaler : IDisposable
         _destroy = (delegate* unmanaged[Cdecl]<IntPtr*, void*, uint>)Export("ffxDestroyContext");
         _query = (delegate* unmanaged[Cdecl]<IntPtr*, Header*, uint>)Export("ffxQuery");
         _dispatch = (delegate* unmanaged[Cdecl]<IntPtr*, Header*, uint>)Export("ffxDispatch");
+
+        // FSR 4's networks, where this copy of the library has them, and the answer each
+        // gives by itself, to put back.
+        for (int i = 0; i < Networks.Length; i++)
+        {
+            _networkTables[i] = Msvc.FindVtable(effects, Networks[i].Class, SupportCheckSlot);
+            _networkChecks[i] = _networkTables[i] == IntPtr.Zero ? IntPtr.Zero : ((IntPtr*)_networkTables[i])[SupportCheckSlot];
+        }
+    }
+
+    private bool Has(FsrModel model)
+    {
+        for (int i = 1; i < Networks.Length; i++)
+            if (Networks[i].Model == model) return _networkTables[i] != IntPtr.Zero;
+        return false;
+    }
+
+    /// <summary>
+    /// Answers "will I run on this device?" for FSR 4's networks in the library's place:
+    /// yes for the one named, no for the rest. <see cref="FsrModel.Library"/> gives each
+    /// its own answer back.
+    /// </summary>
+    private void Press(FsrModel model)
+    {
+        if (model == _pressed) return;
+        for (int i = 0; i < Networks.Length; i++)
+        {
+            if (_networkTables[i] == IntPtr.Zero) continue;
+            IntPtr answer = model == FsrModel.Library ? _networkChecks[i]
+                : Networks[i].Model == model ? (IntPtr)(delegate* unmanaged<void*, void*, byte>)&Supported
+                : (IntPtr)(delegate* unmanaged<void*, void*, byte>)&NotSupported;
+            Msvc.Replace(_networkTables[i], SupportCheckSlot, answer);
+        }
+        _pressed = model;
+        Log.Debug($"FSR: {(model == FsrModel.Library ? "the library answers for its networks again" : $"{NetworkName(model)} pressed")}");
+    }
+
+    // The two answers. A C++ method: the object first, then what it was asked about.
+    [UnmanagedCallersOnly]
+    private static byte Supported(void* provider, void* device) => 1;
+
+    [UnmanagedCallersOnly]
+    private static byte NotSupported(void* provider, void* device) => 0;
+
+    /// <summary>
+    /// What goes on the buttons. FSR 4's full network is only listed apart when the
+    /// library does not offer FSR 4 here by itself; the lighter one always, since the
+    /// library never offers a choice between the two.
+    /// </summary>
+    private void ListChoices(string folder)
+    {
+        _choices.Clear();
+        var four = _versions.Where(v => Plain(v.Name).StartsWith("4.", StringComparison.Ordinal)).ToList();
+        string name = four.Count > 0 ? Plain(four[0].Name) : FourName(folder);
+
+        if (four.Count == 0 && Has(FsrModel.Full)) _choices.Add(new FsrChoice(name, FsrModel.Full, null));
+        foreach (var v in four) _choices.Add(new FsrChoice(v.Name, FsrModel.Library, v.Name));
+        if (Has(FsrModel.Lite)) _choices.Add(new FsrChoice(name + " Lite", FsrModel.Lite, null));
+        foreach (var v in _versions.Except(four)) _choices.Add(new FsrChoice(v.Name, FsrModel.Library, v.Name));
+    }
+
+    /// <summary>What FSR 4 is called in this copy of the library, which is numbered after it: 4.1.2.4555 holds 4.1.2.</summary>
+    private static string FourName(string folder)
+    {
+        try
+        {
+            var file = System.Diagnostics.FileVersionInfo.GetVersionInfo(Path.Combine(folder, UpscalerName));
+            if (file.FileMajorPart == 4) return $"{file.FileMajorPart}.{file.FileMinorPart}.{file.FileBuildPart}";
+        }
+        catch { }
+        return "4";
     }
 
     private IntPtr Export(string name) =>
@@ -400,9 +583,9 @@ public sealed unsafe class FsrScaler : IDisposable
     /// Asks which upscalers there are for this device. The answer depends on the card:
     /// the library leaves out the ones it will not run there.
     /// </summary>
-    private void ReadVersions()
+    private void ReadVersions(List<FsrVersion> into)
     {
-        _versions.Clear();
+        into.Clear();
         ulong count = 0;
         var query = new QueryVersions
         {
@@ -420,7 +603,7 @@ public sealed unsafe class FsrScaler : IDisposable
 
         // The names are the library's own memory, and it may write over them: copied at once.
         for (int i = 0; i < (int)count; i++)
-            _versions.Add(new FsrVersion(ids[i], Marshal.PtrToStringUTF8((IntPtr)names[i]) ?? $"0x{ids[i]:X}"));
+            into.Add(new FsrVersion(ids[i], Marshal.PtrToStringUTF8((IntPtr)names[i]) ?? $"0x{ids[i]:X}"));
     }
 
     /// <summary>
@@ -429,20 +612,18 @@ public sealed unsafe class FsrScaler : IDisposable
     /// from one copy of the library still finds its successor in the next ("3.1.5" finds
     /// "3.1.6"). Null when nothing fits, which leaves the choice to the library.
     /// </summary>
-    private FsrVersion? Resolve(string? asked)
+    private static FsrVersion? Resolve(List<FsrVersion> among, string? asked)
     {
         if (string.IsNullOrWhiteSpace(asked)) return null;
-        // A version the driver supplies is marked with a trailing " *".
-        static string Plain(string name) => name.TrimEnd('*', ' ');
 
         string want = Plain(asked.Trim());
-        foreach (var v in _versions) if (Plain(v.Name).Equals(want, StringComparison.OrdinalIgnoreCase)) return v;
+        foreach (var v in among) if (Plain(v.Name).Equals(want, StringComparison.OrdinalIgnoreCase)) return v;
 
         string[] parts = want.Split('.');
         for (int keep = Math.Min(2, parts.Length); keep >= 1; keep--)
         {
             string prefix = string.Join('.', parts.Take(keep));
-            foreach (var v in _versions)
+            foreach (var v in among)
             {
                 string name = Plain(v.Name);
                 if (name.Equals(prefix, StringComparison.OrdinalIgnoreCase)
@@ -451,9 +632,6 @@ public sealed unsafe class FsrScaler : IDisposable
         }
         return null;
     }
-
-    /// <summary>Whether this one of <see cref="Versions"/> is what <see cref="Version"/> asks for.</summary>
-    public bool Asks(FsrVersion offered) => Resolve(Version) is { } asked && asked.Id == offered.Id;
 
     private bool Fail(string why)
     {
@@ -563,7 +741,7 @@ public sealed unsafe class FsrScaler : IDisposable
             if (result != 0)
             {
                 Release();
-                return Fail($"FSR refused a frame: {Describe(result)}");
+                return GiveBack($"refused a frame: {Describe(result)}") ? false : Fail($"FSR refused a frame: {Describe(result)}");
             }
 
             D3D12.Execute(_queue, _list);
@@ -577,13 +755,28 @@ public sealed unsafe class FsrScaler : IDisposable
         }
         catch (Exception ex)
         {
-            string removed = _device12 != IntPtr.Zero && D3D12.RemovedReason(_device12) is var reason && reason < 0
-                ? $" (Direct3D 12 device lost: 0x{reason:X8})" : "";
+            bool lost = _device12 != IntPtr.Zero && D3D12.RemovedReason(_device12) < 0;
+            string removed = lost ? $" (Direct3D 12 device lost: 0x{D3D12.RemovedReason(_device12):X8})" : "";
             Release();
-            return Fail($"{ex.GetType().Name}: {ex.Message}{removed}");
+            // A lost device does not come back, whoever chose the network.
+            return !lost && GiveBack($"{ex.GetType().Name}: {ex.Message}") ? false : Fail($"{ex.GetType().Name}: {ex.Message}{removed}");
         }
 
         _reset = false;
+        return true;
+    }
+
+    /// <summary>
+    /// When a network pressed on the library has not worked, hands the choice back to the
+    /// library and says so; the next frame is then built with what it offers by itself.
+    /// False when the library had chosen already, and the failure is FSR's own.
+    /// </summary>
+    private bool GiveBack(string why)
+    {
+        if (_pressed == FsrModel.Library && Model == FsrModel.Library) return false;
+        Log.Warn($"FSR: the {NetworkName(_pressed == FsrModel.Library ? Model : _pressed)} {why}; left to the library from here on");
+        Model = FsrModel.Library;
+        Press(FsrModel.Library);
         return true;
     }
 
@@ -621,7 +814,7 @@ public sealed unsafe class FsrScaler : IDisposable
     /// <summary>Makes sure there is an upscaler built for these sizes, or one still good enough.</summary>
     private bool Fit(ID3D11DeviceContext context, int inWidth, int inHeight, int outWidth, int outHeight)
     {
-        if (_upscaler != IntPtr.Zero && !string.Equals(_builtFor, Version, StringComparison.OrdinalIgnoreCase))
+        if (_upscaler != IntPtr.Zero && !string.Equals(_builtFor, Asked, StringComparison.OrdinalIgnoreCase))
             return Create(context, inWidth, inHeight, outWidth, outHeight);
 
         bool sameSource = _upscaler != IntPtr.Zero && inWidth == _inWidth && inHeight == _inHeight;
@@ -646,14 +839,39 @@ public sealed unsafe class FsrScaler : IDisposable
 
     private bool Create(ID3D11DeviceContext context, int inWidth, int inHeight, int outWidth, int outHeight)
     {
+        if (Build(context, inWidth, inHeight, outWidth, outHeight, out string why)) return true;
+        // Once more with the library choosing, if it was not.
+        if (GiveBack(why) && Build(context, inWidth, inHeight, outWidth, outHeight, out why)) return true;
+        return Fail(why);
+    }
+
+    private bool Build(ID3D11DeviceContext context, int inWidth, int inHeight, int outWidth, int outHeight, out string why)
+    {
         Release();
         long began = System.Diagnostics.Stopwatch.GetTimestamp();
+        why = "";
 
         try
         {
-            var asked = Resolve(Version);
-            if (Version is not null && asked is null)
-                Log.Warn($"FSR: no \"{Version}\" among {string.Join(", ", _versions.Select(v => v.Name))}; left to the library");
+            FsrModel model = Model;
+            if (model != FsrModel.Library && !Has(model))
+            {
+                Log.Warn($"FSR: this copy of the library has no {NetworkName(model)}; left to the library");
+                model = Model = FsrModel.Library;
+            }
+            Press(model);
+            ReadVersions(_offered);
+
+            // With a network pressed it is FSR 4 that is wanted, and it is named, so that
+            // nothing newer the driver may supply is taken in its place.
+            var asked = Resolve(_offered, model != FsrModel.Library ? "4" : Version);
+            if (model != FsrModel.Library && asked is null)
+            {
+                why = "did not appear among the library's upscalers";
+                return false;
+            }
+            if (model == FsrModel.Library && Version is not null && asked is null)
+                Log.Warn($"FSR: no \"{Version}\" among {string.Join(", ", _offered.Select(v => v.Name))}; left to the library");
 
             _chain = (CreateChain*)NativeMemory.AllocZeroed((nuint)sizeof(CreateChain));
             _chain->Backend = new Backend { Header = { Type = TypeBackendDx12 }, Device = _device12 };
@@ -688,9 +906,13 @@ public sealed unsafe class FsrScaler : IDisposable
             IntPtr made = IntPtr.Zero;
             uint result = _create(&made, &_chain->Upscale.Header, null);
             if (result != 0 || made == IntPtr.Zero)
-                return Fail($"FSR could not be built for {inWidth}x{inHeight} -> {outWidth}x{outHeight}: {Describe(result)}");
+            {
+                why = $"could not be built for {inWidth}x{inHeight} -> {outWidth}x{outHeight}: {Describe(result)}";
+                Release();
+                return false;
+            }
             _upscaler = made;
-            _builtFor = Version;
+            _builtFor = Asked;
 
             var running = new ProviderVersion { Header = { Type = TypeProviderVersion } };
             VersionInUse = _query(&made, &running.Header) == 0 && running.Name is not null
@@ -723,7 +945,8 @@ public sealed unsafe class FsrScaler : IDisposable
         catch (Exception ex)
         {
             Release();
-            return Fail($"{ex.GetType().Name}: {ex.Message}");
+            why = $"{ex.GetType().Name}: {ex.Message}";
+            return false;
         }
     }
 
@@ -804,6 +1027,9 @@ public sealed unsafe class FsrScaler : IDisposable
         Unknown.Release(ref _queue);
         Unknown.Release(ref _device12);
         // The DLLs stay loaded: unloading code that may still have threads is not worth the saving.
+        // And so the library gets its own answers back, for whoever uses it after this.
+        try { Press(FsrModel.Library); }
+        catch (Exception ex) { Log.Debug($"FSR: giving the library its answers back: {ex.Message}"); }
         _started = false;
     }
 
@@ -848,6 +1074,110 @@ public sealed unsafe class FsrScaler : IDisposable
             if (o == IntPtr.Zero) return;
             Release(o);
             o = IntPtr.Zero;
+        }
+    }
+
+    /// <summary>
+    /// Finds a C++ class's table of virtual methods in a loaded module, by the class's name.
+    /// <para>
+    /// Microsoft's compiler leaves three things for a class that has virtual methods: a
+    /// record with its name, a "locator" that points at that record and at itself, and,
+    /// just in front of the table of methods, a pointer to the locator. Followed in that
+    /// order they lead from the name to the table. Everything read is inside the module's
+    /// own sections; nothing here runs any of its code.
+    /// </para>
+    /// </summary>
+    private static class Msvc
+    {
+        private const uint Executable = 0x20000000, Readable = 0x40000000;
+        private const uint ReadWrite = 0x04;
+
+        [DllImport("kernel32.dll", ExactSpelling = true)]
+        private static extern int VirtualProtect(void* address, nuint size, uint protection, uint* was);
+
+        private readonly record struct Section(uint Start, uint Size, uint Flags);
+
+        /// <summary>The module's data sections and the range of its code, from its own header.</summary>
+        private static List<Section> Sections(byte* image)
+        {
+            int header = *(int*)(image + 0x3C);
+            ushort count = *(ushort*)(image + header + 6);
+            ushort optional = *(ushort*)(image + header + 20);
+            byte* table = image + header + 24 + optional;
+            var list = new List<Section>(count);
+            for (int i = 0; i < count; i++)
+            {
+                byte* s = table + i * 40;
+                list.Add(new Section(*(uint*)(s + 12), *(uint*)(s + 8), *(uint*)(s + 36)));
+            }
+            return list;
+        }
+
+        /// <summary>
+        /// The table, or zero when the module has no such class - or when what was found
+        /// does not have code where the slot that will be used says it has.
+        /// </summary>
+        public static IntPtr FindVtable(IntPtr module, string className, int slotUsed)
+        {
+            try
+            {
+                byte* image = (byte*)module;
+                var sections = Sections(image);
+                var data = sections.Where(s => (s.Flags & Readable) != 0 && (s.Flags & Executable) == 0).ToList();
+                byte[] name = System.Text.Encoding.ASCII.GetBytes(".?AV" + className + "@@\0");
+
+                // The record with the name: two pointers, then the name.
+                long record = -1;
+                foreach (var s in data)
+                {
+                    int at = new ReadOnlySpan<byte>(image + s.Start, (int)s.Size).IndexOf(name);
+                    if (at >= 16) { record = s.Start + at - 16; break; }
+                }
+                if (record < 0) return IntPtr.Zero;
+
+                // The locator: marked 1, for the class's first table, naming the record and itself.
+                long locator = -1;
+                foreach (var s in data)
+                {
+                    for (uint o = 0; o + 24 <= s.Size && locator < 0; o += 4)
+                    {
+                        byte* p = image + s.Start + o;
+                        if (*(uint*)p == 1 && *(uint*)(p + 4) == 0 && *(int*)(p + 12) == record && *(int*)(p + 20) == s.Start + o)
+                            locator = s.Start + o;
+                    }
+                    if (locator >= 0) break;
+                }
+                if (locator < 0) return IntPtr.Zero;
+
+                ulong wanted = (ulong)(image + locator);
+                foreach (var s in data)
+                {
+                    for (uint o = 0; o + 8 * (uint)(slotUsed + 2) <= s.Size; o += 8)
+                    {
+                        byte* p = image + s.Start + o;
+                        if (*(ulong*)p != wanted) continue;
+
+                        // A table of methods holds addresses of code.
+                        ulong method = ((ulong*)(p + 8))[slotUsed];
+                        bool isCode = sections.Any(c => (c.Flags & Executable) != 0
+                            && method >= (ulong)(image + c.Start) && method < (ulong)(image + c.Start + c.Size));
+                        return isCode ? (IntPtr)(p + 8) : IntPtr.Zero;
+                    }
+                }
+            }
+            catch (Exception ex) { Log.Debug($"FSR: looking for {className}: {ex.Message}"); }
+            return IntPtr.Zero;
+        }
+
+        /// <summary>Puts another method in one slot of a table. The table is read-only memory, opened for the moment it takes.</summary>
+        public static void Replace(IntPtr vtable, int slot, IntPtr method)
+        {
+            void** entry = (void**)vtable + slot;
+            uint was;
+            if (VirtualProtect(entry, (nuint)sizeof(void*), ReadWrite, &was) == 0)
+                throw new InvalidOperationException("the library's table of methods could not be opened for writing");
+            *entry = (void*)method;
+            VirtualProtect(entry, (nuint)sizeof(void*), was, &was);
         }
     }
 

@@ -31,6 +31,12 @@ public sealed class AppSettings
     /// Null leaves it to the library, which takes the newest it can run on the card.
     /// </summary>
     public string? FsrVersion { get; set; }
+
+    /// <summary>
+    /// Which network of FSR 4 is pressed on AMD's library: 0 none, the library chooses;
+    /// 1 the full one, 2 the lighter one, 3 the full one as built for Radeon RX 6000.
+    /// </summary>
+    public int FsrModel { get; set; }
     public float OverlayNits { get; set; } = 230f;
 
     /// <summary>

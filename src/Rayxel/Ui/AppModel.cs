@@ -215,7 +215,7 @@ public sealed class AppModel
         s.Hdr = HdrOn;
         s.NisSharpness = Renderer.Nis?.Sharpness ?? s.NisSharpness;
         s.DlssModel = (int)(Renderer.Dlss?.Model ?? (DlssModel)s.DlssModel);
-        if (Renderer.Fsr is { } fsr) s.FsrVersion = fsr.Version;
+        if (Renderer.Fsr is { } fsr) { s.FsrVersion = fsr.Version; s.FsrModel = (int)fsr.Model; }
         s.OverlayNits = OverlayNits;
         s.VideoNits = VideoNits;
         s.ShowTelemetry = ShowTelemetry;
