@@ -333,6 +333,7 @@ try
     if (forcedScreen == "scaler-variants") { model.Flyout = Flyout.Scaler; model.OpenVariantAt = int.MaxValue; }
     // And with the technique's info tooltip up, which otherwise needs a pointer over its mark.
     if (forcedScreen == "scaler-info") { model.Flyout = Flyout.Scaler; model.ShowTechniqueInfo = true; }
+    if (forcedScreen == "scaler-variant-info") { model.Flyout = Flyout.Scaler; model.ShowVariantInfo = true; }
     if (forcedScreen == "framegen-info") { model.Flyout = Flyout.FrameGen; model.ShowTechniqueInfo = true; }
     if (forcedScreen == "more") model.Flyout = Flyout.More;
     if (forcedScreen == "quit") model.ConfirmQuit = true;

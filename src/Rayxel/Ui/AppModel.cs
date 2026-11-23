@@ -469,6 +469,9 @@ public sealed class AppModel
     /// <summary>Diagnostic only: shows the technique row's info tooltip without a pointer over it.</summary>
     public bool ShowTechniqueInfo;
 
+    /// <summary>Diagnostic only: the same for the row of the chosen technique's variants.</summary>
+    public bool ShowVariantInfo;
+
     /// <summary>
     /// Frame generation, built exactly as the upscalers are — and with nothing behind it
     /// yet. Rayxel presents through Direct3D 11 and every frame generator needs Direct3D

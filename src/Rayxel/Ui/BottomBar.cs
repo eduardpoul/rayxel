@@ -655,7 +655,8 @@ public static class BottomBar
 
         // A list that cannot be opened cannot speak for its rows, so the label does.
         width = BeginRow(Strings.T(current.VariantsLabel), settable || overridden is not null,
-                         settable ? null : current.VariantInfo(current.Variants[shown].Id));
+                         settable ? null : current.VariantInfo(current.Variants[shown].Id),
+                         shown: model.ShowVariantInfo);
         int variantAt = settable ? Math.Min(model.OpenVariantAt, variants.Length - 1) : -1;
         model.OpenVariantAt = -1;
         // Overridden, the box is shut but what it shows is what runs, so it is not greyed.
