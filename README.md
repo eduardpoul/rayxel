@@ -53,9 +53,12 @@ number it shows is one it can actually measure.
   hides the ones that only duplicate a real raw mode, and marks every mode with a codec on
   the wire as `zip`. It measures the card's USB link instead of assuming it, and shows how
   long each mode takes to cross it.
-- **Live telemetry.** Frame budget, GPU and CPU time, headroom, frame age in frames,
-  jitter, late and dropped frames, and whether the window is on an overlay plane or being
-  composed by Windows — one line, or a full card with a frame-time graph.
+- **Live telemetry.** One line to play with: the rate the picture arrives at, its delay as
+  a single figure, and what Rayxel's own work takes out of the frame. Or a full card that
+  shows what those are made of — the delay stage by stage (encoder, network and decoder for
+  a source on the network), GPU and CPU time and headroom, a frame-time graph with jitter,
+  late and lost frames, and whether the window is on an overlay plane or being composed by
+  Windows. Trouble joins the line only while it is trouble.
 - **Out of the way.** A Windows 11–style control bar at the bottom that appears when the
   mouse moves and hides itself, with the pointer, five seconds after it stops. A gamepad
   never brings it up.
@@ -82,20 +85,33 @@ remembers what you chose for next time.
 
 **Press F11.** In a normal window the Windows compositor adds a whole frame — 8.3 ms at
 120 fps, more than RTX VSR and RTX Video HDR together. Borderless full screen reaches a
-hardware overlay plane instead. The telemetry says which one you have: `Overlay` is good,
-`Composed` costs a frame, and a red badge on the control bar says so too.
+hardware overlay plane instead. The telemetry card says which one you have: `Overlay` is
+good, `Composed` costs a frame — and while it is `Composed`, the one-line readout and a red
+badge on the control bar say so too.
 
 ## Controls
 
 Move the mouse over the picture to bring up the control bar:
 
-- **Capture mode** — resolution, rate and whether it is `raw` or `zip`; opens the list of
-  modes.
-- **Scaling** — none, NIS, RTX VSR, DLSS or FSR, with the cost of each; NIS brings a
-  sharpness slider, DLSS a choice of model and a note of which one the driver actually ran,
-  FSR a choice of the versions AMD's library offers on the card and of FSR 4's two networks.
-- **HDR** — RTX Video HDR on or off; explains itself when it is unavailable.
-- **Frame budget** — what our own work costs out of the frame.
+- **Capture mode** — resolution and rate, with a dot in the wire's colour: green when the
+  picture arrives uncompressed, amber when a codec carries it. Opens the list of modes,
+  where every mode says `raw` or `zip`.
+- **Scaling** — rows of settings, as in a game's graphics menu. The technique comes from a
+  dropdown that gives each one's cost per frame: off, NIS, RTX VSR, DLSS, FSR. Point at a
+  row, or walk the list with the arrow keys, and what that row is appears beside it; one
+  that cannot be used stays in the list, greyed, and says why there. Under it is whatever
+  belongs to the one chosen: NIS's sharpness, DLSS's model. The model's box shows the one
+  that is running. When the driver's own DLSS override names the model, nothing chosen in
+  Rayxel would be obeyed, so the box is shut and the reason is written under it together
+  with where in the NVIDIA app to switch that off. What concerns a row as a whole is
+  behind the **ⓘ** beside its label. FSR has its place in the list but no backend in this
+  build yet.
+- **Frame generation** — the same rows for the same kind of choice: the generator, and how
+  many frames it shows for each one that arrives. **Nothing is behind it yet**: it needs
+  Direct3D 12, so the generators are greyed and it can only be off. The info marks say
+  why, and what a multiplier would come to on this display.
+- **HDR** — for an SDR source, RTX Video HDR on or off; for an HDR source, shown as it is
+  or converted to SDR. It explains itself when it is unavailable.
 - **Audio, telemetry, full screen**, and **…** for device, audio routing, HDR brightness,
   window mode and language.
 
@@ -104,7 +120,9 @@ Move the mouse over the picture to bring up the control bar:
 | `Esc` / `Tab` | show or hide the bar; `Esc` closes whatever is open first |
 | `T` | telemetry: off → one line → full card |
 | `M` | capture-mode list |
-| `1` / `2` / `3` / `4` / `5` | no scaling / NIS / RTX VSR / DLSS / FSR |
+| `1` / `2` / `3` / `4` / `5` | no scaling / NIS / RTX VSR / DLSS / FSR; one that cannot be used opens the list, which says why |
+| `G` | frame generation |
+| `↑` / `↓`, `Enter` | in an open list: walk its rows, take the one you are on; `Esc` closes the list |
 | `H` | RTX Video HDR |
 | `[` / `]` | NIS sharpness |
 | `F11` | window → borderless full screen → topmost full screen |
@@ -131,14 +149,14 @@ Everything is optional; the app needs no arguments.
 | `--borderless` | start in borderless full screen |
 | `--tele` | start with the telemetry up |
 | `--mode=<w>x<h>@<fps>` | start in a specific mode, e.g. `--mode=1920x1080@120` |
-| `--scaler=none\|nis\|vsr` | start with a specific scaler |
+| `--scaler=none\|nis\|vsr\|dlss` | start with a specific scaler |
 | `--no-auto-hdr` | do not follow the Windows HDR state at start-up |
 | `--pacing=arrival\|refresh` | present once per captured frame (default), or on every swapchain slot |
 | `--bench[=<seconds>]` | measure for a fixed time (default 20 s), log percentiles, and exit |
 | `--console` | attach to the terminal it was started from and print the log there |
 | `--verbose` | debug-level logging |
 | `--shot=<file.png>` | render for a few seconds, save the frame as a PNG, and exit |
-| `--screen=<name>` | force a state for inspection: `splash`, `devices`, `app`, `nosignal`, `busy`, `composed`, `modes`, `scaler`, `more`, `quit` |
+| `--screen=<name>` | force a state for inspection: `splash`, `devices`, `app`, `nosignal`, `busy`, `composed`, `modes`, `scaler`, `scaler-list`, `scaler-variants`, `scaler-info`, `scaler-variant-info`, `framegen`, `framegen-list`, `framegen-info`, `more`, `quit` |
 
 `--shot` saves the back buffer rather than the screen, so it works even when the window is
 covered or on a display nobody is looking at.
@@ -171,10 +189,9 @@ runtime rather than at build time.
 
 Media Foundation reads the card straight into Direct3D 11 textures. From there the frame
 goes through the driver's video processor (RTX VSR and RTX Video HDR), the NIS compute
-shader, DLSS, FSR, or Rayxel's own YUV-to-RGB shader, and is presented on a flip-model
-swapchain. DLSS and FSR need to be told how the picture moved, which a video does not say,
-so Rayxel estimates it from one frame to the next with a shader of its own. FSR exists only
-for Direct3D 12, so it runs on a second device beside the first, on textures the two share. The
+shader, DLSS, or Rayxel's own YUV-to-RGB shader, and is presented on a flip-model swapchain.
+DLSS needs to be told how the picture moved, which a video does not say, so Rayxel
+estimates it from one frame to the next with a shader of its own. The
 interface is Dear ImGui, drawn into the same swapchain rather than in a window of its own —
 a second window over the video would take it off its overlay plane and cost a frame.
 
@@ -190,6 +207,10 @@ and why.
   timestamps a frame and the monitor's after a present are both invisible; anything Rayxel
   cannot measure is shown as `n/a` rather than estimated.
 - **Intel VSR is written but has never run on Intel hardware.**
+- **An HDR source has only been tried as a test pattern.** Showing HDR10 as it is, and
+  converting it to SDR, are measured against a generated HDR10 picture; no capture card
+  passing real HDR was at hand. A card that passes HDR on without describing it has to be
+  told so: **…** → source range.
 - **DLSS works from estimated motion.** A game gives DLSS exact motion vectors, depth and a
   camera that shifts by a fraction of a pixel every frame; a video has none of these.
   Rayxel estimates the motion, supplies a flat depth, and cannot supply the shift, so DLSS
@@ -200,27 +221,6 @@ and why.
   or its own copy - which it only lends to a program it does not know while DLSS override
   is switched on for all programs in the NVIDIA app. The driver's settings may also replace
   the model and mode Rayxel asks for; the log says what was used.
-- **Left to itself, FSR is whichever version AMD's library will run on the card.** FSR 4,
-  the one built on a neural network, is offered on Radeon RX 6000, 7000 and 9000 cards and
-  some Ryzen processors, and its lighter model is picked by the library itself. On anything
-  else - a GeForce - the same library offers FSR 3.1, which is worked out by formula (and
-  FSR 2, which Rayxel does not list). Like DLSS it works from estimated motion and a flat depth; unlike DLSS it also
-  needs the picture shifted by part of a pixel each frame, which Rayxel does for it and
-  which costs a little sharpness that FSR's own sharpening then puts back.
-- **FSR 4 on a card AMD does not offer it for is not AMD's doing.** The networks that work
-  in whole numbers are ordinary compute shaders, and what keeps them from other cards is a
-  check in the library, which Rayxel answers in its place when "4.1.2" or "4.1.2 Lite" is
-  picked (`--fsr-model=full|lite|rdna2`). That this works at all was found by the
-  [OptiScaler](https://github.com/optiscaler/OptiScaler) project. AMD neither tests nor
-  supports it; on an RTX 5080 both networks run and look right, and nothing else has been
-  tried. At each new size the driver has to build the network first - about twenty
-  seconds for the full one, one for the lighter, after which the driver keeps it.
-  Rayxel has that done on a thread of its own and shows the picture unscaled meanwhile.
-- **FSR needs two DLLs of AMD's,** `amd_fidelityfx_loader_dx12.dll` and
-  `amd_fidelityfx_upscaler_dx12.dll`, which are not part of Rayxel. They come with AMD's
-  [FSR SDK](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK) (`Kits/FidelityFX/signedbin`)
-  and with many games; Rayxel looks for them beside `Rayxel.exe`, then in
-  `%LOCALAPPDATA%\Rayxel\fsr`, or wherever `--fsr-dir=` says.
 - **Two identical capture cards cannot be told apart for audio:** a WASAPI endpoint does not
   expose the hardware instance under it. The audio input selector exists for that case.
 - **Hot-plug is noticed lazily,** when a device list is opened.
@@ -235,10 +235,8 @@ Rayxel is released under the [MIT License](LICENSE).
 It includes or uses NVIDIA Image Scaling (`src/Rayxel/Render/NIS/`, MIT, © NVIDIA
 Corporation), Dear ImGui through ImGui.NET (MIT), NAudio (MIT) and Vortice.Windows (MIT).
 DLSS is NVIDIA's and no part of it is included: Rayxel calls the copy the graphics driver
-runs. FSR is AMD's and no part of it is included either: Rayxel calls AMD's own signed
-library when it finds one.
+runs.
 
-NVIDIA, RTX and G-SYNC are trademarks of NVIDIA Corporation; AMD, Radeon and FidelityFX are
-trademarks of Advanced Micro Devices, Inc.; Nintendo Switch is a trademark
+NVIDIA, RTX and G-SYNC are trademarks of NVIDIA Corporation; Nintendo Switch is a trademark
 of Nintendo; Steam Deck is a trademark of Valve; ShadowCast is a trademark of Genki.
 Rayxel is not affiliated with or endorsed by any of them.

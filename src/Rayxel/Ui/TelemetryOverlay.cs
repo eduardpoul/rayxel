@@ -5,12 +5,19 @@ using Rayxel.Capture;
 namespace Rayxel.Ui;
 
 /// <summary>
-/// The readout in the top-left corner, in two sizes: one line of the numbers that move,
-/// or the full card with the budget split and the frame-time graph.
+/// The readout in the top-left corner, in two sizes: one line of what someone playing
+/// needs, or the full card with what those figures are made of and the frame-time graph.
 /// <para>
 /// Off by default. It is the reason the app exists, but the user is playing a game most
 /// of the time, and a permanent block of numbers over the picture is not that. The line
 /// is what can stay on while playing; the card is for looking into something.
+/// </para>
+/// <para>
+/// The line used to carry ten figures, and with a source on the network that was most of
+/// the width of the window. It is three now: the picture's rate, its delay as one figure,
+/// and what our own work takes out of a frame. What is wrong appears beside them when it
+/// is wrong, and is not there to be read when it is not. Every number has one place: the
+/// card shows the parts of those three and does not repeat any of them.
 /// </para>
 /// </summary>
 public static class TelemetryOverlay
@@ -19,6 +26,8 @@ public static class TelemetryOverlay
         | ImGuiWindowFlags.NoMove | ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoNav
         | ImGuiWindowFlags.NoSavedSettings | ImGuiWindowFlags.NoFocusOnAppearing
         | ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoInputs;
+
+    private static readonly Vector4 Grey = new(0.54f, 0.54f, 0.54f, 1f);
 
     public static void Draw(AppModel model)
     {
@@ -39,6 +48,18 @@ public static class TelemetryOverlay
                        : Theme.TextTertiary);
     }
 
+    /// <summary>
+    /// The colour a stage of the delay is drawn in, the same in the bar and in its legend:
+    /// lightest at the source, the accent on the way here, grey and white for this machine.
+    /// </summary>
+    private static Vector4 PartColour(string labelKey) => labelKey switch
+    {
+        "tEnc" => Theme.AccentText,
+        "tNet" or "tCapture" => Theme.Accent,
+        "tDec" => Grey,
+        _ => Theme.TextSecondary
+    };
+
     // ── one line ─────────────────────────────────────────────────────────────────
 
     private static void Line(AppModel model)
@@ -56,38 +77,36 @@ public static class TelemetryOverlay
 
         if (ImGui.Begin("##teleline", Flags))
         {
+            // The rate measured, not the one the mode promises: a source that has slowed
+            // down shows here first.
             string rate = live ? Strings.Num(stats.MeasuredFps, "0.0") : Strings.Num(model.Pump.CurrentFps, "0.##");
             Widgets.Text(f.Caption, Theme.TextPrimary,
                 mode is null ? "—" : $"{mode.Width}×{mode.Height} · {rate} {Strings.T("hz")}");
 
-            Item("tGpu", live ? Strings.Ms(model.ShownGpuMs) : "n/a", Theme.TextPrimary);
-            Item("tHead", live ? Strings.Ms(model.HeadroomMs) : "n/a",
-                 model.HeadroomMs < 0 && live ? Theme.Critical : Theme.TextPrimary);
+            // One figure for everything between the source and our present that can be
+            // measured. What it is made of is the card's business.
+            Item("tDelay", double.IsNaN(model.DelayMs) ? "n/a" : Strings.Ms(model.DelayMs, "0.0"), Theme.TextPrimary);
 
-            // Age in frames rather than milliseconds: comparing raw milliseconds between two
-            // frame rates is meaningless, and people read it wrong when only the ms is shown.
-            bool aged = live && stats.PipelineDelayValid && model.BudgetMs > 0;
-            string age = aged ? $"{Strings.Num(stats.PipelineDelayMs / model.BudgetMs, "0.00")} {Strings.T("tFrames")}" : "n/a";
+            // What our own work takes out of the frame, as the bottom bar used to show it:
+            // the figure, what it is out of, and a short bar of the same.
+            double spent = model.ShownGpuMs + model.ShownCpuMs, budget = model.BudgetMs;
+            bool budgeted = live && budget > 0;
+            bool over = budgeted && spent > budget;
+            Item("tWork", budgeted
+                    ? string.Format(Strings.T("budgetOf"), Strings.Num(spent, "0.0"), Strings.Num(budget, "0.0"))
+                    : "n/a",
+                 over ? Theme.Critical : Theme.TextPrimary);
+            if (budgeted) InlineBar(spent / budget, over);
 
-            // A frame from the network has an age made of three parts, each measured, so they
-            // are shown: the Deck's encoder, the network, this machine's decoder. They are in
-            // milliseconds because they add up, and the age then states the sum the same way.
-            if (model.ShownNet is { } net)
-            {
-                Item("tAge", aged ? $"{Strings.Ms(stats.PipelineDelayMs, "0.0")} · {age}" : "n/a", Theme.TextPrimary);
-                Item("tEnc", live ? Strings.Ms(net.EncodeMs, "0.0") : "n/a", Theme.TextPrimary);
-                Item("tNet", live && net.ClockKnown ? Strings.Ms(net.NetworkMs, "0.0") : "n/a", Theme.TextPrimary);
-                Item("tDec", live && net.DecodeKnown ? Strings.Ms(net.DecodeMs, "0.0") : "n/a", Theme.TextPrimary);
-            }
-            else Item("tAge", age, Theme.TextPrimary);
-
-            // Steadiness, not delay. It has been read as latency more than once.
-            Item("tJitter", live ? Strings.Ms(stats.IntervalJitterMs) : "n/a", Theme.TextPrimary);
-            Item("tDropped", stats.FramesDropped.ToString(), stats.FramesDropped > 0 ? Theme.Critical : Theme.TextPrimary);
+            // The two things that are only worth a place while they are wrong.
+            if (model.FramesLost > 0) Item("tDropped", model.FramesLost.ToString(), Theme.Critical);
 
             var (present, colour) = Present(model);
-            ImGui.SameLine();
-            Widgets.Text(f.Caption, colour, present);
+            if (present == "Composed")
+            {
+                ImGui.SameLine();
+                Widgets.Text(f.Caption, colour, present);
+            }
         }
         ImGui.End();
 
@@ -101,13 +120,27 @@ public static class TelemetryOverlay
             ImGui.SameLine(0, Layout.S(4));
             Widgets.Text(Widgets.F.Caption, colour, value);
         }
+
+        // A track the height of a rule, sitting on the middle of the text line.
+        static void InlineBar(double fraction, bool over)
+        {
+            ImGui.SameLine(0, Layout.S(8));
+            float width = Layout.S(48), track = Layout.S(4);
+            float lineH = Widgets.Measure(Widgets.F.Caption, "0").Y;
+            var pos = ImGui.GetCursorScreenPos() + new Vector2(0, MathF.Round((lineH - track) / 2f) + 1f);
+            var draw = ImGui.GetWindowDrawList();
+
+            draw.AddRectFilled(pos, pos + new Vector2(width, track), Theme.U32(Theme.Alpha(Theme.TextPrimary, 0.14f)), track / 2f);
+            float filled = Math.Max(track, (float)Math.Clamp(fraction, 0, 1) * width);
+            draw.AddRectFilled(pos, pos + new Vector2(filled, track), Theme.U32(over ? Theme.Critical : Theme.Accent), track / 2f);
+            ImGui.Dummy(new Vector2(width, lineH));
+        }
     }
 
     // ── the card ─────────────────────────────────────────────────────────────────
 
     private static void Card(AppModel model)
     {
-        var f = Widgets.F;
         var stats = model.Shown;
         var mode = model.Pump.CurrentMode;
         bool live = Live(model);
@@ -124,12 +157,12 @@ public static class TelemetryOverlay
             Header(model, mode);
             Features(model, mode);
             Widgets.Divider(10f);
-            Budget(model);
-            ImGui.Dummy(new Vector2(0, Layout.S(6)));
-            Metrics(model, stats, live);
-            if (model.ShownNet is { } net) Network(net, live);
-            ImGui.Dummy(new Vector2(0, Layout.S(6)));
+            Delay(model);
+            ImGui.Dummy(new Vector2(0, Layout.S(8)));
+            Budget(model, live);
+            ImGui.Dummy(new Vector2(0, Layout.S(8)));
             Widgets.FrameGraph(model.History.Samples, model.BudgetMs, 44f);
+            Steadiness(stats, live);
             ImGui.Dummy(new Vector2(0, Layout.S(4)));
             Counters(model, stats);
             model.TelemetryHeight = ImGui.GetWindowSize().Y;
@@ -160,14 +193,15 @@ public static class TelemetryOverlay
     private static void Features(AppModel model, CaptureMode? mode)
     {
         var parts = new List<string>();
-        switch (model.ScalerIndex)
+        var upscaler = model.Upscaler;
+        parts.Add(upscaler.Index switch
         {
-            case 1: parts.Add($"NIS {Strings.Num(model.Renderer.Nis?.Sharpness ?? 0, "0.00")}"); break;
-            case 2: parts.Add(Strings.T("pVsr")); break;
-            case 3: parts.Add(model.Renderer.Dlss?.ModelInUse is { } letter ? $"DLSS {letter}" : "DLSS"); break;
-            case 4: parts.Add(model.Renderer.Fsr?.InUse is { } version ? $"FSR {version}" : "FSR"); break;
-            default: parts.Add(Strings.T("pNone")); break;
-        }
+            0 => upscaler.Name(),
+            1 => $"NIS {Strings.Num(model.Renderer.Nis?.Sharpness ?? 0, "0.00")}",
+            // With the variant that is really running, when the technique reports one.
+            _ => upscaler.Running() is { } running ? $"{upscaler.Short()} {running.Text}" : upscaler.Short()
+        });
+        if (model.FrameGenIndex != 0) parts.Add(model.FrameGenerator.Short());
         if (model.HdrOn) parts.Add($"HDR {model.OverlayNits:0} {Strings.T("nits")}");
         if (mode?.HasCodecInPath == true) parts.Add($"{(mode.WireCodec ?? "codec").ToLowerInvariant()} decode");
         // Only while sound is actually flowing: this line says what is on, not what is configured.
@@ -176,123 +210,135 @@ public static class TelemetryOverlay
         Widgets.Text(Widgets.F.Caption, Theme.TextSecondary, string.Join(" · ", parts));
 
         if (model.ScalerIndex == 2 && model.ScalerInert)
-            Widgets.Text(Widgets.F.Caption, Theme.Caution, string.Format(Strings.T("scaleInert"), Strings.T("pVsr")));
+            Widgets.Text(Widgets.F.Caption, Theme.Caution, string.Format(Strings.T("scaleInert"), upscaler.Short()));
     }
 
-    private static void Budget(AppModel model)
+    /// <summary>
+    /// The delay and what it is made of, stage by stage in the order a frame meets them.
+    /// The total is the line's figure; this is the only place its parts are shown. In
+    /// frames as well as milliseconds, because milliseconds alone cannot be compared
+    /// between two frame rates, and people do compare them.
+    /// </summary>
+    private static void Delay(AppModel model)
+    {
+        var f = Widgets.F;
+        var parts = model.DelayParts;
+
+        if (parts.Length == 0 || double.IsNaN(model.DelayMs))
+        {
+            Widgets.BaselineRow(
+                (f.Caption, Theme.TextTertiary, Strings.Sentence(Strings.T("tDelay")), 0f),
+                (f.BodyStrong, Theme.TextPrimary, "n/a", 8f));
+        }
+        else
+        {
+            string frames = model.BudgetMs > 0
+                ? $"{Strings.Num(model.DelayMs / model.BudgetMs, "0.00")} {Strings.T("tFrames")}" : "";
+            Widgets.BaselineRow(
+                (f.Caption, Theme.TextTertiary, Strings.Sentence(Strings.T("tDelay")), 0f),
+                (f.BodyStrong, Theme.TextPrimary, Strings.Ms(model.DelayMs, "0.0"), 8f),
+                (f.Caption, Theme.TextTertiary, frames, 6f));
+
+            ImGui.Dummy(new Vector2(0, Layout.S(2)));
+            Span<double> values = stackalloc double[parts.Length];
+            Span<Vector4> colours = stackalloc Vector4[parts.Length];
+            for (int i = 0; i < parts.Length; i++)
+            {
+                values[i] = parts[i].Ms;
+                colours[i] = PartColour(parts[i].LabelKey);
+            }
+            Widgets.StackedBar(values, colours, model.DelayMs);
+            ImGui.Dummy(new Vector2(0, Layout.S(2)));
+
+            var legend = new Legend();
+            for (int i = 0; i < parts.Length; i++)
+                legend.Add(colours[i], $"{Strings.T(parts[i].LabelKey)} {Strings.Num(parts[i].Ms, "0.0")}");
+            legend.End();
+        }
+
+        // The link itself, which explains the network's share when that share moves.
+        if (model.ShownNet is { } net)
+            Widgets.Text(f.Caption, Theme.TextTertiary,
+                $"{Strings.Num(net.Mbps, "0.0")} {Strings.T("mbit")} · RTT {Strings.Ms(net.RoundTripMs, "0.0")}");
+    }
+
+    /// <summary>Our own work against the frame: what the GPU and the CPU take, and what is left.</summary>
+    private static void Budget(AppModel model, bool live)
     {
         var f = Widgets.F;
         Widgets.BaselineRow(
             (f.Caption, Theme.TextTertiary, Strings.T("budget"), 0f),
-            (f.BodyStrong, Theme.TextPrimary, Strings.Ms(model.BudgetMs), 8f),
-            (f.Caption, Theme.TextTertiary, $"{Strings.Num(model.Pump.CurrentFps, "0")} {Strings.T("hz")}", 6f));
+            (f.BodyStrong, Theme.TextPrimary, Strings.Ms(model.BudgetMs), 8f));
 
         ImGui.Dummy(new Vector2(0, Layout.S(2)));
         Widgets.BudgetBar(model.ShownGpuMs, model.ShownCpuMs, model.BudgetMs);
         ImGui.Dummy(new Vector2(0, Layout.S(2)));
 
         // The legend, so the two shades of the bar are not left to be guessed.
-        var draw = ImGui.GetWindowDrawList();
-        var pos = ImGui.GetCursorScreenPos();
-        float square = Layout.S(8), gap = Layout.S(6), between = Layout.S(14), x = pos.X;
-        float lineH = Widgets.Measure(f.Caption, "0").Y;
-
-        Swatch(Theme.Accent, $"GPU {Strings.Num(model.ShownGpuMs, "0.00")}", filled: true);
-        Swatch(new Vector4(0.54f, 0.54f, 0.54f, 1f), $"CPU {Strings.Num(model.ShownCpuMs, "0.00")}", filled: true);
-        Swatch(Theme.TextTertiary, $"{Strings.T("tHead")} {Strings.Ms(model.HeadroomMs)}", filled: false);
-        ImGui.Dummy(new Vector2(x - pos.X, lineH));
-
-        void Swatch(Vector4 colour, string text, bool filled)
-        {
-            var at = new Vector2(x, pos.Y + (lineH - square) / 2f);
-            if (filled) draw.AddRectFilled(at, at + new Vector2(square), Theme.U32(colour), Layout.S(2));
-            else draw.AddRect(at, at + new Vector2(square), Theme.U32(colour), Layout.S(2));
-            x += square + gap;
-            Widgets.DrawText(draw, f.Caption, new Vector2(x, pos.Y), Theme.TextSecondary, text);
-            x += Widgets.Measure(f.Caption, text).X + between;
-        }
-    }
-
-    private static void Metrics(AppModel model, PumpStats stats, bool live)
-    {
-        ImGui.PushStyleVar(ImGuiStyleVar.CellPadding, new Vector2(0, Layout.S(4)));
-        if (!ImGui.BeginTable("##metrics", 3, ImGuiTableFlags.SizingStretchSame)) { ImGui.PopStyleVar(); return; }
-
-        string Value(double v) => live ? Strings.Num(v, "0.00") : "n/a";
-        string unit = live ? Strings.T("ms") : "";
-
-        var age = live && stats.PipelineDelayValid && model.BudgetMs > 0
-            ? (Strings.Num(stats.PipelineDelayMs, "0.0"), $"{Strings.Num(stats.PipelineDelayMs / model.BudgetMs, "0.00")} {Strings.T("tFrames")}")
-            : ("n/a", "");
-
-        Cell(Strings.T("age"), age.Item1, age.Item1 == "n/a" ? "" : Strings.T("ms"), age.Item2, Theme.TextPrimary);
-        Cell(Strings.T("head"), Value(model.HeadroomMs), unit, "",
-             model.HeadroomMs < 0 && live ? Theme.Critical : Theme.TextPrimary);
-        Cell(Strings.T("gpu"), Value(model.ShownGpuMs), unit, "", Theme.TextPrimary);
-
-        var cpuNote = model.Pump.CurrentMode?.HasCodecInPath == true ? "decode" : "";
-        Cell(Strings.T("cpu"), Value(model.ShownCpuMs), unit, cpuNote, Theme.TextPrimary);
-        // Labelled as steadiness. It has been read as latency more than once.
-        Cell(Strings.T("jitter"), Value(stats.IntervalJitterMs), unit, "", Theme.TextPrimary);
-        Cell(Strings.T("rate"), live ? Strings.Num(stats.MeasuredFps, "0.0") : "n/a", live ? Strings.T("hz") : "", "", Theme.TextPrimary);
-
-        ImGui.EndTable();
-        ImGui.PopStyleVar();
-
-        static void Cell(string label, string value, string unit, string note, Vector4 colour)
-        {
-            var f = Widgets.F;
-            ImGui.TableNextColumn();
-            Widgets.Text(f.Caption, Theme.TextTertiary, label);
-            Widgets.BaselineRow((f.Subtitle, colour, value, 0f), (f.Caption, Theme.TextTertiary, unit, 4f));
-            if (note.Length > 0) Widgets.Text(f.Caption, Theme.TextTertiary, note);
-        }
+        var legend = new Legend();
+        legend.Add(Theme.Accent, $"GPU {Strings.Num(model.ShownGpuMs, "0.00")}");
+        legend.Add(Grey, $"CPU {Strings.Num(model.ShownCpuMs, "0.00")}");
+        legend.Add(live && model.HeadroomMs < 0 ? Theme.Critical : Theme.TextTertiary,
+                   $"{Strings.T("tHead")} {Strings.Ms(model.HeadroomMs)}", filled: false);
+        legend.End();
     }
 
     /// <summary>
-    /// What the age is made of when the frames come over the network: the three stages
-    /// between the Deck's compositor and a decoded picture here, and the state of the link.
+    /// Under the graph, what the graph is about: the rate frames really arrive at and how
+    /// evenly. Jitter is steadiness, not delay — it has been read as latency more than
+    /// once, which is why it sits here beside the trace and nowhere near the delay.
     /// </summary>
-    private static void Network(NetStats net, bool live)
+    private static void Steadiness(PumpStats stats, bool live)
     {
-        var f = Widgets.F;
-
-        ImGui.PushStyleVar(ImGuiStyleVar.CellPadding, new Vector2(0, Layout.S(4)));
-        if (ImGui.BeginTable("##network", 3, ImGuiTableFlags.SizingStretchSame))
-        {
-            // Sentence case, like the cells above; the one-line readout uses the same words lower.
-            Cell(Strings.Sentence(Strings.T("tEnc")), live ? Strings.Num(net.EncodeMs, "0.00") : "n/a");
-            Cell(Strings.Sentence(Strings.T("tNet")), live && net.ClockKnown ? Strings.Num(net.NetworkMs, "0.00") : "n/a");
-            Cell(Strings.Sentence(Strings.T("tDec")), live && net.DecodeKnown ? Strings.Num(net.DecodeMs, "0.00") : "n/a");
-            ImGui.EndTable();
-        }
-        ImGui.PopStyleVar();
-
-        Widgets.Text(f.Caption, net.FramesLost > 0 ? Theme.Caution : Theme.TextSecondary,
-            $"{Strings.Num(net.Mbps, "0.0")} {Strings.T("mbit")} · RTT {Strings.Ms(net.RoundTripMs, "0.0")} · " +
-            $"{net.FramesLost} {Strings.T("droppedC")}");
-
-        static void Cell(string label, string value)
-        {
-            var f = Widgets.F;
-            ImGui.TableNextColumn();
-            Widgets.Text(f.Caption, Theme.TextTertiary, label);
-            Widgets.BaselineRow((f.Subtitle, Theme.TextPrimary, value, 0f),
-                                (f.Caption, Theme.TextTertiary, value == "n/a" ? "" : Strings.T("ms"), 4f));
-        }
+        string rate = live ? $"{Strings.Num(stats.MeasuredFps, "0.0")} {Strings.T("hz")}" : "n/a";
+        string jitter = live ? Strings.Ms(stats.IntervalJitterMs) : "n/a";
+        Widgets.Text(Widgets.F.Caption, Theme.TextTertiary, $"{rate} · {Strings.T("tJitter")} {jitter}");
     }
 
     private static void Counters(AppModel model, PumpStats stats)
     {
         var f = Widgets.F;
-        Widgets.Text(f.Caption, Theme.TextSecondary,
-            $"{stats.FramesArrived} {Strings.T("framesC")} · {stats.FramesLate} {Strings.T("lateC")} · ");
+        Widgets.Text(f.Caption, Theme.TextSecondary, $"{Strings.T("tLate")} {stats.FramesLate} · ");
         ImGui.SameLine(0, 0);
-        Widgets.Text(f.Caption, stats.FramesDropped > 0 ? Theme.Critical : Theme.TextSecondary,
-            $"{stats.FramesDropped} {Strings.T("droppedC")}");
+        Widgets.Text(f.Caption, model.FramesLost > 0 ? Theme.Critical : Theme.TextSecondary,
+            $"{Strings.T("tDropped")} {model.FramesLost}");
 
         var (present, colour) = Present(model);
         Widgets.RightAlign(Widgets.Measure(f.Caption, present).X);
         Widgets.Text(f.Caption, colour, present);
+    }
+
+    /// <summary>
+    /// Swatches with their labels on one line, going on to a second when the card is
+    /// narrower than the row — which a language with longer words makes it.
+    /// </summary>
+    private struct Legend
+    {
+        private readonly ImDrawListPtr _draw = ImGui.GetWindowDrawList();
+        private readonly Vector2 _origin = ImGui.GetCursorScreenPos();
+        private readonly float _width = ImGui.GetContentRegionAvail().X;
+        private readonly float _lineH = Widgets.Measure(Widgets.F.Caption, "0").Y;
+        private float _x, _y;
+
+        public Legend() { }
+
+        public void Add(Vector4 colour, string text, bool filled = true)
+        {
+            float square = Layout.S(8), gap = Layout.S(6), between = Layout.S(12);
+            float item = square + gap + Widgets.Measure(Widgets.F.Caption, text).X;
+            if (_x > 0 && _x + item > _width)
+            {
+                _x = 0;
+                _y += _lineH + Layout.S(2);
+            }
+
+            var at = _origin + new Vector2(_x, _y + (_lineH - square) / 2f);
+            if (filled) _draw.AddRectFilled(at, at + new Vector2(square), Theme.U32(colour), Layout.S(2));
+            else _draw.AddRect(at, at + new Vector2(square), Theme.U32(colour), Layout.S(2));
+            Widgets.DrawText(_draw, Widgets.F.Caption, _origin + new Vector2(_x + square + gap, _y), Theme.TextSecondary, text);
+            _x += item + between;
+        }
+
+        public readonly void End() => ImGui.Dummy(new Vector2(_width, _y + _lineH));
     }
 }

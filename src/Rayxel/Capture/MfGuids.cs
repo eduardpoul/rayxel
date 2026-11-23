@@ -73,8 +73,32 @@ public static class MfGuids
         [new Guid("dbfbe4d7-0740-4ee0-8192-850ab0e21935")] = "MF_MT_VIDEO_PRIMARIES?",
         [new Guid("3e23d450-2c75-4d25-a00e-b91670d12327")] = "MF_MT_YUV_MATRIX?",
         [new Guid("c21b8ee5-b956-4071-8daf-325edf5cab11")] = "MF_MT_VIDEO_NOMINAL_RANGE?",
-        [new Guid("65df2370-c773-4c33-aa64-843e068efb0c")] = "MF_MT_TRANSFER_FUNCTION?",
+        [new Guid("65df2370-c773-4c33-aa64-843e068efb0c")] = "MF_MT_VIDEO_CHROMA_SITING",
+        [TransferFunction] = "MF_MT_TRANSFER_FUNCTION",
     };
+
+    /// <summary>MF_MT_TRANSFER_FUNCTION, from the Windows SDK's mfapi.h: one of MFVideoTransferFunction.</summary>
+    public static readonly Guid TransferFunction = new("5fb0fce9-be5c-4935-a811-ec838f8eed93");
+
+    private static readonly Guid VideoPrimaries = new("dbfbe4d7-0740-4ee0-8192-850ab0e21935");
+
+    /// <summary>
+    /// Whether a media type says its picture is HDR10: the PQ transfer function
+    /// (MFVideoTransFunc_2084, 15) or, failing that attribute, BT.2020 primaries
+    /// (MFVideoPrimaries_BT2020, 9). A card that says neither may still be sending HDR:
+    /// plenty pass it on without describing it, which is why the user can overrule this.
+    /// </summary>
+    public static bool SaysHdr10(Vortice.MediaFoundation.IMFMediaType type)
+    {
+        static uint? Read(Vortice.MediaFoundation.IMFMediaType type, Guid key)
+        {
+            try { return type.GetUInt32(key); }
+            catch (SharpGen.Runtime.SharpGenException) { return null; }
+        }
+
+        if (Read(type, TransferFunction) is { } transfer) return transfer == 15;
+        return Read(type, VideoPrimaries) == 9;
+    }
 
     public static (uint High, uint Low) Unpack(ulong packed) => ((uint)(packed >> 32), (uint)(packed & 0xFFFFFFFF));
 

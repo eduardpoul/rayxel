@@ -21,10 +21,19 @@ public sealed class AppSettings
     public int Scaler { get; set; }
 
     public bool Hdr { get; set; } = true;
+
+    /// <summary>What the source is taken to be: 0 = what the device says, 1 = SDR, 2 = HDR10.</summary>
+    public int SourceRange { get; set; }
+
+    /// <summary>An HDR source shown as it is, untouched (true), or converted to SDR.</summary>
+    public bool HdrSourceAsIs { get; set; } = true;
     public float NisSharpness { get; set; } = 0.4f;
 
-    /// <summary>Which network DLSS is asked for: 0 leaves it to DLSS, else 11 = K, 12 = L, 13 = M.</summary>
-    public int DlssModel { get; set; }
+    /// <summary>
+    /// Which network DLSS is asked for: 0 leaves it to DLSS, else 11 = K, 12 = L, 13 = M.
+    /// L to begin with; <see cref="Render.DlssScaler.Model"/> says why.
+    /// </summary>
+    public int DlssModel { get; set; } = (int)Render.DlssModel.L;
 
     /// <summary>
     /// Which upscaler FSR is asked for, by the name AMD's library offers it under ("3.1.5").
