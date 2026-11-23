@@ -25,9 +25,11 @@ public static class BottomBar
 {
     // Measured on this machine with --bench rather than taken from a vendor sheet: against
     // our own blit NIS is free to inside the noise and RTX VSR costs 4.1 ms, HDR on top of
-    // it 0.66. Shown as fixed figures, because a cost that moves while it is being read
-    // cannot be compared with the one beside it.
-    private const double NisCostMs = 0.1, VsrCostMs = 4.1, HdrCostMs = 0.66;
+    // it 0.66. DLSS is 1.1 ms and the motion estimate it cannot do without 0.35, taking
+    // 1280x800 to 2304x1440 on an RTX 5080 with the network the driver picked. Shown as
+    // fixed figures, because a cost that moves while it is being read cannot be compared
+    // with the one beside it.
+    private const double NisCostMs = 0.1, VsrCostMs = 4.1, DlssCostMs = 1.5, HdrCostMs = 0.66;
 
     // This frame's layout, for anchoring what opens above the bar. The bar is always
     // drawn first, so these are current by the time a flyout reads them.
@@ -166,7 +168,7 @@ public static class BottomBar
         Icons.Draw(draw, open ? Icon.ChevronDown : Icon.ChevronUp, new Vector2(x, cy - chevron / 2f), chevron, Theme.TextSecondary);
     }
 
-    /// <summary>The scaler in use and what it costs, opening the choice of three.</summary>
+    /// <summary>The scaler in use and what it costs, opening the choice of four.</summary>
     private static void ScalerChip(AppModel model, float line)
     {
         var f = Widgets.F;
@@ -176,12 +178,14 @@ public static class BottomBar
         {
             1 => Strings.T("pNis"),
             2 => model.Renderer.Processor?.Vendor == VideoProcessor.GpuVendor.Intel ? Strings.T("pVsrIntel") : Strings.T("pVsr"),
+            3 => "DLSS",
             _ => Strings.T("pNone")
         };
         string cost = index switch
         {
             1 => "< " + Strings.Ms(NisCostMs, "0.0"),
             2 => "+" + Strings.Ms(VsrCostMs, "0.0"),
+            3 => "+" + Strings.Ms(DlssCostMs, "0.0"),
             _ => ""
         };
 
@@ -533,6 +537,11 @@ public static class BottomBar
         ScalerRow(model, 2, vsrName,
                   driverOk ? Strings.T(intel ? "dVsrIntel" : "dVsr") : Strings.Sentence(Strings.T("naVendor")),
                   "+" + Strings.Ms(VsrCostMs, "0.0"), driverOk);
+
+        bool dlssOk = model.Renderer.Dlss is { Possible: true };
+        ScalerRow(model, 3, "DLSS Super Resolution",
+                  dlssOk ? Strings.T("dDlss") : Strings.Sentence(Strings.T("naVendor")),
+                  "+" + Strings.Ms(DlssCostMs, "0.0"), dlssOk);
 
         float inset = Layout.S(12);
         if (model.ScalerIndex == 1 && model.Renderer.Nis is { } nis)

@@ -129,6 +129,45 @@ public sealed class Renderer : IDisposable
 
     public bool UseNis => NisEnabled && !UseProcessor && Nis is not null;
 
+    /// <summary>DLSS Super Resolution, fed by <see cref="Flow"/>. Null until <see cref="Initialize"/> runs.</summary>
+    public DlssScaler? Dlss { get; private set; }
+
+    /// <summary>Requested by the user; see <see cref="UseDlss"/> for whether it is what runs.</summary>
+    public bool DlssEnabled { get; set; }
+
+    /// <summary>
+    /// True while DLSS has the frame: asked for, neither of the other two in the way, and
+    /// not yet found to be impossible here.
+    /// </summary>
+    public bool UseDlss => DlssEnabled && !UseProcessor && !NisEnabled && Dlss is { Possible: true };
+
+    /// <summary>
+    /// GPU milliseconds the last DLSS pass took, with the colour conversion and the
+    /// spreading of the vectors that feed it. Part of <see cref="LastGpuMs"/>, not on top of it.
+    /// </summary>
+    public double LastDlssMs { get; private set; }
+
+    private long _dlssSerial;
+    private int _dlssSettling;
+    private readonly ID3D11Query[] _tsDlssStart = new ID3D11Query[QueryDepth];
+    private readonly ID3D11Query[] _tsDlssEnd = new ID3D11Query[QueryDepth];
+    private readonly bool[] _dlssTimed = new bool[QueryDepth];
+
+    // DLSS settles over several frames. When the picture stops arriving - a source that
+    // only sends what changed - the last one is put through this many times more, as
+    // "nothing moved", so that what stays on screen is the settled result.
+    private const int DlssSettleFrames = 8;
+
+    /// <summary>
+    /// Loads DLSS and finds out whether it can run here, ahead of the first frame that
+    /// needs it. The reason is in <see cref="DlssScaler.LastError"/> when it cannot.
+    /// </summary>
+    public bool StartDlss()
+    {
+        if (Dlss is not { } dlss) return false;
+        lock (_context) return dlss.Start();
+    }
+
     /// <summary>
     /// Motion estimated between consecutive frames. It only runs while something asks for
     /// it; see <see cref="OpticalFlow.View"/>.
@@ -145,8 +184,8 @@ public sealed class Renderer : IDisposable
     private readonly ID3D11Query[] _tsFlowEnd = new ID3D11Query[QueryDepth];
     private readonly bool[] _flowTimed = new bool[QueryDepth];
 
-    // Intermediate RGB surface: NIS consumes colour, not YUV planes, so the conversion
-    // shader has to run into a texture before the compute pass can see it.
+    // Intermediate RGB surface: NIS and DLSS consume colour, not YUV planes, so the
+    // conversion shader has to run into a texture before either can see it.
     private ID3D11Texture2D? _rgbIntermediate;
     private ID3D11RenderTargetView? _rgbIntermediateRtv;
     private ID3D11ShaderResourceView? _rgbIntermediateSrv;
@@ -242,6 +281,7 @@ public sealed class Renderer : IDisposable
         Processor = new VideoProcessor(_device);
         Nis = new NisScaler(_device);
         Flow = new OpticalFlow(_device);
+        Dlss = new DlssScaler(_device);
 
         ReadAdapterInfo();
         Log.Info($"adapter: {AdapterName}, driver {DriverVersion}");
@@ -419,6 +459,8 @@ public sealed class Renderer : IDisposable
             _tsEnd[i] = _device.CreateQuery(new QueryDescription(QueryType.Timestamp));
             _tsFlowStart[i] = _device.CreateQuery(new QueryDescription(QueryType.Timestamp));
             _tsFlowEnd[i] = _device.CreateQuery(new QueryDescription(QueryType.Timestamp));
+            _tsDlssStart[i] = _device.CreateQuery(new QueryDescription(QueryType.Timestamp));
+            _tsDlssEnd[i] = _device.CreateQuery(new QueryDescription(QueryType.Timestamp));
         }
     }
 
@@ -445,6 +487,12 @@ public sealed class Renderer : IDisposable
             && _context.GetData(_tsFlowEnd[slot], out ulong flowEnd)
             && flowEnd > flowStart)
             LastFlowMs = (flowEnd - flowStart) * 1000.0 / dj.Frequency;
+
+        if (_dlssTimed[slot]
+            && _context.GetData(_tsDlssStart[slot], out ulong dlssStart)
+            && _context.GetData(_tsDlssEnd[slot], out ulong dlssEnd)
+            && dlssEnd > dlssStart)
+            LastDlssMs = (dlssEnd - dlssStart) * 1000.0 / dj.Frequency;
     }
 
     /// <summary>
@@ -606,11 +654,14 @@ public sealed class Renderer : IDisposable
             _context.Begin(_disjoint[slot]);
             _context.End(_tsStart[slot]);
 
+            bool dlss = UseDlss && _lumaView is not null && _chromaView is not null && _videoWidth > 0;
+
             // Motion since the previous frame: once per new frame, and only while something
-            // is using it. Done first because it leaves its own targets and shaders set,
-            // and everything below sets its own again.
+            // is using it - the view of it, or DLSS. Done first because it leaves its own
+            // targets and shaders set, and everything below sets its own again.
             _flowTimed[slot] = false;
-            if (Flow is { View: not FlowView.Off } flow && _lumaView is not null && _uploadSerial != _flowSerial)
+            if (Flow is { } flow && (flow.View != FlowView.Off || dlss)
+                && _lumaView is not null && _uploadSerial != _flowSerial)
             {
                 _flowSerial = _uploadSerial;
                 _context.End(_tsFlowStart[slot]);
@@ -623,14 +674,26 @@ public sealed class Renderer : IDisposable
             _context.RSSetViewport(0, 0, Width, Height);
             _context.ClearRenderTargetView(_backBufferView, new Color4(0f, 0f, 0f, 1f));
 
-            _context.IASetPrimitiveTopology(PrimitiveTopology.TriangleStrip);
-            _context.VSSetShader(_vs);
-            _context.PSSetShader(_ps);
-            _context.PSSetSampler(0, _sampler);
-            _context.VSSetConstantBuffer(0, _constants);
-            _context.PSSetConstantBuffer(0, _constants);
+            BindPipeline();
 
             var (fx, fy, fw, fh) = FitRect(_videoWidth, _videoHeight, Width, Height);
+
+            // DLSS, like NIS, wants colour in and writes colour out, and it wants the
+            // motion besides. Both passes that prepare those leave their own state set.
+            ID3D11ShaderResourceView? dlssResult = null;
+            _dlssTimed[slot] = false;
+            if (dlss)
+            {
+                var (_, _, fitW, fitH) = FitPixels(_videoWidth, _videoHeight, Width, Height);
+                _context.End(_tsDlssStart[slot]);
+                dlssResult = RunDlss(fitW, fitH);
+                _context.End(_tsDlssEnd[slot]);
+                _dlssTimed[slot] = true;
+
+                BindPipeline();
+                _context.OMSetRenderTargets(_backBufferView);
+                _context.RSSetViewport(0, 0, Width, Height);
+            }
 
             // Build the processor even while both toggles are off: extensions are set on an
             // existing processor, so it must exist before VSR can be switched on at all.
@@ -663,7 +726,15 @@ public sealed class Renderer : IDisposable
                 _context.RSSetViewport(0, 0, Width, Height);
             }
 
-            if (nisResult is not null)
+            if (dlssResult is not null)
+            {
+                // SDR RGB at the size it was built for, so it takes the encoding path too.
+                SetConstants(fx, fy, fw, fh, mode: 1);
+                _context.PSSetShaderResource(2, dlssResult);
+                _context.OMSetBlendState(null);
+                _context.Draw(4, 0);
+            }
+            else if (nisResult is not null)
             {
                 // NIS output is SDR RGB regardless of mode, so it takes the encoding path.
                 SetConstants(fx, fy, fw, fh, mode: 1);
@@ -720,6 +791,49 @@ public sealed class Renderer : IDisposable
             _queryFrame++;
             CollectGpuTiming();
         }
+    }
+
+    /// <summary>The shaders and state every draw into the back buffer shares.</summary>
+    private void BindPipeline()
+    {
+        _context.IASetPrimitiveTopology(PrimitiveTopology.TriangleStrip);
+        _context.VSSetShader(_vs);
+        _context.PSSetShader(_ps);
+        _context.PSSetSampler(0, _sampler);
+        _context.VSSetConstantBuffer(0, _constants);
+        _context.PSSetConstantBuffer(0, _constants);
+    }
+
+    /// <summary>
+    /// Puts the newest frame through DLSS and gives back what there is to show, or null
+    /// when DLSS has nothing for this frame and the plain picture should be drawn.
+    /// <para>
+    /// Once per new frame. A frame that has been through already is shown again as it
+    /// came out, except for the first few times, when it goes through once more as a
+    /// picture in which nothing moved: see <see cref="DlssSettleFrames"/>.
+    /// </para>
+    /// </summary>
+    private ID3D11ShaderResourceView? RunDlss(int fitWidth, int fitHeight)
+    {
+        var dlss = Dlss!;
+        bool fresh = _uploadSerial != _dlssSerial;
+        if (!fresh && (dlss.OutputView is null || _dlssSettling >= DlssSettleFrames)) return dlss.OutputView;
+
+        if (!EnsureIntermediate(_videoWidth, _videoHeight) || !ConvertYuvToIntermediate()) return null;
+        // The intermediate is still bound as a render target, and is about to be read.
+        _context.OMSetRenderTargets((ID3D11RenderTargetView?)null);
+
+        // No field yet means this is the first frame, which has nothing before it to have
+        // moved from; the same picture again has not moved either.
+        var motion = fresh && Flow is { Ready: true } flow ? flow.PerPixel(_context, _sampler) : null;
+
+        _dlssSettling = fresh ? 0 : _dlssSettling + 1;
+        _dlssSerial = _uploadSerial;
+
+        var (outWidth, outHeight) = DlssScaler.OutputSize(_videoWidth, _videoHeight, fitWidth, fitHeight);
+        return dlss.Process(_context, _rgbIntermediate!, motion, _videoWidth, _videoHeight, outWidth, outHeight)
+            ? dlss.OutputView
+            : null;
     }
 
     public void Present()
@@ -961,7 +1075,7 @@ public sealed class Renderer : IDisposable
         });
         _rgbIntermediateRtv = _device.CreateRenderTargetView(_rgbIntermediate);
         _rgbIntermediateSrv = _device.CreateShaderResourceView(_rgbIntermediate);
-        Log.Debug($"NIS intermediate surface {width}x{height}");
+        Log.Debug($"RGB intermediate surface {width}x{height}");
         return true;
     }
 
@@ -972,7 +1086,7 @@ public sealed class Renderer : IDisposable
 
         _context.OMSetRenderTargets(_rgbIntermediateRtv);
         _context.RSSetViewport(0, 0, _videoWidth, _videoHeight);
-        // NIS applies its own colour handling, so feed it plain SDR: mode 0 with no
+        // NIS and DLSS apply their own colour handling, so feed them plain SDR: mode 0 with no
         // PQ encoding, which is what SetConstants produces while SwapChainIsPq is false
         // and what the explicit mode-0 path does anyway.
         SetConstants(-1f, 1f, 2f, -2f, mode: 0, forceNoPq: true);
@@ -1022,6 +1136,7 @@ public sealed class Renderer : IDisposable
         Ui?.Dispose();
         Processor?.Dispose();
         Nis?.Dispose();
+        Dlss?.Dispose();
         Flow?.Dispose();
         _rgbIntermediateSrv?.Dispose(); _rgbIntermediateRtv?.Dispose(); _rgbIntermediate?.Dispose();
         ReleaseVideoResources();

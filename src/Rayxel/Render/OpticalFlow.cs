@@ -69,7 +69,7 @@ public sealed class OpticalFlow : IDisposable
 
     private readonly ID3D11Device _device;
     private ID3D11VertexShader? _vs;
-    private ID3D11PixelShader? _reducePs, _matchPs, _refinePs, _finerPs, _resolvePs, _medianPs, _showPs;
+    private ID3D11PixelShader? _reducePs, _matchPs, _refinePs, _finerPs, _resolvePs, _medianPs, _showPs, _spreadPs;
     private ID3D11Buffer? _constants;
     private ID3D11SamplerState? _point;
     private bool _compiled, _failed;
@@ -91,6 +91,10 @@ public sealed class OpticalFlow : IDisposable
     private ID3D11Texture2D? _refined, _finer, _settled, _result;
     private ID3D11RenderTargetView? _refinedTarget, _finerTarget, _settledTarget, _resultTarget;
     private ID3D11ShaderResourceView? _refinedView, _finerView, _settledView, _resultView;
+
+    // The result again, one vector per pixel of the picture: see PerPixel.
+    private ID3D11Texture2D? _perPixel;
+    private ID3D11RenderTargetView? _perPixelTarget;
 
     private int _videoWidth, _videoHeight;
 
@@ -122,6 +126,7 @@ public sealed class OpticalFlow : IDisposable
             _resolvePs = _device.CreatePixelShader(Build("ResolvePS", "ps_5_0"));
             _medianPs = _device.CreatePixelShader(Build("MedianPS", "ps_5_0"));
             _showPs = _device.CreatePixelShader(Build("ShowPS", "ps_5_0"));
+            _spreadPs = _device.CreatePixelShader(Build("SpreadPS", "ps_5_0"));
 
             _constants = _device.CreateBuffer(new BufferDescription(64, BindFlags.ConstantBuffer,
                 ResourceUsage.Dynamic, CpuAccessFlags.Write));
@@ -204,6 +209,19 @@ public sealed class OpticalFlow : IDisposable
         (_finer, _finerTarget, _finerView) = Field(_levelSize[0].Width, _levelSize[0].Height);
         (_settled, _settledTarget, _settledView) = Field(_levelSize[0].Width, _levelSize[0].Height);
         (_result, _resultTarget, _resultView) = Field(_levelSize[0].Width, _levelSize[0].Height);
+
+        _perPixel = _device.CreateTexture2D(new Texture2DDescription
+        {
+            Width = (uint)videoWidth,
+            Height = (uint)videoHeight,
+            MipLevels = 1,
+            ArraySize = 1,
+            Format = Format.R16G16_Float,
+            SampleDescription = new SampleDescription(1, 0),
+            Usage = ResourceUsage.Default,
+            BindFlags = BindFlags.RenderTarget | BindFlags.ShaderResource
+        });
+        _perPixelTarget = _device.CreateRenderTargetView(_perPixel);
 
         _havePrevious = false;
         Ready = false;
@@ -378,6 +396,53 @@ public sealed class OpticalFlow : IDisposable
     }
 
     /// <summary>
+    /// The vectors in the form a temporal upscaler takes them: one for every pixel of the
+    /// picture, in the picture's own pixels, each saying where that pixel was in the frame
+    /// before relative to where it is now. Null until there is a field.
+    /// <para>
+    /// There is still only one measurement per 4x4 block. Between blocks the vectors are
+    /// blended, which is right where movement changes gradually - a floor running off into
+    /// the distance - and wrong for a couple of pixels either side of the edge of something
+    /// moving over something else, where the true answer jumps.
+    /// </para>
+    /// <para>
+    /// Leaves the pipeline's render target and shaders changed, as <see cref="Estimate"/> does.
+    /// </para>
+    /// </summary>
+    public ID3D11Texture2D? PerPixel(ID3D11DeviceContext context, ID3D11SamplerState linear)
+    {
+        if (!Ready || _resultView is null || _perPixelTarget is null) return null;
+
+        var mapped = context.Map(_constants!, 0, MapMode.WriteDiscard);
+        unsafe
+        {
+            var p = (float*)mapped.DataPointer;
+            p[0] = -1f; p[1] = 1f; p[2] = 2f; p[3] = -2f;
+            for (int i = 4; i < 16; i++) p[i] = 0;
+            // One vector unit is one pixel of the quarter-size picture; this many of the picture's own.
+            p[10] = _videoWidth / (float)_levelSize[0].Width;
+        }
+        context.Unmap(_constants!, 0);
+
+        context.IASetPrimitiveTopology(PrimitiveTopology.TriangleStrip);
+        context.VSSetShader(_vs);
+        context.PSSetShader(_spreadPs);
+        context.VSSetConstantBuffer(0, _constants);
+        context.PSSetConstantBuffer(0, _constants);
+        context.PSSetSampler(0, linear);
+        context.PSSetSampler(1, _point);
+        context.OMSetBlendState(null);
+        Unbind(context);
+        context.OMSetRenderTargets(_perPixelTarget);
+        context.RSSetViewport(0, 0, _videoWidth, _videoHeight);
+        context.PSSetShaderResource(2, _resultView);
+        context.Draw(4, 0);
+        Unbind(context);
+        context.OMSetRenderTargets((ID3D11RenderTargetView?)null);
+        return _perPixel;
+    }
+
+    /// <summary>
     /// Writes the vectors out as numbers, so that they can be checked against a picture whose
     /// motion is known - which the coloured view cannot be, once the display's own tone curve
     /// has been through it. Diagnostic only: it waits for the GPU.
@@ -489,6 +554,8 @@ public sealed class OpticalFlow : IDisposable
         _resultView?.Dispose(); _resultView = null;
         _resultTarget?.Dispose(); _resultTarget = null;
         _result?.Dispose(); _result = null;
+        _perPixelTarget?.Dispose(); _perPixelTarget = null;
+        _perPixel?.Dispose(); _perPixel = null;
         _videoWidth = _videoHeight = 0;
         Ready = false;
     }
@@ -497,7 +564,7 @@ public sealed class OpticalFlow : IDisposable
     {
         Release();
         _point?.Dispose(); _constants?.Dispose();
-        _showPs?.Dispose(); _medianPs?.Dispose(); _resolvePs?.Dispose(); _finerPs?.Dispose(); _refinePs?.Dispose(); _matchPs?.Dispose(); _reducePs?.Dispose(); _vs?.Dispose();
+        _spreadPs?.Dispose(); _showPs?.Dispose(); _medianPs?.Dispose(); _resolvePs?.Dispose(); _finerPs?.Dispose(); _refinePs?.Dispose(); _matchPs?.Dispose(); _reducePs?.Dispose(); _vs?.Dispose();
     }
 
     // NOTE: keep this shader pure ASCII. Non-ASCII bytes truncate the source.
@@ -509,7 +576,7 @@ public sealed class OpticalFlow : IDisposable
             float  Mip;        // which mip of the pyramid that level is
             float  HasParent;  // 1 when a coarser field gives a starting point
             float2 OutSize;    // show: the video rectangle in window pixels
-            float  UnitToOut;  // show: window pixels per vector unit
+            float  UnitToOut;  // show: window pixels per vector unit; spread: the picture's
             float  Alone;      // show: 1 = vectors on black, 0 = over the video
             float  IsPq;       // show: 1 when the swapchain is PQ
             float  Nits;       // show: level to encode at for PQ
@@ -845,6 +912,12 @@ public sealed class OpticalFlow : IDisposable
         float3 Hue(float turn)
         {
             return saturate(abs(frac(turn + float3(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0) - 1.0);
+        }
+
+        // The field at the picture's own size and in its own pixels, for PerPixel.
+        float2 SpreadPS(VSOut i) : SV_Target
+        {
+            return Field.SampleLevel(Linear, i.uv, 0).xy * UnitToOut;
         }
 
         float4 ShowPS(VSOut i) : SV_Target

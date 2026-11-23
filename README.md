@@ -91,7 +91,8 @@ Move the mouse over the picture to bring up the control bar:
 
 - **Capture mode** — resolution, rate and whether it is `raw` or `zip`; opens the list of
   modes.
-- **Scaling** — none, NIS or RTX VSR, with the cost of each; NIS brings a sharpness slider.
+- **Scaling** — none, NIS, RTX VSR or DLSS, with the cost of each; NIS brings a sharpness
+  slider.
 - **HDR** — RTX Video HDR on or off; explains itself when it is unavailable.
 - **Frame budget** — what our own work costs out of the frame.
 - **Audio, telemetry, full screen**, and **…** for device, audio routing, HDR brightness,
@@ -102,7 +103,7 @@ Move the mouse over the picture to bring up the control bar:
 | `Esc` / `Tab` | show or hide the bar; `Esc` closes whatever is open first |
 | `T` | telemetry: off → one line → full card |
 | `M` | capture-mode list |
-| `1` / `2` / `3` | no scaling / NIS / RTX VSR |
+| `1` / `2` / `3` / `4` | no scaling / NIS / RTX VSR / DLSS |
 | `H` | RTX Video HDR |
 | `[` / `]` | NIS sharpness |
 | `F11` | window → borderless full screen → topmost full screen |
@@ -169,7 +170,9 @@ runtime rather than at build time.
 
 Media Foundation reads the card straight into Direct3D 11 textures. From there the frame
 goes through the driver's video processor (RTX VSR and RTX Video HDR), the NIS compute
-shader, or Rayxel's own YUV-to-RGB shader, and is presented on a flip-model swapchain. The
+shader, DLSS, or Rayxel's own YUV-to-RGB shader, and is presented on a flip-model swapchain.
+DLSS needs to be told how the picture moved, which a video does not say, so Rayxel
+estimates it from one frame to the next with a shader of its own. The
 interface is Dear ImGui, drawn into the same swapchain rather than in a window of its own —
 a second window over the video would take it off its overlay plane and cost a frame.
 
@@ -185,6 +188,16 @@ and why.
   timestamps a frame and the monitor's after a present are both invisible; anything Rayxel
   cannot measure is shown as `n/a` rather than estimated.
 - **Intel VSR is written but has never run on Intel hardware.**
+- **DLSS works from estimated motion.** A game gives DLSS exact motion vectors, depth and a
+  camera that shifts by a fraction of a pixel every frame; a video has none of these.
+  Rayxel estimates the motion, supplies a flat depth, and cannot supply the shift, so DLSS
+  here steadies and cleans the picture rather than recovering detail that was never sent,
+  and it smears where the estimate is wrong.
+- **DLSS needs an NVIDIA RTX card and a copy of `nvngx_dlss.dll`,** which is not part of
+  Rayxel. The driver uses one placed beside `Rayxel.exe` (it comes with NVIDIA's DLSS SDK),
+  or its own copy - which it only lends to a program it does not know while DLSS override
+  is switched on for all programs in the NVIDIA app. The driver's settings may also replace
+  the model and mode Rayxel asks for; the log says what was used.
 - **Two identical capture cards cannot be told apart for audio:** a WASAPI endpoint does not
   expose the hardware instance under it. The audio input selector exists for that case.
 - **Hot-plug is noticed lazily,** when a device list is opened.
@@ -198,6 +211,8 @@ Rayxel is released under the [MIT License](LICENSE).
 
 It includes or uses NVIDIA Image Scaling (`src/Rayxel/Render/NIS/`, MIT, © NVIDIA
 Corporation), Dear ImGui through ImGui.NET (MIT), NAudio (MIT) and Vortice.Windows (MIT).
+DLSS is NVIDIA's and no part of it is included: Rayxel calls the copy the graphics driver
+runs.
 
 NVIDIA, RTX and G-SYNC are trademarks of NVIDIA Corporation; Nintendo Switch is a trademark
 of Nintendo; Steam Deck is a trademark of Valve; ShadowCast is a trademark of Genki.

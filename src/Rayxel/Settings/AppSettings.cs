@@ -17,7 +17,7 @@ public sealed class AppSettings
 {
     public string Language { get; set; } = "ru";
 
-    /// <summary>0 = own shader, 1 = NIS, 2 = the driver filter.</summary>
+    /// <summary>0 = own shader, 1 = NIS, 2 = the driver filter, 3 = DLSS.</summary>
     public int Scaler { get; set; }
 
     public bool Hdr { get; set; } = true;
