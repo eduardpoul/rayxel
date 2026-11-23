@@ -631,7 +631,7 @@ public static class BottomBar
 
             // What is running, and what there is to pick from: the versions AMD's library
             // offers on this card, and FSR 4's networks pressed on it where it offers none.
-            Widgets.LabelValueWidth(Strings.T("fsrVersion"), fsr.InUse ?? "—", Theme.TextSecondary, width);
+            Widgets.LabelValueWidth(Strings.T("fsrVersion"), fsr.Building ? "…" : fsr.InUse ?? "—", Theme.TextSecondary, width);
 
             var choices = fsr.Choices;
             int count = choices.Count + 1;

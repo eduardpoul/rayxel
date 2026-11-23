@@ -64,6 +64,14 @@ public readonly record struct FsrChoice(string Label, FsrModel Model, string? Ve
 /// choice is then handed back to the library.
 /// </para>
 /// <para>
+/// Building takes time, and for FSR 4 a great deal of it: the first frame of a network at
+/// a new size has the driver compile it, which on an RTX 5080 is some twenty seconds for
+/// the full network and one for the lighter. So an upscaler is built, and put through its
+/// first frame, on a thread of its own; <see cref="Process"/> has nothing to show until
+/// that is done, and whoever draws shows the picture as it came. The driver keeps what it
+/// compiled, so it is long once for each size.
+/// </para>
+/// <para>
 /// It only exists for Direct3D 12, and this program draws with Direct3D 11. So it gets a
 /// Direct3D 12 device of its own on the same card, and the pictures going in and coming
 /// out are textures both devices can see: nothing is copied between them. What keeps the
@@ -288,6 +296,16 @@ public sealed unsafe class FsrScaler : IDisposable
     // What a built upscaler was built for: the two things that, changed, mean building again.
     private string Asked => $"{Model}|{Version}";
 
+    // The upscaler being built on another thread. While this is set and not finished,
+    // that thread has the library, the command list and the fence to itself.
+    private Task<Built>? _building;
+
+    /// <summary>True while an upscaler is being built and there is nothing of FSR's to show.</summary>
+    public bool Building => _building is { IsCompleted: false };
+
+    /// <summary>True when one has been built and waits to be taken up by the next frame.</summary>
+    public bool BuildFinished => _building is { IsCompleted: true };
+
     /// <summary>The upscaled picture, once a frame has been through.</summary>
     public ID3D11ShaderResourceView? OutputView => _outputView;
 
@@ -366,7 +384,7 @@ public sealed unsafe class FsrScaler : IDisposable
 
     /// <summary>What it is doing, for the log and the readout.</summary>
     public string Description => _upscaler == IntPtr.Zero
-        ? "not running"
+        ? _building is not null ? "being built" : "not running"
         : $"{_inWidth}x{_inHeight} -> {_outWidth}x{_outHeight}, FSR {VersionInUse ?? "of a version not reported"}" +
           (ModelInUse is { } model ? $" ({NetworkName(model)}, pressed on the library)" : "");
 
@@ -669,6 +687,14 @@ public sealed unsafe class FsrScaler : IDisposable
                         float shiftX, float shiftY, int inWidth, int inHeight, int outWidth, int outHeight)
     {
         if (!Start()) return false;
+
+        // One being built is another thread's until it is finished.
+        if (_building is { } building)
+        {
+            if (!building.IsCompleted) return false;
+            _building = null;
+            if (!Adopt(building.Result)) return false;
+        }
         if (!Fit(context, inWidth, inHeight, outWidth, outHeight)) return false;
 
         long now = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -693,68 +719,14 @@ public sealed unsafe class FsrScaler : IDisposable
 
             // Direct3D 12's part.
             D3D12.Check(D3D12.Wait(_queue, _fence12, handedOver), "waiting for the picture");
-            IntPtr allocator = NextAllocator();
-            D3D12.Check(D3D12.Reset(allocator), "resetting the allocator");
-            D3D12.Check(D3D12.Reset(_list, allocator), "opening the command list");
-
-            Barrier* states = stackalloc Barrier[4];
-            states[0] = Change(_color.Resource, Common, ShaderResource);
-            states[1] = Change(_motion!.Resource, Common, ShaderResource);
-            states[2] = Change(_depth!.Resource, Common, ShaderResource);
-            states[3] = Change(_output!.Resource, Common, UnorderedAccess);
-            D3D12.Barriers(_list, states, 4);
-
-            var frame = new DispatchUpscale
-            {
-                Header = { Type = TypeDispatchUpscale },
-                CommandList = _list,
-                Color = Describe(_color, FormatRgba8, _inWidth, _inHeight, UsageReadOnly, StateComputeRead),
-                Depth = Describe(_depth, FormatR32Float, _inWidth, _inHeight, UsageReadOnly, StateComputeRead),
-                MotionVectors = Describe(_motion, FormatRg16Float, _inWidth, _inHeight, UsageReadOnly, StateComputeRead),
-                Output = Describe(_output, FormatRgba8, _outWidth, _outHeight, UsageUnorderedAccess, StateUnorderedAccess),
-                // How far, in its own pixels, the picture was moved right and down before
-                // it was handed over: FSR takes what it finds at a pixel to belong that
-                // much up and to the left of it.
-                JitterOffset = { X = shiftX, Y = shiftY },
-                // The vectors are already in pixels of the picture going in.
-                MotionVectorScale = { X = 1f, Y = 1f },
-                RenderSize = { Width = (uint)_inWidth, Height = (uint)_inHeight },
-                UpscaleSize = { Width = (uint)_outWidth, Height = (uint)_outHeight },
-                EnableSharpening = (byte)(Sharpness > 0f ? 1 : 0),
-                Sharpness = Math.Clamp(Sharpness, 0f, 1f),
-                FrameTimeDelta = sinceLast,
-                PreExposure = 1f,
-                Reset = (byte)(_reset ? 1 : 0),
-                // A camera for a picture that has none. With the depth flat, all these
-                // decide is that it is a valid camera: near is nearer than far.
-                CameraNear = 0.1f,
-                CameraFar = 1000f,
-                CameraFovAngleVertical = 1f,
-                ViewSpaceToMetersFactor = 1f,
-                Flags = DispatchColourIsSrgb
-            };
-            IntPtr upscaler = _upscaler;
-            uint result = _dispatch(&upscaler, &frame.Header);
-
-            // FSR leaves each texture in the state it was handed over in.
-            states[0] = Change(_color.Resource, ShaderResource, Common);
-            states[1] = Change(_motion.Resource, ShaderResource, Common);
-            states[2] = Change(_depth.Resource, ShaderResource, Common);
-            states[3] = Change(_output.Resource, UnorderedAccess, Common);
-            D3D12.Barriers(_list, states, 4);
-            D3D12.Check(D3D12.Close(_list), "closing the command list");
-
+            uint result = Record(_upscaler, _color, _motion!, _depth!, _output!, _inWidth, _inHeight, _outWidth, _outHeight,
+                                 shiftX, shiftY, sinceLast, _reset, Sharpness);
             if (result != 0)
             {
                 Release();
                 return GiveBack($"refused a frame: {Describe(result)}") ? false : Fail($"FSR refused a frame: {Describe(result)}");
             }
-
-            D3D12.Execute(_queue, _list);
-            ulong done = ++_fenceValue;
-            D3D12.Check(D3D12.Signal(_queue, _fence12, done), "raising the fence");
-            _allocatorBusyUntil[_allocator] = done;
-            _lastDone = done;
+            ulong done = Send();
 
             // And Direct3D 11 again: nothing after this is carried out before the result is there.
             _context4.Wait(_fence11!, done);
@@ -770,6 +742,77 @@ public sealed unsafe class FsrScaler : IDisposable
 
         _reset = false;
         return true;
+    }
+
+    /// <summary>
+    /// Records one frame of upscaling into the command list and closes it. What FSR
+    /// answered comes back; nothing has gone to the GPU yet.
+    /// </summary>
+    private uint Record(IntPtr upscaler, Shared color, Shared motion, Shared depth, Shared output,
+                        int inWidth, int inHeight, int outWidth, int outHeight,
+                        float shiftX, float shiftY, float sinceLast, bool reset, float sharpness)
+    {
+        IntPtr allocator = NextAllocator();
+        D3D12.Check(D3D12.Reset(allocator), "resetting the allocator");
+        D3D12.Check(D3D12.Reset(_list, allocator), "opening the command list");
+
+        Barrier* states = stackalloc Barrier[4];
+        states[0] = Change(color.Resource, Common, ShaderResource);
+        states[1] = Change(motion.Resource, Common, ShaderResource);
+        states[2] = Change(depth.Resource, Common, ShaderResource);
+        states[3] = Change(output.Resource, Common, UnorderedAccess);
+        D3D12.Barriers(_list, states, 4);
+
+        var frame = new DispatchUpscale
+        {
+            Header = { Type = TypeDispatchUpscale },
+            CommandList = _list,
+            Color = Describe(color, FormatRgba8, inWidth, inHeight, UsageReadOnly, StateComputeRead),
+            Depth = Describe(depth, FormatR32Float, inWidth, inHeight, UsageReadOnly, StateComputeRead),
+            MotionVectors = Describe(motion, FormatRg16Float, inWidth, inHeight, UsageReadOnly, StateComputeRead),
+            Output = Describe(output, FormatRgba8, outWidth, outHeight, UsageUnorderedAccess, StateUnorderedAccess),
+            // How far, in its own pixels, the picture was moved right and down before
+            // it was handed over: FSR takes what it finds at a pixel to belong that
+            // much up and to the left of it.
+            JitterOffset = { X = shiftX, Y = shiftY },
+            // The vectors are already in pixels of the picture going in.
+            MotionVectorScale = { X = 1f, Y = 1f },
+            RenderSize = { Width = (uint)inWidth, Height = (uint)inHeight },
+            UpscaleSize = { Width = (uint)outWidth, Height = (uint)outHeight },
+            EnableSharpening = (byte)(sharpness > 0f ? 1 : 0),
+            Sharpness = Math.Clamp(sharpness, 0f, 1f),
+            FrameTimeDelta = sinceLast,
+            PreExposure = 1f,
+            Reset = (byte)(reset ? 1 : 0),
+            // A camera for a picture that has none. With the depth flat, all these
+            // decide is that it is a valid camera: near is nearer than far.
+            CameraNear = 0.1f,
+            CameraFar = 1000f,
+            CameraFovAngleVertical = 1f,
+            ViewSpaceToMetersFactor = 1f,
+            Flags = DispatchColourIsSrgb
+        };
+        uint result = _dispatch(&upscaler, &frame.Header);
+
+        // FSR leaves each texture in the state it was handed over in.
+        states[0] = Change(color.Resource, ShaderResource, Common);
+        states[1] = Change(motion.Resource, ShaderResource, Common);
+        states[2] = Change(depth.Resource, ShaderResource, Common);
+        states[3] = Change(output.Resource, UnorderedAccess, Common);
+        D3D12.Barriers(_list, states, 4);
+        D3D12.Check(D3D12.Close(_list), "closing the command list");
+        return result;
+    }
+
+    /// <summary>Sends what <see cref="Record"/> recorded to the GPU and raises the fence behind it, to the value given back.</summary>
+    private ulong Send()
+    {
+        D3D12.Execute(_queue, _list);
+        ulong done = ++_fenceValue;
+        D3D12.Check(D3D12.Signal(_queue, _fence12, done), "raising the fence");
+        _allocatorBusyUntil[_allocator] = done;
+        _lastDone = done;
+        return done;
     }
 
     /// <summary>
@@ -817,11 +860,14 @@ public sealed unsafe class FsrScaler : IDisposable
         return _allocators[_allocator];
     }
 
-    /// <summary>Makes sure there is an upscaler built for these sizes, or one still good enough.</summary>
+    /// <summary>
+    /// True when there is an upscaler built for these sizes, or one still good enough.
+    /// Otherwise one is set to be built, and there is nothing to show for this frame.
+    /// </summary>
     private bool Fit(ID3D11DeviceContext context, int inWidth, int inHeight, int outWidth, int outHeight)
     {
         if (_upscaler != IntPtr.Zero && !string.Equals(_builtFor, Asked, StringComparison.OrdinalIgnoreCase))
-            return Create(context, inWidth, inHeight, outWidth, outHeight);
+            return Begin(context, inWidth, inHeight, outWidth, outHeight);
 
         bool sameSource = _upscaler != IntPtr.Zero && inWidth == _inWidth && inHeight == _inHeight;
         if (sameSource && outWidth == _outWidth && outHeight == _outHeight)
@@ -840,65 +886,103 @@ public sealed unsafe class FsrScaler : IDisposable
             if (++_askedFor < SettleFrames) return true;
         }
 
-        return Create(context, inWidth, inHeight, outWidth, outHeight);
+        return Begin(context, inWidth, inHeight, outWidth, outHeight);
     }
 
-    private bool Create(ID3D11DeviceContext context, int inWidth, int inHeight, int outWidth, int outHeight)
+    /// <summary>What a build leaves: an upscaler with its textures, put through its first frame - or why there is none.</summary>
+    private sealed class Built
     {
-        if (Build(context, inWidth, inHeight, outWidth, outHeight, out string why)) return true;
-        // Once more with the library choosing, if it was not.
-        if (GiveBack(why) && Build(context, inWidth, inHeight, outWidth, outHeight, out why)) return true;
-        return Fail(why);
+        public IntPtr Upscaler, Chain;
+        public Shared? Color, Motion, Depth, Output;
+        public ID3D11RenderTargetView? MotionTarget;
+        public ID3D11ShaderResourceView? OutputView;
+        public int InWidth, InHeight, OutWidth, OutHeight;
+        public string BuiltFor = "";
+        public string? VersionInUse, Why;
+        public bool Lost;
+        public double Ms;
     }
 
-    private bool Build(ID3D11DeviceContext context, int inWidth, int inHeight, int outWidth, int outHeight, out string why)
+    /// <summary>
+    /// Lets go of what there is and starts building for these sizes on another thread.
+    /// Always false: there is nothing to show until that thread is done.
+    /// </summary>
+    private bool Begin(ID3D11DeviceContext context, int inWidth, int inHeight, int outWidth, int outHeight)
     {
         Release();
+        _askedFor = 0;
+
+        FsrModel model = Model;
+        if (model != FsrModel.Library && !Has(model))
+        {
+            Log.Warn($"FSR: this copy of the library has no {NetworkName(model)}; left to the library");
+            model = Model = FsrModel.Library;
+        }
+
+        try { _context4 ??= context.QueryInterface<ID3D11DeviceContext4>(); }
+        catch (Exception ex) { return Fail($"{ex.GetType().Name}: {ex.Message}"); }
+
+        // What was asked is fixed here: the other thread builds that, whatever is asked meanwhile.
+        string? version = Version;
+        string builtFor = Asked;
+        float sharpness = Sharpness;
+        Log.Debug($"FSR: building for {inWidth}x{inHeight} -> {outWidth}x{outHeight} on its own thread");
+        _building = Task.Run(() => Build(context, model, version, builtFor, sharpness, inWidth, inHeight, outWidth, outHeight));
+        return false;
+    }
+
+    /// <summary>
+    /// Builds an upscaler and puts one frame through it, on the thread it is called on -
+    /// which is not the one that draws. The frame is of nothing: it is there so that
+    /// whatever the driver has to compile for this network at this size is compiled here.
+    /// </summary>
+    private Built Build(ID3D11DeviceContext context, FsrModel model, string? version, string builtFor, float sharpness,
+                        int inWidth, int inHeight, int outWidth, int outHeight)
+    {
+        var built = new Built
+        {
+            InWidth = inWidth, InHeight = inHeight, OutWidth = outWidth, OutHeight = outHeight, BuiltFor = builtFor
+        };
         long began = System.Diagnostics.Stopwatch.GetTimestamp();
-        why = "";
 
         try
         {
-            FsrModel model = Model;
-            if (model != FsrModel.Library && !Has(model))
-            {
-                Log.Warn($"FSR: this copy of the library has no {NetworkName(model)}; left to the library");
-                model = Model = FsrModel.Library;
-            }
             Press(model);
-            ReadVersions(_offered);
+            var offered = new List<FsrVersion>();
+            ReadVersions(offered);
 
             // With a network pressed it is FSR 4 that is wanted, and it is named, so that
             // nothing newer the driver may supply is taken in its place.
-            var asked = Resolve(_offered, model != FsrModel.Library ? "4" : Version);
+            var asked = Resolve(offered, model != FsrModel.Library ? "4" : version);
             if (model != FsrModel.Library && asked is null)
             {
-                why = "did not appear among the library's upscalers";
-                return false;
+                built.Why = "did not appear among the library's upscalers";
+                return built;
             }
-            if (model == FsrModel.Library && Version is not null && asked is null)
-                Log.Warn($"FSR: no \"{Version}\" among {string.Join(", ", _offered.Select(v => v.Name))}; left to the library");
+            if (model == FsrModel.Library && version is not null && asked is null)
+                Log.Warn($"FSR: no \"{version}\" among {string.Join(", ", offered.Select(v => v.Name))}; left to the library");
 
-            _chain = (CreateChain*)NativeMemory.AllocZeroed((nuint)sizeof(CreateChain));
-            _chain->Backend = new Backend { Header = { Type = TypeBackendDx12 }, Device = _device12 };
-            _chain->Override = new OverrideVersion
+            var chain = (CreateChain*)NativeMemory.AllocZeroed((nuint)sizeof(CreateChain));
+            built.Chain = (IntPtr)chain;
+            chain->Backend = new Backend { Header = { Type = TypeBackendDx12 }, Device = _device12 };
+            chain->Override = new OverrideVersion
             {
-                Header = { Type = TypeOverrideVersion, Next = &_chain->Backend.Header }, VersionId = asked?.Id ?? 0
+                Header = { Type = TypeOverrideVersion, Next = &chain->Backend.Header }, VersionId = asked?.Id ?? 0
             };
-            _chain->Version = new UpscaleVersion
+            chain->Version = new UpscaleVersion
             {
                 Header =
                 {
                     Type = TypeUpscaleVersion,
                     // Naming a version switches the library's own choosing off, so it is
                     // only named when one was asked for.
-                    Next = asked is null ? &_chain->Backend.Header : &_chain->Override.Header
+                    Next = asked is null ? &chain->Backend.Header : &chain->Override.Header
                 },
                 Version = HeaderVersion
             };
-            _chain->Upscale = new CreateUpscale
+            chain->Upscale = new CreateUpscale
             {
-                Header = { Type = TypeCreateUpscale, Next = &_chain->Version.Header },
+                Header = { Type = TypeCreateUpscale, Next = &chain->Version.Header },
                 // The picture is ordinary gamma-encoded SDR, not the linear light a game
                 // has at this point. FSR 4 is told so; FSR 3 has no such setting and
                 // takes it as it comes. The checking is its own, into our log.
@@ -910,50 +994,119 @@ public sealed unsafe class FsrScaler : IDisposable
             };
 
             IntPtr made = IntPtr.Zero;
-            uint result = _create(&made, &_chain->Upscale.Header, null);
+            uint result = _create(&made, &chain->Upscale.Header, null);
             if (result != 0 || made == IntPtr.Zero)
             {
-                why = $"could not be built for {inWidth}x{inHeight} -> {outWidth}x{outHeight}: {Describe(result)}";
-                Release();
-                return false;
+                built.Why = $"could not be built for {inWidth}x{inHeight} -> {outWidth}x{outHeight}: {Describe(result)}";
+                Discard(built);
+                return built;
             }
-            _upscaler = made;
-            _builtFor = Asked;
+            built.Upscaler = made;
 
             var running = new ProviderVersion { Header = { Type = TypeProviderVersion } };
-            VersionInUse = _query(&made, &running.Header) == 0 && running.Name is not null
+            built.VersionInUse = _query(&made, &running.Header) == 0 && running.Name is not null
                 ? Marshal.PtrToStringUTF8((IntPtr)running.Name)
                 : null;
 
-            _color = Share(inWidth, inHeight, Format.R8G8B8A8_UNorm, BindFlags.RenderTarget | BindFlags.ShaderResource);
-            _motion = Share(inWidth, inHeight, Format.R16G16_Float, BindFlags.RenderTarget | BindFlags.ShaderResource);
-            _motionTarget = _device.CreateRenderTargetView(_motion.Texture);
-
-            // Depth, which a video does not have: the same distance everywhere, as for DLSS.
-            _depth = Share(inWidth, inHeight, Format.R32_Float, BindFlags.RenderTarget | BindFlags.ShaderResource);
-            using (var target = _device.CreateRenderTargetView(_depth.Texture))
-                context.ClearRenderTargetView(target, new Vortice.Mathematics.Color4(0.5f, 0.5f, 0.5f, 0.5f));
-
+            built.Color = Share(inWidth, inHeight, Format.R8G8B8A8_UNorm, BindFlags.RenderTarget | BindFlags.ShaderResource);
+            built.Motion = Share(inWidth, inHeight, Format.R16G16_Float, BindFlags.RenderTarget | BindFlags.ShaderResource);
+            built.MotionTarget = _device.CreateRenderTargetView(built.Motion.Texture);
+            built.Depth = Share(inWidth, inHeight, Format.R32_Float, BindFlags.RenderTarget | BindFlags.ShaderResource);
             // FSR writes its result from a compute shader, hence unordered access.
-            _output = Share(outWidth, outHeight, Format.R8G8B8A8_UNorm, BindFlags.UnorderedAccess | BindFlags.ShaderResource);
-            _outputView = _device.CreateShaderResourceView(_output.Texture);
+            built.Output = Share(outWidth, outHeight, Format.R8G8B8A8_UNorm, BindFlags.UnorderedAccess | BindFlags.ShaderResource);
+            built.OutputView = _device.CreateShaderResourceView(built.Output.Texture);
 
-            _inWidth = inWidth; _inHeight = inHeight;
-            _outWidth = outWidth; _outHeight = outHeight;
-            _askedFor = 0;
-            _reset = true;
-            _lastFrame = 0;
+            // The little Direct3D 11 has to do, under the lock everything else drawn with
+            // this context is drawn under: the depth, which a video does not have - the
+            // same distance everywhere, as for DLSS - and a picture in which nothing is
+            // and nothing moves, for the first frame.
+            ulong handedOver;
+            lock (context)
+            {
+                using (var target = _device.CreateRenderTargetView(built.Depth.Texture))
+                    context.ClearRenderTargetView(target, new Vortice.Mathematics.Color4(0.5f, 0.5f, 0.5f, 0.5f));
+                using (var target = _device.CreateRenderTargetView(built.Color.Texture))
+                    context.ClearRenderTargetView(target, new Vortice.Mathematics.Color4(0f, 0f, 0f, 1f));
+                context.ClearRenderTargetView(built.MotionTarget, new Vortice.Mathematics.Color4(0f, 0f, 0f, 0f));
+                handedOver = ++_fenceValue;
+                _context4!.Signal(_fence11!, handedOver);
+                context.Flush();
+            }
 
-            Log.Info($"FSR: {Description}, built in " +
-                     $"{System.Diagnostics.Stopwatch.GetElapsedTime(began).TotalMilliseconds:0} ms");
-            return true;
+            D3D12.Check(D3D12.Wait(_queue, _fence12, handedOver), "waiting for the textures");
+            uint first = Record(built.Upscaler, built.Color, built.Motion, built.Depth, built.Output,
+                                inWidth, inHeight, outWidth, outHeight, 0f, 0f, 16.7f, reset: true, sharpness);
+            if (first != 0)
+            {
+                built.Why = $"refused its first frame: {Describe(first)}";
+                Discard(built);
+                return built;
+            }
+            // Waited for here, so that it is finished - compiled, run, done - before it is handed over.
+            D3D12.WaitFor(_fence12, Send());
+
+            built.Ms = System.Diagnostics.Stopwatch.GetElapsedTime(began).TotalMilliseconds;
+            return built;
         }
         catch (Exception ex)
         {
-            Release();
-            why = $"{ex.GetType().Name}: {ex.Message}";
-            return false;
+            int reason = _device12 != IntPtr.Zero ? D3D12.RemovedReason(_device12) : 0;
+            built.Lost = reason < 0;
+            built.Why = $"{ex.GetType().Name}: {ex.Message}" + (built.Lost ? $" (Direct3D 12 device lost: 0x{reason:X8})" : "");
+            Discard(built);
+            return built;
         }
+    }
+
+    /// <summary>Takes up what the other thread built, or deals with its not having managed.</summary>
+    private bool Adopt(Built built)
+    {
+        if (built.Why is { } why)
+        {
+            // A lost device does not come back, whoever chose the network. Otherwise the
+            // library gets to choose, and the next frame sets that to be built.
+            if (!built.Lost && GiveBack(why)) return false;
+            return Fail("FSR " + why);
+        }
+
+        _upscaler = built.Upscaler;
+        _chain = (CreateChain*)built.Chain;
+        _color = built.Color; _motion = built.Motion; _depth = built.Depth; _output = built.Output;
+        _motionTarget = built.MotionTarget;
+        _outputView = built.OutputView;
+        _inWidth = built.InWidth; _inHeight = built.InHeight;
+        _outWidth = built.OutWidth; _outHeight = built.OutHeight;
+        VersionInUse = built.VersionInUse;
+        _builtFor = built.BuiltFor;
+        _askedFor = 0;
+        // What it remembers is the frame of nothing it was built with.
+        _reset = true;
+        _lastFrame = 0;
+
+        Log.Info($"FSR: {Description}, built in {built.Ms:0} ms");
+        return true;
+    }
+
+    /// <summary>Lets go of what a build made, when it is not going to be used.</summary>
+    private void Discard(Built built)
+    {
+        try
+        {
+            if (built.Upscaler != IntPtr.Zero)
+            {
+                IntPtr upscaler = built.Upscaler;
+                _destroy(&upscaler, null);
+                built.Upscaler = IntPtr.Zero;
+            }
+            if (built.Chain != IntPtr.Zero) { NativeMemory.Free((void*)built.Chain); built.Chain = IntPtr.Zero; }
+            built.OutputView?.Dispose(); built.OutputView = null;
+            built.MotionTarget?.Dispose(); built.MotionTarget = null;
+            built.Output?.Dispose(); built.Output = null;
+            built.Depth?.Dispose(); built.Depth = null;
+            built.Motion?.Dispose(); built.Motion = null;
+            built.Color?.Dispose(); built.Color = null;
+        }
+        catch (Exception ex) { Log.Debug($"FSR: discarding a build: {ex.Message}"); }
     }
 
     /// <summary>
@@ -1020,6 +1173,22 @@ public sealed unsafe class FsrScaler : IDisposable
 
     public void Dispose()
     {
+        if (_building is { } building)
+        {
+            // A build still running is inside the driver, compiling, and cannot be called
+            // off. What it is using is left to it: this only happens as the program ends.
+            bool finished = false;
+            try { finished = building.Wait(300); }
+            catch (Exception ex) { Log.Debug($"FSR: the build in progress: {ex.Message}"); }
+            if (!finished)
+            {
+                Log.Debug("FSR: left as it is, with an upscaler still being built");
+                return;
+            }
+            _building = null;
+            if (building.Result.Why is null) Discard(building.Result);
+        }
+
         try { Release(); }
         catch (Exception ex) { Log.Debug($"FSR: releasing: {ex.Message}"); }
 

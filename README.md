@@ -213,9 +213,9 @@ and why.
   picked (`--fsr-model=full|lite|rdna2`). That this works at all was found by the
   [OptiScaler](https://github.com/optiscaler/OptiScaler) project. AMD neither tests nor
   supports it; on an RTX 5080 both networks run and look right, and nothing else has been
-  tried. The first frame at each new size waits for the driver to build the network -
-  about twenty seconds for the full one, one for the lighter - after which the driver
-  keeps it.
+  tried. At each new size the driver has to build the network first - about twenty
+  seconds for the full one, one for the lighter, after which the driver keeps it.
+  Rayxel has that done on a thread of its own and shows the picture unscaled meanwhile.
 - **FSR needs two DLLs of AMD's,** `amd_fidelityfx_loader_dx12.dll` and
   `amd_fidelityfx_upscaler_dx12.dll`, which are not part of Rayxel. They come with AMD's
   [FSR SDK](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK) (`Kits/FidelityFX/signedbin`)

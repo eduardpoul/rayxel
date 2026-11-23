@@ -873,6 +873,13 @@ public sealed class Renderer : IDisposable
             if (fsr && !CompareScalers) Fsr!.ResetHistory();
         }
 
+        // FSR builds its upscaler on a thread of its own, which for FSR 4 can take many
+        // seconds. Until it has one the picture is drawn as it came, and nothing is
+        // prepared for it; the frame it is finished on goes through whether new or not.
+        if (fsr && !CompareScalers && Fsr!.Building) return null;
+        bool builtNow = fsr && Fsr!.BuildFinished;
+        if (builtNow) _dlssSettling = 0;
+
         // FSR is made for the same range of enlargement as DLSS, 1 to 3 times each way.
         var (outWidth, outHeight) = DlssScaler.OutputSize(_videoWidth, _videoHeight, fitWidth, fitHeight);
 
@@ -882,7 +889,7 @@ public sealed class Renderer : IDisposable
         int settle = fsr ? Math.Max(DlssSettleFrames, shifts) : DlssSettleFrames;
 
         bool fresh = _uploadSerial != _dlssSerial;
-        if (!fresh && !tookOver && (Shown() is null || _dlssSettling >= settle)) return Shown();
+        if (!fresh && !tookOver && !builtNow && (Shown() is null || _dlssSettling >= settle)) return Shown();
 
         if (!EnsureIntermediate(_videoWidth, _videoHeight)) return null;
 
@@ -1060,7 +1067,13 @@ public sealed class Renderer : IDisposable
 
             // The one in use first, exactly as it would have been shown: a frame that has
             // been through already is not put through again for this.
-            if (UseDlss || UseFsr)
+            // Nothing to compare while the one in use has no picture of its own yet:
+            // what would be written under its name is the plain one.
+            bool liveReady = UseFsr ? Fsr is { OutputView: not null, Building: false } : UseDlss && Dlss!.OutputView is not null;
+            if ((UseDlss || UseFsr) && !liveReady)
+                Log.Warn("comparison: the scaler in use has not produced a picture yet, so it is left out");
+
+            if (liveReady)
             {
                 bool fsrLive = UseFsr;
                 int settlingWas = _dlssSettling;
