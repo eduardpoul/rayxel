@@ -367,29 +367,60 @@ public static class Widgets
     }
 
     /// <summary>
-    /// One row of a combo box's list: its name, an optional quiet note at the right end, and
-    /// whether it can be chosen. A row that cannot keeps its place, greyed, and carries an
-    /// info mark whose tooltip says why — that is what <paramref name="Info"/> is for.
+    /// One row of a combo box's list: its name, an optional quiet note at the right end,
+    /// whether it can be chosen, and what there is to say about it — shown beside the list
+    /// while the pointer or the arrow keys are on the row. A row that cannot be chosen keeps
+    /// its place, greyed, with a mark that says it has a reason to read.
     /// </summary>
     public readonly record struct ComboItem(string Text, string Trailing = "", bool Enabled = true, string? Info = null);
 
+    // The list that is open, if one is: which combo box it belongs to, the row the arrow
+    // keys have reached, and the frame it was last drawn in — a list whose flyout went away
+    // is never told it closed, so "open" has to mean "drawn just now".
+    private static string? _openCombo;
+    private static int _comboCursor = -1, _comboFrame = -1;
+    private static bool _comboCloseAsked;
+
+    /// <summary>True while a combo box's list is dropped open.</summary>
+    public static bool ComboOpen => _openCombo is not null && ImGui.GetFrameCount() - _comboFrame <= 1;
+
+    /// <summary>
+    /// Closes the open list, as Esc should: the innermost thing that is open is the list,
+    /// not the flyout it belongs to.
+    /// </summary>
+    public static void CloseCombo() => _comboCloseAsked = true;
+
     /// <summary>
     /// The same combo box over rows that carry more than a name. The list is as wide as
-    /// the box and a row is one line, as Fluent's is; <paramref name="open"/> drops it open
-    /// without a click.
+    /// the box and a row is one line, as Fluent's is.
+    /// <para>
+    /// A row that has something to say about itself says it in a tooltip standing beside
+    /// the list, level with the row: under the pointer, or at the row the arrow keys have
+    /// reached. Up and Down walk the rows — every row, so one that cannot be chosen can
+    /// still be read — Enter takes the one they are on, and Esc closes the list.
+    /// <paramref name="openAt"/> drops the list open with the keys already on that row.
+    /// </para>
     /// </summary>
     public static bool Combo(string id, string preview, ReadOnlySpan<ComboItem> options, int current, out int chosen,
-                             float width = 0f, bool enabled = true, bool open = false)
+                             float width = 0f, bool enabled = true, int openAt = -1, Vector4? previewColour = null)
     {
         chosen = current;
         if (width <= 0) width = ImGui.GetContentRegionAvail().X;
         var size = new Vector2(width, Layout.S(32));
-        if (ComboFace(id, preview, size, enabled, out var min) || open) ImGui.OpenPopup(id + "##list");
+        string popup = id + "##list";
+
+        bool opened = ComboFace(id, preview, size, enabled, out var min, previewColour) || openAt >= 0;
+        if (opened)
+        {
+            ImGui.OpenPopup(popup);
+            _openCombo = id;
+            _comboCursor = Math.Min(openAt, options.Length - 1);
+        }
 
         float rowH = Layout.S(36), padY = Layout.S(4);
         float listH = Math.Min(rowH * options.Length + padY * 2, Layout.S(360));
-        float display = ImGui.GetIO().DisplaySize.Y;
-        bool above = min.Y + size.Y + Layout.S(4) + listH > display - Layout.S(8);
+        var display = ImGui.GetIO().DisplaySize;
+        bool above = min.Y + size.Y + Layout.S(4) + listH > display.Y - Layout.S(8);
 
         ImGui.SetNextWindowPos(above ? new Vector2(min.X, min.Y - Layout.S(4)) : new Vector2(min.X, min.Y + size.Y + Layout.S(4)),
                                ImGuiCond.Always, above ? new Vector2(0, 1) : Vector2.Zero);
@@ -398,10 +429,34 @@ public static class Widgets
         ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, Vector2.Zero);
 
         bool changed = false;
-        if (ImGui.BeginPopup(id + "##list"))
+        if (ImGui.BeginPopup(popup))
         {
+            if (_openCombo != id) { _openCombo = id; _comboCursor = -1; }
+            _comboFrame = ImGui.GetFrameCount();
+
+            if (_comboCloseAsked) ImGui.CloseCurrentPopup();
+
+            // The pointer and the keys take turns: moving the mouse hands the rows back to
+            // it, an arrow key takes them again from wherever the selection is.
+            if (!opened && ImGui.GetIO().MouseDelta != Vector2.Zero) _comboCursor = -1;
+            int step = (ImGui.IsKeyPressed(ImGuiKey.DownArrow) ? 1 : 0) - (ImGui.IsKeyPressed(ImGuiKey.UpArrow) ? 1 : 0);
+            if (step != 0 && options.Length > 0)
+                _comboCursor = Math.Clamp((_comboCursor >= 0 ? _comboCursor : current) + step, 0, options.Length - 1);
+
+            if (_comboCursor >= 0 && _comboCursor < options.Length && ImGui.IsKeyPressed(ImGuiKey.Enter))
+            {
+                if (options[_comboCursor].Enabled)
+                {
+                    changed = _comboCursor != current;
+                    chosen = _comboCursor;
+                    ImGui.CloseCurrentPopup();
+                }
+            }
+
             var draw = ImGui.GetWindowDrawList();
-            float inset = Layout.S(12), gap = Layout.S(8), glyph = Layout.S(16);
+            float inset = Layout.S(12), gap = Layout.S(8), glyph = Layout.S(16), r = Layout.S(Theme.RadiusControl);
+            var listMin = ImGui.GetWindowPos();
+            float listRight = listMin.X + ImGui.GetWindowSize().X;
 
             for (int i = 0; i < options.Length; i++)
             {
@@ -413,16 +468,22 @@ public static class Widgets
                     ImGui.CloseCurrentPopup();
                 }
                 bool hovered = ImGui.IsItemHovered();
+                bool reached = i == _comboCursor;
                 float cy = (rowMin.Y + rowMax.Y) / 2f, right = rowMax.X - inset;
 
-                // Why a row cannot be chosen, on the row itself: the mark shows there is
-                // something to read, the tooltip is the reading.
-                if (option.Info is { } info)
+                // Where the keys are: the fill a pointer would give it, and Fluent's focus
+                // stroke, since there is no pointer there to explain the fill.
+                if (reached)
                 {
-                    Icons.Draw(draw, Icon.Info, new Vector2(right - glyph, cy - glyph / 2f), glyph,
-                               option.Enabled ? Theme.TextSecondary : Theme.Caution);
+                    if (!hovered) draw.AddRectFilled(rowMin, rowMax, Theme.U32(Theme.SubtleHover), r);
+                    draw.AddRect(rowMin, rowMax, Theme.U32(Theme.ControlStrong), r);
+                }
+
+                // A row that cannot be chosen is marked as having a reason to read.
+                if (!option.Enabled && option.Info is not null)
+                {
+                    Icons.Draw(draw, Icon.Info, new Vector2(right - glyph, cy - glyph / 2f), glyph, Theme.Caution);
                     right -= glyph + gap;
-                    if (hovered) ShowTooltip(info);
                 }
 
                 if (option.Trailing.Length > 0)
@@ -438,9 +499,30 @@ public static class Widgets
                 DrawText(draw, F.Body, new Vector2(rowMin.X + inset, cy - t.Y / 2f),
                          option.Enabled ? Theme.TextPrimary : Theme.TextDisabled, option.Text);
                 draw.PopClipRect();
+
+                // What the row says about itself, beside the list and level with the row. The
+                // keys' row when they have one, otherwise the pointer's — never both.
+                bool speaks = _comboCursor >= 0 ? reached : hovered;
+                if (speaks && option.Info is { Length: > 0 } info)
+                {
+                    // To the right when there is room for it, and growing upwards from a
+                    // row low in the window, so it never runs off an edge: its height is
+                    // not known until it has been drawn.
+                    float room = Layout.S(320) + Layout.S(24);
+                    bool toLeft = listRight + Layout.S(6) + room > display.X;
+                    bool upwards = rowMax.Y > display.Y * 0.6f;
+                    ImGui.SetNextWindowPos(
+                        new Vector2(toLeft ? listMin.X - Layout.S(6) : listRight + Layout.S(6), upwards ? rowMax.Y : rowMin.Y),
+                        ImGuiCond.Always, new Vector2(toLeft ? 1f : 0f, upwards ? 1f : 0f));
+                    ShowTooltip(info);
+                }
             }
             ImGui.EndPopup();
         }
+        else if (_openCombo == id) _openCombo = null;
+
+        // Asked for by Esc between frames; spent whether or not a list was there to take it.
+        if (_openCombo is null || _openCombo == id) _comboCloseAsked = false;
 
         ImGui.PopStyleVar(2);
         return changed;
@@ -472,7 +554,8 @@ public static class Widgets
     /// opens a list of its own under it. True when it was clicked. Disabled, it keeps its
     /// value in view and takes no clicks; saying why is the caller's business.
     /// </summary>
-    public static bool ComboFace(string id, string preview, Vector2 size, bool enabled, out Vector2 min)
+    public static bool ComboFace(string id, string preview, Vector2 size, bool enabled, out Vector2 min,
+                                 Vector4? previewColour = null)
     {
         min = ImGui.GetCursorScreenPos();
         bool clicked = ImGui.InvisibleButton(id, size) && enabled;
@@ -489,7 +572,7 @@ public static class Widgets
         var textSize = Measure(F.Body, preview);
         draw.PushClipRect(min, min + new Vector2(size.X - pad - chevron - Layout.S(4), size.Y), true);
         DrawText(draw, F.Body, new Vector2(min.X + pad, min.Y + (size.Y - textSize.Y) / 2f),
-                 enabled ? Theme.TextPrimary : Theme.TextDisabled, preview);
+                 !enabled ? Theme.TextDisabled : previewColour ?? Theme.TextPrimary, preview);
         draw.PopClipRect();
         Icons.Draw(draw, Icon.ChevronDown, new Vector2(min.X + size.X - pad - chevron, min.Y + (size.Y - chevron) / 2f),
                    chevron, enabled ? Theme.TextSecondary : Theme.TextDisabled);

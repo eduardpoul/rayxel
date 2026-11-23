@@ -584,14 +584,18 @@ public static class BottomBar
     }
 
     /// <summary>
-    /// The rows every technique has: which one, the variant it is set to, and what is
-    /// really running when that can differ from what was asked.
+    /// The rows every technique has: which one, and the variant it is set to.
+    /// <para>
+    /// What is really running has no row of its own. It is the chosen variant, and where it
+    /// is not — DLSS left to choose for itself, or the driver overriding the choice — the
+    /// variant's box shows both, asked and running, and the list marks the one that runs.
+    /// </para>
     /// </summary>
     private static void TechniqueRows(AppModel model, string id, IReadOnlyList<Technique> techniques,
                                       Technique current, string extraInfo, Action<Technique> select)
     {
-        // The list: a name and its cost, one line each. One that cannot be used stays in
-        // it, greyed, with its reason on an info mark instead of a cost it does not have.
+        // The list: a name and its cost, one line each, and beside the list what the row
+        // under the pointer or the keys is. One that cannot be used stays in it, greyed.
         var items = new Widgets.ComboItem[techniques.Count];
         int index = 0;
         bool anyOtherUsable = false;
@@ -599,57 +603,74 @@ public static class BottomBar
         {
             var technique = techniques[i];
             string? why = technique.Unavailable();
-            items[i] = new(technique.Short(), why is null ? technique.CostText : "", why is null, why);
+            items[i] = new(technique.Short(), why is null ? technique.CostText : "", why is null, ItemInfo(technique, why));
             if (ReferenceEquals(technique, current)) index = i;
             else if (why is null) anyOtherUsable = true;
         }
 
-        bool open = model.OpenTechniqueList;
-        model.OpenTechniqueList = false;
+        int openAt = Math.Min(model.OpenTechniqueAt, items.Length - 1);
+        model.OpenTechniqueAt = -1;
 
         // Amber when there is nothing here to choose between: that is then the thing to read.
-        float width = BeginRow(Strings.T("tvTechnique"), true, TechniqueInfo(techniques, current, extraInfo),
+        float width = BeginRow(Strings.T("tvTechnique"), true, TechniqueInfo(techniques, extraInfo),
                                warning: !anyOtherUsable, shown: model.ShowTechniqueInfo);
-        if (Widgets.Combo(id, items[index].Text, items, index, out int chosen, width, true, open))
+        if (Widgets.Combo(id, items[index].Text, items, index, out int chosen, width, true, openAt))
             select(techniques[chosen]);
 
-        if (current.Variants.Count > 0)
-        {
-            // Greyed when there is nothing for it to set: the technique cannot be used, or
-            // the variants are only on show beside something that is off.
-            bool settable = current.Usable && !current.VariantsLocked;
-            width = BeginRow(Strings.T(current.VariantsLabel), settable, current.VariantsInfo());
+        if (current.Variants.Count == 0) return;
 
-            string? asked = current.Variant();
-            int variant = 0;
-            var names = new string[current.Variants.Count];
-            for (int i = 0; i < names.Length; i++)
-            {
-                names[i] = current.Variants[i].Text;
-                if (current.Variants[i].Id == asked) variant = i;
-            }
-            if (Widgets.Combo(id + "variant", names[variant], names, variant, out int picked, width, settable))
-                current.SetVariant(current.Variants[picked].Id);
+        // Greyed when there is nothing for it to set: the technique cannot be used, or the
+        // variants are only on show beside something that is off.
+        bool settable = current.Usable && !current.VariantsLocked;
+        string? asked = current.Variant();
+        var running = current.Running();
+
+        var variants = new Widgets.ComboItem[current.Variants.Count];
+        int variant = 0;
+        for (int i = 0; i < variants.Length; i++)
+        {
+            var v = current.Variants[i];
+            // The one that is running says so in the list, whichever one was asked for.
+            variants[i] = new(v.Text, running?.Text == v.Text ? Strings.T("tvRunning").ToLowerInvariant() : "",
+                              true, current.VariantInfo(v.Id));
+            if (v.Id == asked) variant = i;
         }
 
-        // Amber when something overrode the choice, because the row above is then not
-        // being obeyed; what overrode it is behind the info button.
-        if (current.Running() is { } running)
-            TextRow(Strings.T("tvRunning"), running.Text,
-                    running.Overridden is null ? Theme.TextSecondary : Theme.Caution,
-                    running.Overridden, warning: true);
+        // Asked and running side by side when they differ — amber when the difference is
+        // someone else's doing, and then the info button says whose.
+        string preview = variants[variant].Text;
+        bool differs = running is { } r && r.Text != preview;
+        if (differs) preview = $"{preview} → {running!.Value.Text}";
+        string? overridden = running?.Overridden;
+
+        // A list that cannot be opened cannot speak for its rows, so the label does.
+        width = BeginRow(Strings.T(current.VariantsLabel), settable,
+                         overridden ?? (settable ? null : current.VariantInfo(asked ?? "")),
+                         warning: overridden is not null);
+        int variantAt = settable ? Math.Min(model.OpenVariantAt, variants.Length - 1) : -1;
+        model.OpenVariantAt = -1;
+        if (Widgets.Combo(id + "variant", preview, variants, variant, out int picked, width, settable, variantAt,
+                          overridden is not null ? Theme.Caution : null))
+            current.SetVariant(current.Variants[picked].Id);
     }
 
     /// <summary>
-    /// What the technique's info button says: the chosen one's full name and what it does,
-    /// anything the caller adds, and then each one that cannot be used with its reason —
-    /// those sharing a reason named together, so a sentence is not repeated per technique.
+    /// What a technique's row in the list says about itself: its full name, what it does
+    /// and what it costs — or, for one that cannot be used, why not in place of the cost.
     /// </summary>
-    private static string TechniqueInfo(IReadOnlyList<Technique> techniques, Technique current, string extra)
+    private static string ItemInfo(Technique technique, string? why) =>
+        $"{technique.Name()}\n{technique.Description()}\n" +
+        (why ?? string.Format(Strings.T("costPerFrame"), technique.CostText));
+
+    /// <summary>
+    /// What the technique's info button says, which is what no single row of the list
+    /// does: anything the caller adds about the choice as a whole, and each technique that
+    /// cannot be used with its reason — those sharing a reason named together, so a
+    /// sentence is not repeated per technique. Empty when there is neither.
+    /// </summary>
+    private static string TechniqueInfo(IReadOnlyList<Technique> techniques, string extra)
     {
-        var text = new System.Text.StringBuilder();
-        text.Append(current.Name()).Append('\n').Append(current.Description());
-        if (extra.Length > 0) text.Append('\n').Append(extra);
+        var text = new System.Text.StringBuilder(extra);
 
         string? reason = null;
         foreach (var technique in techniques)
@@ -661,7 +682,8 @@ public static class BottomBar
             else
             {
                 if (reason is not null) text.Append(": ").Append(reason);
-                text.Append("\n\n").Append(technique.Short());
+                if (text.Length > 0) text.Append("\n\n");
+                text.Append(technique.Short());
                 reason = why;
             }
         }
@@ -696,21 +718,6 @@ public static class BottomBar
 
         ImGui.SetCursorScreenPos(new Vector2(pos.X + inset + labelWidth, pos.Y));
         return control;
-    }
-
-    /// <summary>A row whose right-hand side is a statement rather than a control.</summary>
-    private static void TextRow(string label, string value, Vector4 colour, string? info = null, bool warning = false)
-    {
-        var f = Widgets.F;
-        float width = BeginRow(label, true, info, warning);
-        var at = ImGui.GetCursorScreenPos();
-        float row = Layout.S(RowHeight);
-
-        // Starts where a combo box's own text does, so the column reads as one.
-        var size = Widgets.Measure(f.Body, value);
-        Widgets.DrawText(ImGui.GetWindowDrawList(), f.Body,
-                         new Vector2(at.X + Layout.S(11), at.Y + (row - size.Y) / 2f), colour, value);
-        ImGui.Dummy(new Vector2(width, row));
     }
 
     /// <summary>A sentence under the rows, across the flyout's width.</summary>

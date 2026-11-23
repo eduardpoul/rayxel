@@ -97,11 +97,14 @@ Move the mouse over the picture to bring up the control bar:
   picture arrives uncompressed, amber when a codec carries it. Opens the list of modes,
   where every mode says `raw` or `zip`.
 - **Scaling** — rows of settings, as in a game's graphics menu. The technique comes from a
-  dropdown that gives each one's cost per frame: off, NIS, RTX VSR, DLSS, FSR. One that
-  cannot be used stays in it, greyed, with the reason on its info mark. Under it is
-  whatever belongs to the one chosen: NIS's sharpness, DLSS's model and which one the
-  driver actually ran. What a row has to explain is behind the **ⓘ** beside its label.
-  FSR has its place in the list but no backend in this build yet.
+  dropdown that gives each one's cost per frame: off, NIS, RTX VSR, DLSS, FSR. Point at a
+  row, or walk the list with the arrow keys, and what that row is appears beside it; one
+  that cannot be used stays in the list, greyed, and says why there. Under it is whatever
+  belongs to the one chosen: NIS's sharpness, DLSS's model. When the model running is not
+  the one asked for — DLSS choosing for itself, or the driver overriding — the box shows
+  both, `L → M`, and the list marks the one that runs. What concerns a row as a whole is
+  behind the **ⓘ** beside its label. FSR has its place in the list but no backend in this
+  build yet.
 - **Frame generation** — the same rows for the same kind of choice: the generator, and how
   many frames it shows for each one that arrives. **Nothing is behind it yet**: it needs
   Direct3D 12, so the generators are greyed and it can only be off. The info marks say
@@ -117,6 +120,7 @@ Move the mouse over the picture to bring up the control bar:
 | `M` | capture-mode list |
 | `1` / `2` / `3` / `4` / `5` | no scaling / NIS / RTX VSR / DLSS / FSR; one that cannot be used opens the list, which says why |
 | `G` | frame generation |
+| `↑` / `↓`, `Enter` | in an open list: walk its rows, take the one you are on; `Esc` closes the list |
 | `H` | RTX Video HDR |
 | `[` / `]` | NIS sharpness |
 | `F11` | window → borderless full screen → topmost full screen |
@@ -150,7 +154,7 @@ Everything is optional; the app needs no arguments.
 | `--console` | attach to the terminal it was started from and print the log there |
 | `--verbose` | debug-level logging |
 | `--shot=<file.png>` | render for a few seconds, save the frame as a PNG, and exit |
-| `--screen=<name>` | force a state for inspection: `splash`, `devices`, `app`, `nosignal`, `busy`, `composed`, `modes`, `scaler`, `scaler-list`, `scaler-info`, `framegen`, `framegen-list`, `framegen-info`, `more`, `quit` |
+| `--screen=<name>` | force a state for inspection: `splash`, `devices`, `app`, `nosignal`, `busy`, `composed`, `modes`, `scaler`, `scaler-list`, `scaler-variants`, `scaler-info`, `framegen`, `framegen-list`, `framegen-info`, `more`, `quit` |
 
 `--shot` saves the back buffer rather than the screen, so it works even when the window is
 covered or on a display nobody is looking at.

@@ -75,13 +75,18 @@ public sealed class Technique
     /// </summary>
     public bool VariantsLocked { get; init; }
 
-    /// <summary>What there is to say about the variant asked for, for its info button; null for nothing.</summary>
-    public Func<string?> VariantsInfo { get; init; } = () => null;
+    /// <summary>
+    /// What there is to say about one variant, by its id: shown beside the list while that
+    /// row is under the pointer or the arrow keys. Null for nothing.
+    /// </summary>
+    public Func<string, string?> VariantInfo { get; init; } = _ => null;
 
     /// <summary>
-    /// What is actually running, when that can differ from what was asked for. When
-    /// something overrode the choice, <c>Overridden</c> says what did, as a sentence — and
-    /// that is worth a colour, because the setting above it is then not being obeyed.
+    /// What is actually running, by the name of one of <see cref="Variants"/>, when that
+    /// can differ from what was asked for. The menu has no row for it: the variant's own
+    /// box shows the two side by side when they differ. When something overrode the
+    /// choice, <c>Overridden</c> says what did, as a sentence — and that is worth a colour,
+    /// because the setting is then not being obeyed.
     /// </summary>
     public Func<(string Text, string? Overridden)?> Running { get; init; } = () => null;
 
@@ -391,6 +396,7 @@ public sealed class AppModel
                 new(nameof(DlssModel.L), "L"), new(nameof(DlssModel.M), "M")
             ],
             Variant = () => Renderer.Dlss?.Model.ToString(),
+            VariantInfo = id => Strings.T("dlssInfo" + id),
             SetVariant = id =>
             {
                 if (Renderer.Dlss is not { } dlss || !Enum.TryParse<DlssModel>(id, out var asked)) return;
@@ -400,7 +406,7 @@ public sealed class AppModel
             // Not always what was asked for: the driver's own "DLSS override" names a
             // network for every program and wins.
             Running = () => Renderer.Dlss is { ModelInUse: { } letter } dlss
-                ? (letter, dlss.ModelForced ? Strings.T("dlssForcedInfo") : null) : null
+                ? (letter, dlss.ModelForced ? string.Format(Strings.T("dlssForcedInfo"), letter) : null) : null
         },
         // FSR has no backend in this build. To plug one in: make Unavailable read it, give
         // the measured CostMs, wire Variant and SetVariant to it, and teach SelectScaler in
@@ -423,11 +429,15 @@ public sealed class AppModel
     public Technique Upscaler => Upscalers[Math.Clamp(ScalerIndex, 0, Upscalers.Count - 1)];
 
     /// <summary>
-    /// Drops open the list of techniques in whichever of the two flyouts is up, once. For a
-    /// key that asked for a technique that cannot be used — the list is where it says why —
-    /// and for capturing that list without a click.
+    /// Drops open the list of techniques in whichever of the two flyouts is up, once, with
+    /// the arrow keys already on this row; -1 for not at all. For a key that asked for a
+    /// technique that cannot be used — its row is where it says why — and for capturing the
+    /// list without a click.
     /// </summary>
-    public bool OpenTechniqueList;
+    public int OpenTechniqueAt = -1;
+
+    /// <summary>Diagnostic only: the same for the list of the chosen technique's variants.</summary>
+    public int OpenVariantAt = -1;
 
     /// <summary>Diagnostic only: shows the technique row's info tooltip without a pointer over it.</summary>
     public bool ShowTechniqueInfo;
@@ -452,7 +462,7 @@ public sealed class AppModel
             VariantsLabel = "tvFrames",
             Variants = FrameMultipliers,
             Variant = () => FrameMultiplierId,
-            VariantsInfo = FrameGenFacts,
+            VariantInfo = FrameGenFacts,
             VariantsLocked = true
         },
         new()
@@ -465,7 +475,7 @@ public sealed class AppModel
             VariantsLabel = "tvFrames",
             Variants = FrameMultipliers,
             Variant = () => FrameMultiplierId,
-            VariantsInfo = FrameGenFacts
+            VariantInfo = FrameGenFacts
         },
         new()
         {
@@ -477,7 +487,7 @@ public sealed class AppModel
             VariantsLabel = "tvFrames",
             Variants = FrameMultipliers,
             Variant = () => FrameMultiplierId,
-            VariantsInfo = FrameGenFacts
+            VariantInfo = FrameGenFacts
         }
     ];
 
@@ -529,15 +539,15 @@ public sealed class AppModel
         Pump.CurrentFps > 0 && factor > 1 ? 1000.0 / Pump.CurrentFps * (factor - 1) / factor : 0;
 
     /// <summary>
-    /// What the multiplier comes to, for its info button: the rate it makes against the
-    /// display's own, and the least it adds to the delay. Both are arithmetic and worded as
-    /// such; the GPU time nobody has measured, and it says that too.
+    /// What a multiplier comes to: the rate it makes against the display's own, and the
+    /// least it adds to the delay. Both are arithmetic and worded as such; the GPU time
+    /// nobody has measured, and it says that too.
     /// </summary>
-    private string? FrameGenFacts()
+    private string? FrameGenFacts(string multiplierId)
     {
         if (Pump.CurrentFps <= 0) return null;
 
-        var (factor, hz) = FrameGenOutput(FrameMultiplierId);
+        var (factor, hz) = FrameGenOutput(multiplierId);
         string text = $"{Strings.Num(Pump.CurrentFps, "0.##")} → {Strings.Num(hz, "0.##")} {Strings.T("hz")}";
         if (DisplayHz > 0) text += " · " + string.Format(Strings.T("fgDisplay"), DisplayHz);
         // Frames past the display's own rate are generated and never shown.

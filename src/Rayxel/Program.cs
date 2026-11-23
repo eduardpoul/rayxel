@@ -302,10 +302,12 @@ try
     if (forcedScreen == "modes") model.Flyout = Flyout.Mode;
     if (forcedScreen == "scaler") model.Flyout = Flyout.Scaler;
     if (forcedScreen == "framegen") model.Flyout = Flyout.FrameGen;
-    // The same two with the list of techniques dropped open: what each one costs, and what
-    // one that cannot be used says about itself, is the thing to inspect.
-    if (forcedScreen == "scaler-list") { model.Flyout = Flyout.Scaler; model.OpenTechniqueList = true; }
-    if (forcedScreen == "framegen-list") { model.Flyout = Flyout.FrameGen; model.OpenTechniqueList = true; }
+    // The same two with the list of techniques dropped open and the keys on its last row:
+    // what each one costs, and what one that cannot be used says about itself, is the thing
+    // to inspect.
+    if (forcedScreen == "scaler-list") { model.Flyout = Flyout.Scaler; model.OpenTechniqueAt = int.MaxValue; }
+    if (forcedScreen == "framegen-list") { model.Flyout = Flyout.FrameGen; model.OpenTechniqueAt = int.MaxValue; }
+    if (forcedScreen == "scaler-variants") { model.Flyout = Flyout.Scaler; model.OpenVariantAt = int.MaxValue; }
     // And with the technique's info tooltip up, which otherwise needs a pointer over its mark.
     if (forcedScreen == "scaler-info") { model.Flyout = Flyout.Scaler; model.ShowTechniqueInfo = true; }
     if (forcedScreen == "framegen-info") { model.Flyout = Flyout.FrameGen; model.ShowTechniqueInfo = true; }
@@ -1089,7 +1091,7 @@ void RunLoop()
                 Log.Warn($"scaler {want} ({asked.Short()}) is not available here; nothing changed");
                 model.Flyout = Flyout.None;
                 model.ToggleFlyout(Flyout.Scaler);
-                model.OpenTechniqueList = true;
+                model.OpenTechniqueAt = want;
             }
             else
                 try { SelectScaler(want); } catch (Exception ex) { Log.Error("scaler switch failed", ex); }
@@ -1732,6 +1734,8 @@ void HandleKey(int vk, IntPtr h)
             // Esc never closes the app. It backs out of the innermost thing that is open,
             // and once nothing is nested it toggles the bar: same key in, same key out.
             if (model is { ConfirmQuit: true }) { model.ConfirmQuit = false; break; }
+            // A dropped-open list is nested inside its flyout, so it goes first.
+            if (Widgets.ComboOpen) { Widgets.CloseCombo(); break; }
             if (model is not null && model.Flyout != Flyout.None) { model.Flyout = Flyout.None; break; }
             // From the picker it goes back to the picture, if there is one to go back to.
             if (model is { Screen: Screen.Devices } && pump?.State == CaptureState.Streaming) { model.Screen = Screen.App; break; }
