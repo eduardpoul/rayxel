@@ -3,6 +3,10 @@ bin/
 obj/
 publish/
 
+# rayxel-send, the Steam Deck sender: built in a container, the binary lands in out/
+src/rayxel-send/build/
+src/rayxel-send/out/
+
 # Rolling logs. The app writes these next to the settings now, but older builds
 # dropped them beside the executable.
 logs/
