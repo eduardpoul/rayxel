@@ -265,6 +265,9 @@ public sealed class FramePump : IDisposable, INetSink
                 Log.Warn($"{format.Name} has no direct render path in this demo; the picture will be blank. " +
                          "Pick an NV12 or P010 mode to see video.");
             }
+            // HDR10 is always ten bits, so an 8-bit mode is SDR whatever else it says.
+            _renderer.SourceReportsHdr = tenBit && MfGuids.SaysHdr10(actual);
+            if (_renderer.SourceReportsHdr) Log.Info("the device says this mode is HDR10 (PQ, BT.2020)");
             _renderer.ConfigureVideo((int)w, (int)h, tenBit);
 
             ResetStats();
@@ -313,6 +316,7 @@ public sealed class FramePump : IDisposable, INetSink
         // What the decoder produces, whatever is on the wire.
         ActiveSubtype = "NV12";
         ConverterInserted = false;
+        _renderer.SourceReportsHdr = false;
         _renderer.ConfigureVideo(mode.Width, mode.Height, false);
         Volatile.Write(ref _netSize, PackSize(mode.Width, mode.Height));
         Volatile.Write(ref _pendingNetSize, 0);

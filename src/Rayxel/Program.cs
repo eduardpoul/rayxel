@@ -27,6 +27,9 @@ string? netAddress = null;
 FlowView startFlow = FlowView.Off;
 string? shotPath = null;
 bool shotCompares = false;
+bool testPattern = false, testPatternHdr = false;
+bool? forcedHdrAsIs = null;
+int forcedSourceRange = -1;
 string? forcedScreen = null;
 string? forcedMode = null;
 int forcedScaler = -1;
@@ -36,6 +39,7 @@ bool usbCheck = false;
 double benchSeconds = 0;
 bool startWithTelemetry = false;
 bool noAutoHdr = false;
+bool forceHdr = false;
 bool startBorderless = false;
 // Present once per captured frame (the default), or on every swapchain slot as before.
 // Kept switchable because "is it smoother?" is a comparison, and a comparison needs both.
@@ -51,10 +55,23 @@ foreach (var arg in args)
     // Diagnostic: run for a few seconds, write what was rendered to a PNG, exit. Captures
     // the back buffer rather than the screen, so it works when the window is not visible.
     else if (arg.StartsWith("--shot=", StringComparison.OrdinalIgnoreCase)) shotPath = arg[7..];
-    // With --shot: the same frame written three ways (-none, -vsr, -dlss in the name)
+    // With --shot: the same frame written several ways (-none, -vsr, -dlss in the name, and
+    // -dlss-K-still and so on for each DLSS network on that frame held still)
     // instead of the one picture. Wants --scaler=dlss, so that DLSS is already running, and
     // --no-auto-hdr, so that the three are the same kind of picture.
     else if (arg is "--compare") shotCompares = true;
+    // A picture of known colours in place of the video; with --shot, what came out of it
+    // is written beside the screenshot as numbers (.csv). For measuring what a path does
+    // to colour.
+    else if (arg is "--pattern") testPattern = true;
+    // The same with the picture an HDR10 source would send.
+    else if (arg is "--pattern=hdr") { testPattern = true; testPatternHdr = true; }
+    // What the source is taken to be, whatever it says of itself: --source=auto|sdr|hdr.
+    else if (arg.StartsWith("--source=", StringComparison.OrdinalIgnoreCase))
+        forcedSourceRange = arg[9..].ToLowerInvariant() switch { "auto" => 0, "sdr" => 1, "hdr" => 2, _ => -1 };
+    // And what is done with an HDR source: --hdr-source=asis shows it untouched, =sdr converts it.
+    else if (arg.StartsWith("--hdr-source=", StringComparison.OrdinalIgnoreCase))
+        forcedHdrAsIs = arg[13..].ToLowerInvariant() switch { "asis" => true, "sdr" => false, _ => null };
     else if (arg is "--tele") startWithTelemetry = true;
     // Runs a fixed measurement and exits: warm up, record every frame for N seconds,
     // print percentiles. For comparing one pipeline configuration against another, which
@@ -66,6 +83,8 @@ foreach (var arg in args)
     // Starts on our own shader instead of following the Windows HDR state, so the driver
     // path can be taken out of the picture when comparing what is actually on screen.
     else if (arg is "--no-auto-hdr") noAutoHdr = true;
+    // The opposite: RTX Video HDR on from the start whatever was remembered, for measuring it.
+    else if (arg is "--hdr") forceHdr = true;
     else if (arg is "--borderless") startBorderless = true;
     // Pins the starting mode, as --mode=1280x720@60. A comparison needs a control, and
     // "whatever was remembered from last time" is not one.
@@ -247,6 +266,10 @@ try
 
     renderer = new Renderer();
     renderer.Initialize(hwnd, WindowWidth, WindowHeight);
+    renderer.TestPattern = testPattern;
+    renderer.TestPatternHdr = testPatternHdr;
+    renderer.SourceRange = forcedSourceRange >= 0 ? forcedSourceRange : Math.Clamp(settings.SourceRange, 0, 2);
+    renderer.HdrAsIs = forcedHdrAsIs ?? settings.HdrSourceAsIs;
     if (renderer.Flow is { } startingFlow) startingFlow.View = startFlow;
 
     pump = new FramePump(active.Device, renderer);
@@ -276,7 +299,7 @@ try
     if (renderer.Nis is { } nisScaler) nisScaler.Sharpness = settings.NisSharpness;
     if (renderer.Dlss is { } dlssScaler)
         dlssScaler.Model = forcedDlssModel
-            ?? (Enum.IsDefined((DlssModel)settings.DlssModel) ? (DlssModel)settings.DlssModel : DlssModel.Auto);
+            ?? (Enum.IsDefined((DlssModel)settings.DlssModel) ? (DlssModel)settings.DlssModel : DlssModel.L);
 
     // Audio endpoints are listed once here and refreshed when the user opens a combo, so a
     // headset plugged in mid-session shows up without polling WASAPI every frame.
@@ -345,7 +368,7 @@ try
 
     // Deferred: the video processor is only built once the first frame arrives, and the
     // HDR extension cannot be set before it exists.
-    autoHdrPending = renderer.DisplaySupportsHdr && !noAutoHdr;
+    autoHdrPending = renderer.DisplaySupportsHdr && (!noAutoHdr || forceHdr);
     Log.Info(autoHdrPending
         ? "Windows has this display in HDR - will enable HDR output once the first frame lands"
         : "Windows has this display in SDR - HDR toggle disabled");
@@ -1196,7 +1219,7 @@ void RunLoop()
                 catch (Exception ex) { Log.Error("restoring the scaler failed", ex); }
             }
             // Only the driver path can produce HDR, so a remembered NIS choice takes it away.
-            if (autoHdrPending && settings.Hdr && !renderer.UseNis && !renderer.UseDlss)
+            if (autoHdrPending && (settings.Hdr || forceHdr) && !renderer.UseNis && !renderer.UseDlss)
             {
                 try { ToggleHdr(); } catch (Exception ex) { Log.Error("auto HDR failed", ex); }
             }
@@ -1268,6 +1291,7 @@ void RunLoop()
         {
             if (shotCompares) renderer.SaveComparison(shotPath);
             else renderer.SaveBackBuffer(shotPath);
+            if (testPattern) renderer.SavePatternReadings(Path.ChangeExtension(shotPath, ".csv"));
             // With the motion drawn in the picture, the vectors themselves go beside it.
             renderer.SaveFlow(Path.ChangeExtension(shotPath, ".flow"));
             shotPath = null;
@@ -1914,6 +1938,21 @@ void ToggleDlss()
 
 void ToggleHdr()
 {
+    // With an HDR source the switch means something else: the source as it is, or
+    // converted to SDR. RTX Video HDR, which makes HDR out of SDR, does not come into it.
+    if (renderer is { SourceIsHdr: true })
+    {
+        if (!renderer.DisplaySupportsHdr)
+        {
+            Log.Warn("the source is HDR but Windows has this display in SDR: it is converted to SDR, and cannot be shown as it is");
+            return;
+        }
+        renderer.HdrAsIs = !renderer.HdrAsIs;
+        model?.Touch();
+        Log.Info($"HDR source now {(renderer.HdrAsIs ? "shown as it is" : "converted to SDR")}");
+        return;
+    }
+
     var p = renderer?.Processor;
     if (p is null || !p.Available) { Log.Warn("RTX HDR unavailable: no D3D11 video device"); return; }
     if (!renderer!.DisplaySupportsHdr)

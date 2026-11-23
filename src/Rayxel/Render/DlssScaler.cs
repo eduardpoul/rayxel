@@ -137,8 +137,15 @@ public sealed unsafe class DlssScaler : IDisposable
     /// <summary>
     /// The network asked for. Changing it takes effect with the next frame, which is the
     /// first of a new history: what one network accumulated is no use to another.
+    /// <para>
+    /// L unless told otherwise, and not DLSS's own pick. For the enlargements a video
+    /// usually gets, DLSS would take K, and K leaves a compressed picture much as it came:
+    /// the codec's blocks and the stair-steps are still there. L and M both clear them; M
+    /// smooths fine regular detail away with them, L keeps it. On an RTX 5080, taking
+    /// 1280x800 to 2304x1440, they cost 0.85 (K), 1.10 (M) and 1.30 ms (L) a frame.
+    /// </para>
     /// </summary>
-    public DlssModel Model { get; set; }
+    public DlssModel Model { get; set; } = DlssModel.L;
 
     /// <summary>
     /// The network in use, as a letter, by NGX's own account while it was being built;

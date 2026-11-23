@@ -305,7 +305,10 @@ public sealed class AppModel
     {
         s.Language = Strings.Current;
         s.Scaler = ScalerIndex;
-        s.Hdr = HdrOn;
+        // The switch has two meanings and each keeps its own setting.
+        if (!Renderer.SourceIsHdr) s.Hdr = HdrOn;
+        s.HdrSourceAsIs = Renderer.HdrAsIs;
+        s.SourceRange = Renderer.SourceRange;
         s.NisSharpness = Renderer.Nis?.Sharpness ?? s.NisSharpness;
         s.DlssModel = (int)(Renderer.Dlss?.Model ?? (DlssModel)s.DlssModel);
         s.OverlayNits = OverlayNits;
@@ -340,11 +343,12 @@ public sealed class AppModel
     // ── upscalers and frame generators ───────────────────────────────────────────
 
     // Measured on this machine with --bench rather than taken from a vendor sheet: against
-    // our own blit NIS is free to inside the noise and RTX VSR costs 4.1 ms. DLSS is 1.1 ms
-    // and the motion estimate it cannot do without 0.35, taking 1280x800 to 2304x1440 on an
-    // RTX 5080 with the network the driver picked. Shown as fixed figures, because a cost
-    // that moves while it is being read cannot be compared with the one beside it.
-    private const double NisCostMs = 0.1, VsrCostMs = 4.1, DlssCostMs = 1.5;
+    // our own blit NIS is free to inside the noise and RTX VSR costs 4.1 ms. DLSS with its
+    // model L, and the motion estimate it cannot do without, add 1.1 ms between them (1.69
+    // a frame against 0.62), taking 1280x800 to 2304x1440 on an RTX 5080. Shown as fixed
+    // figures, because a cost that moves while it is being read cannot be compared with
+    // the one beside it.
+    private const double NisCostMs = 0.1, VsrCostMs = 4.1, DlssCostMs = 1.1;
 
     private List<Technique>? _upscalers, _frameGenerators;
 
@@ -629,7 +633,11 @@ public sealed class AppModel
     /// <summary>Frames that never reached the screen, whoever lost them: the network or us.</summary>
     public long FramesLost => Shown.FramesDropped + (ShownNet?.FramesLost ?? 0);
 
-    public bool HdrOn => Renderer.Processor?.HdrEnabled == true;
+    /// <summary>
+    /// The HDR switch's position. For an SDR source: RTX Video HDR is making an HDR
+    /// picture of it. For an HDR source: it is going to the display as it is.
+    /// </summary>
+    public bool HdrOn => Renderer.SourceIsHdr ? Renderer.PassingHdrThrough : Renderer.Processor?.HdrEnabled == true;
 
     public bool DriverPathAvailable => Renderer.Processor is { Available: true };
 
@@ -639,6 +647,12 @@ public sealed class AppModel
     /// </summary>
     public (bool Can, string Reason) HdrReachable()
     {
+        if (Renderer.SourceIsHdr)
+        {
+            if (!Renderer.DisplaySupportsHdr) return (false, Strings.T("hdrSrcNoDisplay"));
+            if (Renderer.UseNis || Renderer.UseDlss) return (false, Strings.T("hdrSrcScaler"));
+            return (true, Renderer.HdrAsIs ? Strings.T("hdrSrcAsIs") : Strings.T("hdrSrcToSdr"));
+        }
         if (!DriverPathAvailable) return (false, Strings.T("hdrVendor"));
         if (!Renderer.DisplaySupportsHdr) return (false, Strings.T("hdrNa"));
         if (Renderer.UseNis || Renderer.UseDlss) return (false, Strings.T("hdrPath"));

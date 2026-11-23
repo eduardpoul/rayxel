@@ -110,7 +110,8 @@ Move the mouse over the picture to bring up the control bar:
   many frames it shows for each one that arrives. **Nothing is behind it yet**: it needs
   Direct3D 12, so the generators are greyed and it can only be off. The info marks say
   why, and what a multiplier would come to on this display.
-- **HDR** — RTX Video HDR on or off; explains itself when it is unavailable.
+- **HDR** — for an SDR source, RTX Video HDR on or off; for an HDR source, shown as it is
+  or converted to SDR. It explains itself when it is unavailable.
 - **Audio, telemetry, full screen**, and **…** for device, audio routing, HDR brightness,
   window mode and language.
 
@@ -206,6 +207,10 @@ and why.
   timestamps a frame and the monitor's after a present are both invisible; anything Rayxel
   cannot measure is shown as `n/a` rather than estimated.
 - **Intel VSR is written but has never run on Intel hardware.**
+- **An HDR source has only been tried as a test pattern.** Showing HDR10 as it is, and
+  converting it to SDR, are measured against a generated HDR10 picture; no capture card
+  passing real HDR was at hand. A card that passes HDR on without describing it has to be
+  told so: **…** → source range.
 - **DLSS works from estimated motion.** A game gives DLSS exact motion vectors, depth and a
   camera that shifts by a fraction of a pixel every frame; a video has none of these.
   Rayxel estimates the motion, supplies a flat depth, and cannot supply the shift, so DLSS
