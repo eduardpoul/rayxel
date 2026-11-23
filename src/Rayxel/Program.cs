@@ -257,6 +257,7 @@ try
     model.Probed = probed;
     model.Active = active;
     model.DeviceNamed = deviceSelector is not null;
+    model.DisplayHz = Win32.MonitorRefreshHz(hwnd);
     model.SelectScaler = want => { pendingScaler = want; model!.Touch(); };
     model.ToggleHdr = () => pendingHdrToggle = true;
     model.SelectMode = (m, fps) => { try { pump!.Select(m, fps); } catch (Exception ex) { Log.Error("mode switch failed", ex); } };
@@ -300,6 +301,11 @@ try
     // Opens the states that need a click to reach, so they can be checked without one.
     if (forcedScreen == "modes") model.Flyout = Flyout.Mode;
     if (forcedScreen == "scaler") model.Flyout = Flyout.Scaler;
+    if (forcedScreen == "framegen") model.Flyout = Flyout.FrameGen;
+    // The same two with the list of techniques dropped open: what each one costs, and what
+    // one that cannot be used says about itself, is the thing to inspect.
+    if (forcedScreen == "scaler-list") { model.Flyout = Flyout.Scaler; model.OpenTechniqueList = true; }
+    if (forcedScreen == "framegen-list") { model.Flyout = Flyout.FrameGen; model.OpenTechniqueList = true; }
     if (forcedScreen == "more") model.Flyout = Flyout.More;
     if (forcedScreen == "quit") model.ConfirmQuit = true;
 
@@ -1070,7 +1076,20 @@ void RunLoop()
         if (pendingScaler >= 0)
         {
             int want = pendingScaler; pendingScaler = -1;
-            try { SelectScaler(want); } catch (Exception ex) { Log.Error("scaler switch failed", ex); }
+            // A key reaches here whatever the flyout would have allowed, so the same
+            // answer is given: an upscaler that cannot be used is not switched to.
+            // What the key gets instead is the list itself, dropped open: the row it asked
+            // for is there with its reason, which is more use than nothing happening.
+            var asked = want < model!.Upscalers.Count ? model.Upscalers[want] : null;
+            if (asked is not null && !asked.Usable)
+            {
+                Log.Warn($"scaler {want} ({asked.Short()}) is not available here; nothing changed");
+                model.Flyout = Flyout.None;
+                model.ToggleFlyout(Flyout.Scaler);
+                model.OpenTechniqueList = true;
+            }
+            else
+                try { SelectScaler(want); } catch (Exception ex) { Log.Error("scaler switch failed", ex); }
         }
         if (pendingVsrToggle) { pendingVsrToggle = false; try { ToggleVsr(); } catch (Exception ex) { Log.Error("VSR toggle failed", ex); } }
         if (pendingHdrToggle) { pendingHdrToggle = false; try { ToggleHdr(); } catch (Exception ex) { Log.Error("HDR toggle failed", ex); } }
@@ -1654,8 +1673,15 @@ IntPtr WindowProcCore(IntPtr h, uint msg, IntPtr wParam, IntPtr lParam)
         // the window has been dragged to another one, or the display itself has changed.
         case Win32.WM_MOVE:
         case Win32.WM_DISPLAYCHANGE:
-            Layout.DisplayHeight = Win32.MonitorHeight(h);
+        {
+            // The monitor's rate is read only when its height changed or Windows says the
+            // display did: a window being dragged sends WM_MOVE for every pixel of the way.
+            int height = Win32.MonitorHeight(h);
+            if (model is not null && (height != Layout.DisplayHeight || msg == Win32.WM_DISPLAYCHANGE))
+                model.DisplayHz = Win32.MonitorRefreshHz(h);
+            Layout.DisplayHeight = height;
             break;
+        }
 
         // The window's own menu, from a right-click on the title bar or Alt+Space. With the
         // corner gear gone this is the only way back to the panel that does not need a
@@ -1734,10 +1760,14 @@ void HandleKey(int vk, IntPtr h)
                 _ => WindowKind.Windowed
             }; break;
 
+        // The upscalers, in the order the flyout lists them. One that cannot be used is
+        // turned away where the choice is applied, which opens the list that says why.
         case '1': pendingScaler = 0; break;
         case '2': pendingScaler = 1; break;
         case '3': pendingScaler = 2; break;
         case '4': pendingScaler = 3; break;
+        case '5': pendingScaler = 4; break;
+        case 'G': model?.ToggleFlyout(Flyout.FrameGen); break;
 
         // The original keys, kept because they are in muscle memory by now.
         case 'V': pendingVsrToggle = true; break;
@@ -1783,8 +1813,13 @@ void SelectScaler(int want)
         case 3:
             if (!renderer.DlssEnabled) ToggleDlss();
             break;
-        default:
+        case 2:
             if (p?.SuperResolutionEnabled != true) ToggleVsr();
+            break;
+        // An index with no backend behind it changes nothing, rather than falling through
+        // to some other scaler as an unknown number used to.
+        default:
+            Log.Warn($"scaler {want} has no backend in this build");
             break;
     }
 }

@@ -136,6 +136,46 @@ public static unsafe class Win32
         public uint Flags;
     }
 
+    /// <summary>MONITORINFOEXW: the same, followed by the display device's name.</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MONITORINFOEX
+    {
+        public uint cbSize;
+        public RECT Monitor, Work;
+        public uint Flags;
+        public fixed char Device[32];
+    }
+
+    /// <summary>DEVMODEW, of which only the two fields used here are named.</summary>
+    [StructLayout(LayoutKind.Explicit, Size = 220)]
+    private struct DEVMODE
+    {
+        [FieldOffset(68)] public ushort dmSize;
+        [FieldOffset(184)] public uint dmDisplayFrequency;
+    }
+
+    [DllImport("user32.dll", EntryPoint = "GetMonitorInfoW")]
+    private static extern bool GetMonitorInfoEx(IntPtr monitor, MONITORINFOEX* info);
+    [DllImport("user32.dll")]
+    private static extern bool EnumDisplaySettingsW(char* device, int modeNumber, DEVMODE* mode);
+
+    /// <summary>
+    /// The refresh rate Windows has set for the monitor the window is mostly on, in Hz, or 0
+    /// if it cannot be read. The configured rate: with VRR the panel may be refreshing more
+    /// slowly at any given moment, but never faster than this.
+    /// </summary>
+    public static int MonitorRefreshHz(IntPtr hwnd)
+    {
+        const int ENUM_CURRENT_SETTINGS = -1;
+        var info = new MONITORINFOEX { cbSize = (uint)sizeof(MONITORINFOEX) };
+        if (!GetMonitorInfoEx(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &info)) return 0;
+
+        var mode = new DEVMODE { dmSize = (ushort)sizeof(DEVMODE) };
+        if (!EnumDisplaySettingsW(info.Device, ENUM_CURRENT_SETTINGS, &mode)) return 0;
+        // 0 and 1 both mean "the hardware's default", which is not a rate.
+        return mode.dmDisplayFrequency > 1 ? (int)mode.dmDisplayFrequency : 0;
+    }
+
     public const int GWL_STYLE = -16;
     public const uint MONITOR_DEFAULTTONEAREST = 2;
     public const uint SWP_NOZORDER = 0x0004, SWP_FRAMECHANGED = 0x0020, SWP_NOACTIVATE = 0x0010;

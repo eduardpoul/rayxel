@@ -6,7 +6,7 @@ namespace Rayxel.Ui;
 public enum Icon
 {
     ChevronDown, ChevronUp, Close, More, Volume, Muted, Pulse,
-    FullScreen, BackToWindow, Scale, Warning, Camera, MonitorOff, Lock
+    FullScreen, BackToWindow, Scale, Frames, Warning, Camera, MonitorOff, Lock
 }
 
 /// <summary>
@@ -82,6 +82,13 @@ public static class Icons
                 p.Line(13.5f, 2.5f, 9, 7);
                 p.Line3(6.5f, 13.5f, 2.5f, 13.5f, 2.5f, 9.5f);
                 p.Line(2.5f, 13.5f, 7, 9);
+                break;
+
+            // One frame in front and the edge of another behind it: a frame made from frames.
+            case Icon.Frames:
+                p.Rect(2.5f, 5.5f, 10.5f, 13.5f, 1.2f);
+                p.Move(5.5f, 3.5f); p.To(5.5f, 2.5f); p.To(13.5f, 2.5f); p.To(13.5f, 10.5f); p.To(12.5f, 10.5f);
+                p.Stroke();
                 break;
 
             case Icon.Warning:

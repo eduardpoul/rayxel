@@ -23,17 +23,13 @@ namespace Rayxel.Ui;
 /// </summary>
 public static class BottomBar
 {
-    // Measured on this machine with --bench rather than taken from a vendor sheet: against
-    // our own blit NIS is free to inside the noise and RTX VSR costs 4.1 ms, HDR on top of
-    // it 0.66. DLSS is 1.1 ms and the motion estimate it cannot do without 0.35, taking
-    // 1280x800 to 2304x1440 on an RTX 5080 with the network the driver picked. Shown as
-    // fixed figures, because a cost that moves while it is being read cannot be compared
-    // with the one beside it.
-    private const double NisCostMs = 0.1, VsrCostMs = 4.1, DlssCostMs = 1.5, HdrCostMs = 0.66;
+    // RTX Video HDR on top of RTX VSR, measured on this machine with --bench. What the
+    // upscalers cost is with their descriptions, in AppModel.
+    private const double HdrCostMs = 0.66;
 
     // This frame's layout, for anchoring what opens above the bar. The bar is always
     // drawn first, so these are current by the time a flyout reads them.
-    private static Vector2 _barMin, _modeMin, _scalerMin, _moreMax;
+    private static Vector2 _barMin, _modeMin, _scalerMin, _frameGenMin, _moreMax;
 
     private const ImGuiWindowFlags SurfaceFlags = ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoResize
         | ImGuiWindowFlags.NoMove | ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse
@@ -55,6 +51,7 @@ public static class BottomBar
         {
             Flyout.Mode => ModeFlyout(model),
             Flyout.Scaler => ScalerFlyout(model),
+            Flyout.FrameGen => FrameGenFlyout(model),
             Flyout.More => MoreFlyout(model),
             _ => false
         };
@@ -102,9 +99,9 @@ public static class BottomBar
             Widgets.VerticalSeparator(line);
             ScalerChip(model, line);
             Widgets.VerticalSeparator(line);
-            HdrSwitch(model, line);
+            FrameGenChip(model, line);
             Widgets.VerticalSeparator(line);
-            Budget(model, line);
+            HdrSwitch(model, line);
             Widgets.VerticalSeparator(line);
             Buttons(model);
 
@@ -168,59 +165,78 @@ public static class BottomBar
         Icons.Draw(draw, open ? Icon.ChevronDown : Icon.ChevronUp, new Vector2(x, cy - chevron / 2f), chevron, Theme.TextSecondary);
     }
 
-    /// <summary>The scaler in use and what it costs, opening the choice of four.</summary>
+    /// <summary>
+    /// The upscaler in use, with the variant that is really running and what it costs,
+    /// opening the choice of them.
+    /// </summary>
     private static void ScalerChip(AppModel model, float line)
     {
-        var f = Widgets.F;
-        int index = model.ScalerIndex;
-
-        string label = index switch
-        {
-            1 => Strings.T("pNis"),
-            2 => model.Renderer.Processor?.Vendor == VideoProcessor.GpuVendor.Intel ? Strings.T("pVsrIntel") : Strings.T("pVsr"),
-            3 => "DLSS",
-            _ => Strings.T("pNone")
-        };
-        string cost = index switch
-        {
-            1 => "< " + Strings.Ms(NisCostMs, "0.0"),
-            2 => "+" + Strings.Ms(VsrCostMs, "0.0"),
-            3 => "+" + Strings.Ms(DlssCostMs, "0.0"),
-            _ => ""
-        };
+        var upscaler = model.Upscaler;
+        string label = upscaler.Index == 0 ? upscaler.Name()
+            : upscaler.Running() is { } running ? $"{upscaler.Short()} {running.Text}"
+            : upscaler.Short();
 
         // Paying for an upscaler that has nothing to enlarge is worth a colour: the cost
         // is real and the picture is unchanged.
-        bool wasted = index == 2 && model.ScalerInert;
+        bool wasted = upscaler.Index == 2 && model.ScalerInert;
+
+        _scalerMin = TechniqueChip("##scalerchip", Icon.Scale, label, upscaler.Index == 0 ? "" : upscaler.CostText,
+            wasted ? Theme.Caution : Theme.TextSecondary, model.Flyout == Flyout.Scaler, line,
+            wasted ? string.Format(Strings.T("scaleInert"), label) : Strings.T("ttScaler"),
+            () => model.ToggleFlyout(Flyout.Scaler));
+    }
+
+    /// <summary>
+    /// Frame generation beside it, the same shape: what is on and what it costs. Off says
+    /// so in a word rather than leaving a blank, because a blank reads as "not there".
+    /// </summary>
+    private static void FrameGenChip(AppModel model, float line)
+    {
+        var generator = model.FrameGenerator;
+        bool off = generator.Index == 0;
+        string state = off ? Strings.T("fgStateOff")
+            : $"×{model.FrameGenOutput(generator.Variant() ?? "2").Factor}";
+
+        _frameGenMin = TechniqueChip("##framegenchip", Icon.Frames, off ? Strings.T("fgChip") : generator.Short(), state,
+            off ? Theme.TextTertiary : Theme.TextSecondary, model.Flyout == Flyout.FrameGen, line,
+            Strings.T("ttFrameGen"), () => model.ToggleFlyout(Flyout.FrameGen));
+    }
+
+    /// <summary>
+    /// A bar chip for a technique: its icon, what is chosen, a quieter note beside it and
+    /// the chevron of the flyout it opens. Returns where it was drawn, for anchoring that
+    /// flyout.
+    /// </summary>
+    private static Vector2 TechniqueChip(string id, Icon glyph, string label, string note, Vector4 noteColour,
+                                         bool open, float line, string tooltip, Action toggle)
+    {
+        var f = Widgets.F;
 
         ImGui.SameLine(0, 0);
         float pad = Layout.S(10), gap = Layout.S(8), icon = Layout.S(16), chevron = Layout.S(12);
         var labelSize = Widgets.Measure(f.Body, label);
-        var costSize = Widgets.Measure(f.Caption, cost);
-        float width = pad + icon + gap + labelSize.X + (cost.Length > 0 ? gap + costSize.X : 0) + gap + chevron + pad;
+        var noteSize = Widgets.Measure(f.Caption, note);
+        float width = pad + icon + gap + labelSize.X + (note.Length > 0 ? gap + noteSize.X : 0) + gap + chevron + pad;
 
-        bool open = model.Flyout == Flyout.Scaler;
-        if (Widgets.SubtleButton("##scalerchip", new Vector2(width, line), open, out var min))
-            model.ToggleFlyout(Flyout.Scaler);
-        _scalerMin = min;
-        Widgets.Tooltip(wasted ? string.Format(Strings.T("scaleInert"), label) : Strings.T("ttScaler"));
+        if (Widgets.SubtleButton(id, new Vector2(width, line), open, out var min)) toggle();
+        Widgets.Tooltip(tooltip);
 
         var draw = ImGui.GetWindowDrawList();
         float cy = min.Y + line / 2f, x = min.X + pad;
 
-        Icons.Draw(draw, Icon.Scale, new Vector2(x, cy - icon / 2f), icon, Theme.TextPrimary);
+        Icons.Draw(draw, glyph, new Vector2(x, cy - icon / 2f), icon, Theme.TextPrimary);
         x += icon + gap;
         Widgets.DrawText(draw, f.Body, new Vector2(x, cy - labelSize.Y / 2f), Theme.TextPrimary, label);
         x += labelSize.X + gap;
 
-        if (cost.Length > 0)
+        if (note.Length > 0)
         {
-            Widgets.DrawText(draw, f.Caption, new Vector2(x, cy - costSize.Y / 2f),
-                             wasted ? Theme.Caution : Theme.TextSecondary, cost);
-            x += costSize.X + gap;
+            Widgets.DrawText(draw, f.Caption, new Vector2(x, cy - noteSize.Y / 2f), noteColour, note);
+            x += noteSize.X + gap;
         }
 
         Icons.Draw(draw, open ? Icon.ChevronDown : Icon.ChevronUp, new Vector2(x, cy - chevron / 2f), chevron, Theme.TextSecondary);
+        return min;
     }
 
     /// <summary>
@@ -253,48 +269,9 @@ public static class BottomBar
         Widgets.DrawSwitch(draw, new Vector2(min.X + pad + labelSize.X + gap, cy - sw.Y / 2f), on && can, can, hovered, held);
     }
 
-    /// <summary>
-    /// What our own work costs against the frame, as a number and a thin bar under it.
-    /// The split and the headroom are in the tooltip; the full picture is the telemetry.
-    /// </summary>
-    private static void Budget(AppModel model, float line)
-    {
-        var f = Widgets.F;
-        bool live = model.Pump.State == CaptureState.Streaming && model.BudgetMs > 0;
-        double spent = model.ShownGpuMs + model.ShownCpuMs;
-        double budget = model.BudgetMs;
-
-        string text = live
-            ? string.Format(Strings.T("budgetOf"), Strings.Num(spent, "0.00"), Strings.Num(budget, "0.00"))
-            : "—";
-
-        float pad = Layout.S(8);
-        var textSize = Widgets.Measure(f.Caption, text);
-        float inner = Math.Max(Layout.S(96), textSize.X);
-        float width = pad + inner + pad;
-
-        var min = ImGui.GetCursorScreenPos();
-        ImGui.InvisibleButton("##budget", new Vector2(width, line));
-        if (live)
-            Widgets.Tooltip(string.Format(Strings.T("ttBudget"),
-                Strings.Num(model.ShownGpuMs, "0.00"), Strings.Num(model.ShownCpuMs, "0.00"),
-                Strings.Num(budget, "0.00"), Strings.Num(model.HeadroomMs, "0.00")));
-
-        var draw = ImGui.GetWindowDrawList();
-        float track = Layout.S(4), gap = Layout.S(5);
-        float top = min.Y + (line - textSize.Y - gap - track) / 2f;
-        Widgets.DrawText(draw, f.Caption, new Vector2(min.X + pad, top), Theme.TextSecondary, text);
-
-        var trackMin = new Vector2(min.X + pad, top + textSize.Y + gap);
-        draw.AddRectFilled(trackMin, trackMin + new Vector2(inner, track), Theme.U32(Theme.Alpha(Theme.TextPrimary, 0.14f)), track / 2f);
-        if (live)
-        {
-            float frac = (float)Math.Clamp(spent / budget, 0, 1);
-            if (frac * inner >= 1f)
-                draw.AddRectFilled(trackMin, trackMin + new Vector2(frac * inner, track),
-                    Theme.U32(spent > budget ? Theme.Critical : Theme.Accent), track / 2f);
-        }
-    }
+    // The frame budget used to be a block here too. It took a fifth of the bar to repeat a
+    // number the readout already carries, so it lives only there now; a budget that is
+    // actually blown still raises the badge at the head of the bar.
 
     private static void Buttons(AppModel model)
     {
@@ -514,10 +491,18 @@ public static class BottomBar
         Right(f.Caption, m.Transport == WireTransport.Raw ? Theme.Success : Theme.Caution, m.WireTag, max.X - Layout.S(12));
     }
 
+    // ── techniques: upscaling and frame generation ───────────────────────────────
+
+    // Both flyouts are rows of settings, the way a game's graphics menu is: what it is
+    // called on the left, the choice on the right. The first row picks the technique from
+    // a list that gives each one's cost and, for one that cannot be used, the reason; the
+    // rows under it belong to whichever technique is chosen.
+    private const float RowInset = 12f, RowLabel = 120f, RowHeight = 32f, RowGap = 6f;
+
     /// <summary>
-    /// None, NIS or the driver's upscaler, each with what it costs and one line on what it
-    /// does. NIS brings its sharpness with it; the footer says how much enlarging there is
-    /// to do at all, which is what decides whether any of this matters.
+    /// Which upscaler, then what goes with it: DLSS's network and the one really running,
+    /// FSR's variant, NIS's sharpness. The footer says how much enlarging there is to do at
+    /// all, which is what decides whether any of this matters.
     /// </summary>
     private static bool ScalerFlyout(AppModel model)
     {
@@ -525,91 +510,47 @@ public static class BottomBar
         BeginFlyout("##scalers", new Vector2(_scalerMin.X, _barMin.Y - Layout.S(8)), new Vector2(0, 1),
                     Layout.S(420), new Vector2(Layout.S(4)), Vector2.Zero);
 
-        Header(Strings.T("scalerTitle"), Strings.T("perFrame"));
+        var current = model.Upscaler;
+        Header(Strings.T("scalerTitle"), string.Format(Strings.T("costPerFrame"), current.CostText));
 
-        var proc = model.Renderer.Processor;
-        bool driverOk = model.DriverPathAvailable && proc?.SuperResolutionSupported == true;
-        bool intel = proc?.Vendor == VideoProcessor.GpuVendor.Intel;
-        string vsrName = intel ? Strings.T("pVsrIntel") : "RTX Video Super Resolution";
+        TechniqueRows(model, "##up", model.Upscalers, current, t => model.SelectScaler(t.Index));
 
-        ScalerRow(model, 0, Strings.T("pNone"), Strings.T("dNone"), Strings.Ms(0, "0"), true);
-        ScalerRow(model, 1, Strings.T("pNis"), Strings.T("dNis"), "< " + Strings.Ms(NisCostMs, "0.0"), true);
-        ScalerRow(model, 2, vsrName,
-                  driverOk ? Strings.T(intel ? "dVsrIntel" : "dVsr") : Strings.Sentence(Strings.T("naVendor")),
-                  "+" + Strings.Ms(VsrCostMs, "0.0"), driverOk);
-
-        bool dlssOk = model.Renderer.Dlss is { Possible: true };
-        ScalerRow(model, 3, "DLSS Super Resolution",
-                  dlssOk ? Strings.T("dDlss") : Strings.Sentence(Strings.T("naVendor")),
-                  "+" + Strings.Ms(DlssCostMs, "0.0"), dlssOk);
-
-        float inset = Layout.S(12);
-        if (model.ScalerIndex == 1 && model.Renderer.Nis is { } nis)
+        if (current.Index == 1 && model.Renderer.Nis is { } nis)
         {
-            ImGui.Dummy(new Vector2(0, Layout.S(8)));
-            ImGui.Indent(inset);
-            ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, new Vector2(0, Layout.S(4)));
-            float width = ImGui.GetContentRegionAvail().X - inset;
+            float width = BeginRow(Strings.T("sharpness"));
             float sharp = nis.Sharpness;
+            var value = Strings.Num(sharp, "0.00");
+            float valueWidth = Layout.S(40);
+            var at = ImGui.GetCursorScreenPos();
 
-            // Above 0.5 the value turns amber: at the small scale factors this app usually
-            // runs at, that reads as oversharpening rather than as detail.
-            Widgets.LabelValueWidth(Strings.T("sharpness"), Strings.Num(sharp, "0.00"),
-                                    sharp > 0.5f ? Theme.Caution : Theme.TextSecondary, width);
-            if (Widgets.Slider("##sharp", ref sharp, 0f, 1f, true, width))
+            // The slider is a thumb tall, the row a control tall: centred in it by hand.
+            ImGui.SetCursorScreenPos(at + new Vector2(0, (Layout.S(RowHeight) - Layout.S(20)) / 2f));
+            if (Widgets.Slider("##sharp", ref sharp, 0f, 1f, true, width - valueWidth))
             {
                 nis.Sharpness = MathF.Round(sharp * 20f) / 20f;
                 model.Touch();
             }
-            ImGui.PopStyleVar();
-            ImGui.Unindent(inset);
-        }
 
-        if (model.ScalerIndex == 3 && model.Renderer.Dlss is { } dlss)
-        {
-            ImGui.Dummy(new Vector2(0, Layout.S(8)));
-            ImGui.Indent(inset);
-            float gap = Layout.S(6);
-            ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, new Vector2(gap, Layout.S(6)));
-            float width = ImGui.GetContentRegionAvail().X - inset;
-
-            // What is running, which is not always what was asked for: the driver's own
-            // "DLSS override" names a network for every program and wins. Amber then,
-            // because the buttons below are not being obeyed.
-            string inUse = dlss.ModelInUse is not { } letter ? "—"
-                : dlss.ModelForced ? string.Format(Strings.T("dlssForced"), letter) : letter;
-            Widgets.LabelValueWidth(Strings.T("dlssModel"), inUse,
-                                    dlss.ModelForced ? Theme.Caution : Theme.TextSecondary, width);
-
-            (DlssModel Value, string Label)[] choices =
-            [
-                (DlssModel.Auto, Strings.T("dlssAuto")), (DlssModel.K, "K"), (DlssModel.L, "L"), (DlssModel.M, "M")
-            ];
-            var size = new Vector2((width - gap * (choices.Length - 1)) / choices.Length, Layout.S(28));
-            ImGui.PushID("dlssmodel");
-            for (int i = 0; i < choices.Length; i++)
-            {
-                if (i > 0) ImGui.SameLine();
-                if (Widgets.Button(choices[i].Label, size, accent: dlss.Model == choices[i].Value))
-                {
-                    dlss.Model = choices[i].Value;
-                    model.Touch();
-                }
-            }
-            ImGui.PopID();
-            ImGui.PopStyleVar();
-            ImGui.Unindent(inset);
+            // Above 0.5 the value turns amber: at the small scale factors this app usually
+            // runs at, that reads as oversharpening rather than as detail.
+            var size = Widgets.Measure(f.Body, value);
+            Widgets.DrawText(ImGui.GetWindowDrawList(), f.Body,
+                new Vector2(at.X + width - size.X, at.Y + (Layout.S(RowHeight) - size.Y) / 2f),
+                sharp > 0.5f ? Theme.Caution : Theme.TextSecondary, value);
+            ImGui.SetCursorScreenPos(at);
+            ImGui.Dummy(new Vector2(width, Layout.S(RowHeight)));
         }
 
         // How much enlarging there is to do at all. At ×1 or below nothing is enlarged and
         // every upscaler only costs.
-        ImGui.Dummy(new Vector2(0, Layout.S(6)));
+        float inset = Layout.S(RowInset);
+        ImGui.Dummy(new Vector2(0, Layout.S(10)));
         ImGui.Indent(inset);
         ImGui.PushTextWrapPos(Widgets.ContentRight() - inset);
         if (model.Pump.CurrentMode is { Height: > 0 } mode && model.ScaleFactor > 0)
         {
             if (model.ScalerInert)
-                Widgets.Text(f.Caption, Theme.Caution, string.Format(Strings.T("scaleInert"), vsrName));
+                Widgets.Text(f.Caption, Theme.Caution, string.Format(Strings.T("scaleInert"), model.Upscalers[2].Name()));
             else
                 Widgets.Text(f.Caption, Theme.TextTertiary, string.Format(Strings.T("scaleUp"), model.ScaleLabel,
                     mode.Height, (int)Math.Round(mode.Height * model.ScaleFactor)));
@@ -621,32 +562,249 @@ public static class BottomBar
         return EndFlyout();
     }
 
-    private static void ScalerRow(AppModel model, int index, string label, string description, string cost, bool enabled)
+    /// <summary>
+    /// Frame generation, the same rows for the same kind of choice: which generator, how
+    /// many frames it shows for each one that arrives, and what that comes to on this
+    /// source and this display.
+    /// <para>
+    /// Nothing is behind it yet, and it says so in a sentence rather than by being grey
+    /// alone. The two figures it does show are arithmetic and are worded as such: the rate
+    /// a multiplier makes, and the least delay any generator of this kind adds. The GPU
+    /// time nobody has measured, so it reads as not measured.
+    /// </para>
+    /// </summary>
+    private static bool FrameGenFlyout(AppModel model)
     {
         var f = Widgets.F;
-        bool selected = model.ScalerIndex == index;
+        BeginFlyout("##framegen", new Vector2(_frameGenMin.X, _barMin.Y - Layout.S(8)), new Vector2(0, 1),
+                    Layout.S(420), new Vector2(Layout.S(4)), Vector2.Zero);
 
-        if (Widgets.ListRow($"##scaler{index}", Layout.S(56), selected, enabled, out var min, out var max) && !selected)
+        var current = model.FrameGenerator;
+        bool on = current.Index != 0 && current.Usable;
+        Header(Strings.T("fgTitle"), string.Format(Strings.T("costPerFrame"), current.CostText));
+
+        TechniqueRows(model, "##fg", model.FrameGenerators, current, t => model.SelectFrameGen(t.Index));
+
+        if (model.Pump.CurrentFps > 0)
         {
-            model.SelectScaler(index);
-            // NIS stays open: choosing it is when its sharpness becomes the next question.
-            // DLSS likewise, for its network.
-            if (index != 1 && index != 3) model.Flyout = Flyout.None;
+            var (factor, hz) = model.FrameGenOutput(current.Variant() ?? "2");
+            string hzUnit = Strings.T("hz");
+            string result = $"{Strings.Num(model.Pump.CurrentFps, "0.##")} → {Strings.Num(hz, "0.##")} {hzUnit}";
+            if (model.DisplayHz > 0) result += " · " + string.Format(Strings.T("fgDisplay"), model.DisplayHz);
+
+            TextRow(Strings.T("fgResult"), result, on ? Theme.TextSecondary : Theme.TextTertiary, on);
+            TextRow(Strings.T("fgCost"),
+                    string.Format(Strings.T("fgCostV"), Strings.Ms(model.FrameGenDelayFloorMs(factor), "0.0")),
+                    on ? Theme.TextSecondary : Theme.TextTertiary, on);
+
+            // Frames past the display's own rate are generated and never shown.
+            if (model.DisplayHz > 0 && hz > model.DisplayHz + 0.5)
+                Note(string.Format(Strings.T("fgPast"), model.DisplayHz), on ? Theme.Caution : Theme.TextTertiary);
         }
 
-        var draw = ImGui.GetWindowDrawList();
-        float inset = Layout.S(12);
-        var l = Widgets.Measure(f.Body, label);
-        var d = Widgets.Measure(f.Caption, description);
-        float top = min.Y + (max.Y - min.Y - l.Y - d.Y - Layout.S(1)) / 2f;
+        // Why nothing here can be turned on, said once for all of them when the reason is
+        // the same; the list gives each generator's own reason when they differ.
+        string? blocked = null;
+        foreach (var generator in model.FrameGenerators)
+        {
+            if (generator.Index == 0) continue;
+            blocked = generator.Unavailable();
+            if (blocked is null) break;
+        }
+        if (blocked is not null) Note(blocked, Theme.Caution);
 
-        Widgets.DrawText(draw, f.Body, new Vector2(min.X + inset, top), enabled ? Theme.TextPrimary : Theme.TextDisabled, label);
-        Widgets.DrawText(draw, f.Caption, new Vector2(min.X + inset, top + l.Y + Layout.S(1)),
-                         enabled ? Theme.TextTertiary : Theme.Alpha(Theme.Caution, 0.8f), description);
+        ImGui.Dummy(new Vector2(0, Layout.S(10)));
+        ImGui.Indent(Layout.S(RowInset));
+        Widgets.Text(f.Caption, Theme.TextTertiary, Strings.T("closeG"));
+        ImGui.Unindent(Layout.S(RowInset));
+        ImGui.Dummy(new Vector2(0, Layout.S(8)));
 
-        var c = Widgets.Measure(f.Caption, cost);
-        Widgets.DrawText(draw, f.Caption, new Vector2(max.X - inset - c.X, (min.Y + max.Y - c.Y) / 2f),
-                         enabled ? Theme.TextSecondary : Theme.TextDisabled, cost);
+        return EndFlyout();
+    }
+
+    /// <summary>
+    /// The rows every technique has: which one, the variant it is set to, and what is
+    /// really running when that can differ from what was asked.
+    /// </summary>
+    private static void TechniqueRows(AppModel model, string id, IReadOnlyList<Technique> techniques,
+                                      Technique current, Action<Technique> select)
+    {
+        float width = BeginRow(Strings.T("tvTechnique"));
+        bool open = model.OpenTechniqueList;
+        model.OpenTechniqueList = false;
+        TechniqueCombo(id, techniques, current, width, open, select);
+
+        if (current.Variants.Count > 0)
+        {
+            // Greyed when there is nothing for it to set: the technique cannot be used, or
+            // the variants are only on show beside something that is off.
+            bool settable = current.Usable && !current.VariantsLocked;
+            width = BeginRow(Strings.T(current.VariantsLabel), settable);
+
+            string? asked = current.Variant();
+            int index = 0;
+            var names = new string[current.Variants.Count];
+            for (int i = 0; i < names.Length; i++)
+            {
+                names[i] = current.Variants[i].Text;
+                if (current.Variants[i].Id == asked) index = i;
+            }
+            if (Widgets.Combo(id + "variant", names[index], names, index, out int chosen, width, settable))
+                current.SetVariant(current.Variants[chosen].Id);
+        }
+
+        // Amber when something overrode the choice, because the row above is then not
+        // being obeyed.
+        if (current.Running() is { } running)
+            TextRow(Strings.T("tvRunning"),
+                    running.Overridden ? string.Format(Strings.T("dlssForced"), running.Text) : running.Text,
+                    running.Overridden ? Theme.Caution : Theme.TextSecondary);
+    }
+
+    /// <summary>
+    /// The technique's combo box. Its list is wider than the box — the width of the flyout —
+    /// because each row carries what the bar's chip cannot: one line on what the technique
+    /// does and what it costs, or, for one that cannot be used, why not. Such a row cannot
+    /// be chosen; it is there to be read.
+    /// </summary>
+    private static void TechniqueCombo(string id, IReadOnlyList<Technique> techniques, Technique current,
+                                       float width, bool open, Action<Technique> select)
+    {
+        var f = Widgets.F;
+        string popup = id + "##list";
+        var size = new Vector2(width, Layout.S(RowHeight));
+        if (Widgets.ComboFace(id, current.Name(), size, true, out var min) || open) ImGui.OpenPopup(popup);
+
+        float inset = Layout.S(12), padY = Layout.S(4), costColumn = Layout.S(72);
+        float listLeft = ImGui.GetWindowPos().X + Layout.S(4);
+        float listWidth = ImGui.GetWindowSize().X - Layout.S(8);
+        float wrap = listWidth - Layout.S(8) - inset * 2 - costColumn;
+
+        // A reason can run to two lines in some languages, so every row is measured.
+        Span<float> heights = stackalloc float[techniques.Count];
+        float nameH = Widgets.Measure(f.Body, "0").Y, listH = padY * 2;
+        for (int i = 0; i < techniques.Count; i++)
+        {
+            string second = techniques[i].Unavailable() ?? techniques[i].Description();
+            heights[i] = Math.Max(Layout.S(52), Layout.S(18) + nameH + Widgets.MeasureWrapped(f.Caption, second, wrap).Y);
+            listH += heights[i];
+        }
+
+        // Downwards only while the list ends clear of the bar. The flyout stands on the bar,
+        // so that is rare; otherwise it opens upwards, over the flyout's own header.
+        bool above = min.Y + size.Y + Layout.S(4) + listH > _barMin.Y - Layout.S(8);
+        ImGui.SetNextWindowPos(above ? new Vector2(listLeft, min.Y - Layout.S(4)) : new Vector2(listLeft, min.Y + size.Y + Layout.S(4)),
+                               ImGuiCond.Always, above ? new Vector2(0, 1) : Vector2.Zero);
+        ImGui.SetNextWindowSize(new Vector2(listWidth, listH));
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(Layout.S(4), padY));
+        ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, Vector2.Zero);
+
+        if (ImGui.BeginPopup(popup))
+        {
+            var draw = ImGui.GetWindowDrawList();
+            for (int i = 0; i < techniques.Count; i++)
+            {
+                var technique = techniques[i];
+                string? why = technique.Unavailable();
+                bool usable = why is null, selected = ReferenceEquals(technique, current);
+
+                if (Widgets.ListRow($"{id}#{technique.Index}", heights[i], selected, usable, out var rowMin, out var rowMax)
+                    && !selected)
+                {
+                    select(technique);
+                    ImGui.CloseCurrentPopup();
+                }
+                var next = ImGui.GetCursorScreenPos();
+
+                float top = rowMin.Y + Layout.S(8);
+                Widgets.DrawText(draw, f.Body, new Vector2(rowMin.X + inset, top),
+                                 usable ? Theme.TextPrimary : Theme.TextDisabled, technique.Name());
+
+                ImGui.SetCursorScreenPos(new Vector2(rowMin.X + inset, top + nameH + Layout.S(2)));
+                ImGui.PushTextWrapPos(ImGui.GetCursorPosX() + wrap);
+                Widgets.Text(f.Caption, usable ? Theme.TextTertiary : Theme.Alpha(Theme.Caution, 0.8f),
+                             why ?? technique.Description());
+                ImGui.PopTextWrapPos();
+                ImGui.SetCursorScreenPos(next);
+
+                // The cost where it can be compared with the one above and below it; a lock
+                // where there is no using it, so the column never shows a figure for
+                // something that cannot be had.
+                float cy = (rowMin.Y + rowMax.Y) / 2f;
+                if (usable)
+                {
+                    string cost = technique.CostText;
+                    var c = Widgets.Measure(f.Caption, cost);
+                    Widgets.DrawText(draw, f.Caption, new Vector2(rowMax.X - inset - c.X, cy - c.Y / 2f), Theme.TextSecondary, cost);
+                }
+                else
+                {
+                    float glyph = Layout.S(16);
+                    Icons.Draw(draw, Icon.Lock, new Vector2(rowMax.X - inset - glyph, cy - glyph / 2f), glyph, Theme.Caution);
+                }
+            }
+            ImGui.EndPopup();
+        }
+
+        ImGui.PopStyleVar(2);
+    }
+
+    /// <summary>
+    /// Starts a row: writes its label and leaves the cursor where the control goes.
+    /// Returns the width the control has. A row is one control tall; a control that is not
+    /// must claim that height itself.
+    /// </summary>
+    private static float BeginRow(string label, bool enabled = true)
+    {
+        var f = Widgets.F;
+        ImGui.Dummy(new Vector2(0, Layout.S(RowGap)));
+
+        var pos = ImGui.GetCursorScreenPos();
+        float inset = Layout.S(RowInset), labelWidth = Layout.S(RowLabel);
+        float control = ImGui.GetContentRegionAvail().X - inset * 2 - labelWidth;
+
+        var size = Widgets.Measure(f.Body, label);
+        Widgets.DrawText(ImGui.GetWindowDrawList(), f.Body,
+                         new Vector2(pos.X + inset, pos.Y + (Layout.S(RowHeight) - size.Y) / 2f),
+                         enabled ? Theme.TextPrimary : Theme.TextDisabled, label);
+
+        ImGui.SetCursorScreenPos(new Vector2(pos.X + inset + labelWidth, pos.Y));
+        return control;
+    }
+
+    /// <summary>A row whose right-hand side is a statement rather than a control.</summary>
+    private static void TextRow(string label, string value, Vector4 colour, bool enabled = true)
+    {
+        var f = Widgets.F;
+        float width = BeginRow(label, enabled);
+        var at = ImGui.GetCursorScreenPos();
+
+        // Wrapped, and the row grows with it: a statement in German is not a short thing.
+        // Starts where a combo box's own text does, so the column reads as one.
+        float lead = Layout.S(11);
+        width -= lead;
+        at.X += lead;
+        float textH = Widgets.MeasureWrapped(f.Body, value, width).Y;
+        float row = Math.Max(Layout.S(RowHeight), textH + Layout.S(8));
+
+        ImGui.SetCursorScreenPos(at + new Vector2(0, (row - textH) / 2f));
+        ImGui.PushTextWrapPos(ImGui.GetCursorPosX() + width);
+        Widgets.Text(f.Body, colour, value);
+        ImGui.PopTextWrapPos();
+        ImGui.SetCursorScreenPos(at);
+        ImGui.Dummy(new Vector2(width, row));
+    }
+
+    /// <summary>A sentence under the rows, across the flyout's width.</summary>
+    private static void Note(string text, Vector4 colour)
+    {
+        float inset = Layout.S(RowInset);
+        ImGui.Dummy(new Vector2(0, Layout.S(8)));
+        ImGui.Indent(inset);
+        ImGui.PushTextWrapPos(Widgets.ContentRight() - inset);
+        Widgets.Text(Widgets.F.Caption, colour, text);
+        ImGui.PopTextWrapPos();
+        ImGui.Unindent(inset);
     }
 
     /// <summary>

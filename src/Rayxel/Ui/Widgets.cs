@@ -51,6 +51,15 @@ public static class Widgets
         return size;
     }
 
+    /// <summary>The size <paramref name="text"/> takes when wrapped at <paramref name="wrapWidth"/> pixels.</summary>
+    public static Vector2 MeasureWrapped(ImFontPtr font, string text, float wrapWidth)
+    {
+        bool pushed = Push(font);
+        var size = ImGui.CalcTextSize(text, false, wrapWidth);
+        if (pushed) ImGui.PopFont();
+        return size;
+    }
+
     private static bool Push(ImFontPtr font)
     {
         unsafe { if (font.NativePtr == null) return false; }
@@ -358,30 +367,13 @@ public static class Widgets
     /// rows under it — or over it, when there is no room below, which there usually is
     /// not in a flyout that sits on the bottom edge.
     /// </summary>
-    public static bool Combo(string id, string preview, IReadOnlyList<string> options, int current, out int chosen)
+    public static bool Combo(string id, string preview, IReadOnlyList<string> options, int current, out int chosen,
+                             float width = 0f, bool enabled = true)
     {
         chosen = current;
-        float width = ImGui.GetContentRegionAvail().X;
+        if (width <= 0) width = ImGui.GetContentRegionAvail().X;
         var size = new Vector2(width, Layout.S(32));
-        var min = ImGui.GetCursorScreenPos();
-
-        bool clicked = ImGui.InvisibleButton(id, size);
-        bool hovered = ImGui.IsItemHovered();
-        bool held = ImGui.IsItemActive();
-        if (clicked) ImGui.OpenPopup(id + "##list");
-
-        var draw = ImGui.GetWindowDrawList();
-        float r = Layout.S(Theme.RadiusControl);
-        draw.AddRectFilled(min, min + size, Theme.U32(held ? Theme.ControlFillPressed : hovered ? Theme.ControlFillHover : Theme.ControlFill), r);
-        draw.AddRect(min, min + size, Theme.U32(Theme.ControlStroke), r);
-
-        float pad = Layout.S(11), chevron = Layout.S(12);
-        var textSize = Measure(F.Body, preview);
-        draw.PushClipRect(min, min + new Vector2(width - pad - chevron - Layout.S(4), size.Y), true);
-        DrawText(draw, F.Body, new Vector2(min.X + pad, min.Y + (size.Y - textSize.Y) / 2f), Theme.TextPrimary, preview);
-        draw.PopClipRect();
-        Icons.Draw(draw, Icon.ChevronDown, new Vector2(min.X + width - pad - chevron, min.Y + (size.Y - chevron) / 2f),
-                   chevron, Theme.TextSecondary);
+        if (ComboFace(id, preview, size, enabled, out var min)) ImGui.OpenPopup(id + "##list");
 
         float rowH = Layout.S(36), padY = Layout.S(4);
         float listH = Math.Min(rowH * options.Count + padY * 2, Layout.S(360));
@@ -415,6 +407,35 @@ public static class Widgets
 
         ImGui.PopStyleVar(2);
         return changed;
+    }
+
+    /// <summary>
+    /// A combo box's closed face alone — the value and the chevron — for a caller that
+    /// opens a list of its own under it. True when it was clicked. Disabled, it keeps its
+    /// value in view and takes no clicks; saying why is the caller's business.
+    /// </summary>
+    public static bool ComboFace(string id, string preview, Vector2 size, bool enabled, out Vector2 min)
+    {
+        min = ImGui.GetCursorScreenPos();
+        bool clicked = ImGui.InvisibleButton(id, size) && enabled;
+        bool hovered = ImGui.IsItemHovered() && enabled;
+        bool held = ImGui.IsItemActive() && enabled;
+
+        var draw = ImGui.GetWindowDrawList();
+        float r = Layout.S(Theme.RadiusControl);
+        var fill = !enabled || held ? Theme.ControlFillPressed : hovered ? Theme.ControlFillHover : Theme.ControlFill;
+        draw.AddRectFilled(min, min + size, Theme.U32(fill), r);
+        draw.AddRect(min, min + size, Theme.U32(Theme.ControlStroke), r);
+
+        float pad = Layout.S(11), chevron = Layout.S(12);
+        var textSize = Measure(F.Body, preview);
+        draw.PushClipRect(min, min + new Vector2(size.X - pad - chevron - Layout.S(4), size.Y), true);
+        DrawText(draw, F.Body, new Vector2(min.X + pad, min.Y + (size.Y - textSize.Y) / 2f),
+                 enabled ? Theme.TextPrimary : Theme.TextDisabled, preview);
+        draw.PopClipRect();
+        Icons.Draw(draw, Icon.ChevronDown, new Vector2(min.X + size.X - pad - chevron, min.Y + (size.Y - chevron) / 2f),
+                   chevron, enabled ? Theme.TextSecondary : Theme.TextDisabled);
+        return clicked;
     }
 
     /// <summary>
@@ -475,6 +496,34 @@ public static class Widgets
                 if (w < 1.5f) return;
                 draw.AddRectFilled(new Vector2(x, pos.Y), new Vector2(x + w, pos.Y + height), Theme.U32(colour), height / 2f);
                 x += w + gap;
+            }
+        }
+
+        ImGui.Dummy(new Vector2(width, height));
+    }
+
+    /// <summary>
+    /// Parts of a whole as segments filling a 6px track end to end: what a delay is made
+    /// of. A part too small to draw as a segment is left out rather than drawn as a dot.
+    /// </summary>
+    public static void StackedBar(ReadOnlySpan<double> values, ReadOnlySpan<Vector4> colours, double total, float height = 6f)
+    {
+        height = Layout.S(height);
+        float width = ImGui.GetContentRegionAvail().X;
+        var pos = ImGui.GetCursorScreenPos();
+        var draw = ImGui.GetWindowDrawList();
+
+        draw.AddRectFilled(pos, pos + new Vector2(width, height), Theme.U32(Theme.Alpha(Theme.TextPrimary, 0.12f)), height / 2f);
+
+        if (total > 0)
+        {
+            float gap = Layout.S(2), x = pos.X, right = pos.X + width;
+            for (int i = 0; i < values.Length && x < right; i++)
+            {
+                float w = Math.Min((float)(values[i] / total * width), right - x);
+                if (w < 1.5f + gap) continue;
+                draw.AddRectFilled(new Vector2(x, pos.Y), new Vector2(x + w - gap, pos.Y + height), Theme.U32(colours[i]), height / 2f);
+                x += w;
             }
         }
 
