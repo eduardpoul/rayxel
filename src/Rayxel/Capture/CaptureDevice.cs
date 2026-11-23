@@ -174,6 +174,9 @@ public static class CaptureDevice
     /// </summary>
     public static DeviceProbe Probe(CaptureDeviceInfo device)
     {
+        // A sender on the network is asked, not opened; it has no media types to read.
+        if (device.Bus == DeviceBus.Network) return NetDevice.Probe(device);
+
         try
         {
             List<CaptureMode> modes;
@@ -416,7 +419,7 @@ public static class CaptureDevice
     public static void ApplyHardwareFacts(DeviceProbe probe)
     {
         probe.WireMiBs = probe.Link.CeilingMiBs;
-        if (probe.Device.IsVirtual) return;
+        if (probe.Device.IsVirtual || probe.Device.Bus == DeviceBus.Network) return;
 
         var usb = UsbDescriptors.Read(probe.Device);
         if (usb is null || usb.Formats.Count == 0) return;

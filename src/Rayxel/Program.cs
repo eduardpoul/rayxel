@@ -23,6 +23,8 @@ var settings = AppSettings.Load();
 Strings.Use(settings.Language);
 
 string? deviceSelector = null;
+string? netAddress = null;
+FlowView startFlow = FlowView.Off;
 string? shotPath = null;
 string? forcedScreen = null;
 string? forcedMode = null;
@@ -76,6 +78,30 @@ foreach (var arg in args)
         presentOnArrival = !arg[9..].Equals("refresh", StringComparison.OrdinalIgnoreCase);
     // Forces a screen so the splash and picker can be inspected without racing them.
     else if (arg.StartsWith("--screen=", StringComparison.OrdinalIgnoreCase)) forcedScreen = arg[9..];
+    // A Steam Deck running rayxel-send, as --net=host[:port]. It joins the device list and is
+    // chosen, exactly as a card named on the command line would be.
+    else if (arg.StartsWith("--net=", StringComparison.OrdinalIgnoreCase)) netAddress = arg[6..];
+    // What that sender is asked to spend, in Mbit/s.
+    else if (arg.StartsWith("--net-bitrate=", StringComparison.OrdinalIgnoreCase))
+    {
+        if (double.TryParse(arg[14..], System.Globalization.NumberStyles.Float,
+                            System.Globalization.CultureInfo.InvariantCulture, out double mbit)
+            && mbit is >= 0.5 and <= 500)
+            NetDevice.BitrateKbps = (int)Math.Round(mbit * 1000);
+        else
+            Log.Warn($"{arg}: expected a bitrate in Mbit/s between 0.5 and 500");
+    }
+    // The combination that hands the keyboard and mouse to a network sender and takes them
+    // back, as --capture-key=ctrl+alt+k.
+    else if (arg.StartsWith("--capture-key=", StringComparison.OrdinalIgnoreCase))
+    {
+        if (CaptureKey.TryParse(arg[14..], out var captureKey)) DeskForwarder.Key = captureKey;
+        else Log.Warn($"{arg}: expected modifiers and one key, such as ctrl+alt+k or shift+f8; keeping {DeskForwarder.Key.Name}");
+    }
+    // Starts with the estimated motion drawn over the picture, or alone with --flow=only.
+    else if (arg is "--flow") startFlow = FlowView.Overlay;
+    else if (arg.StartsWith("--flow=", StringComparison.OrdinalIgnoreCase))
+        startFlow = arg[7..].Equals("only", StringComparison.OrdinalIgnoreCase) ? FlowView.Only : FlowView.Overlay;
     else if (!arg.StartsWith('-')) deviceSelector = arg;
 }
 
@@ -100,6 +126,7 @@ WindowMode? windowMode = null;
 // the bar back up by itself.
 IntPtr lastPointer = new(-1);
 bool cursorWasHidden = false;
+bool captureApplied = false;
 
 // Every device Windows currently offers, refreshed whenever the menu opens so a card
 // plugged in mid-session shows up. Separate from what we have actually opened: enumerating
@@ -113,10 +140,14 @@ Win32.WndProc wndProc = WindowProc;
 Kernel.TimeBeginPeriod(1);
 try
 {
-    allDevices = CaptureDevice.Enumerate();
+    allDevices = EnumerateDevices();
     Log.Info($"{allDevices.Count} video capture device(s) present");
     foreach (var d in allDevices)
         Log.Info($"  [{d.Ordinal}] {d.FriendlyName}   {d.ShortId}{(d.IsVirtual ? "   (software device)" : "")}");
+
+    // Naming a sender is choosing it, unless a device was also named outright.
+    if (netAddress is not null && deviceSelector is null)
+        deviceSelector = allDevices[^1].SymbolicLink;
 
     if (allDevices.Count == 0)
     {
@@ -205,6 +236,7 @@ try
 
     renderer = new Renderer();
     renderer.Initialize(hwnd, WindowWidth, WindowHeight);
+    if (renderer.Flow is { } startingFlow) startingFlow.View = startFlow;
 
     pump = new FramePump(active.Device, renderer);
     pump.AttachD3D(renderer.Device);
@@ -213,6 +245,7 @@ try
     model.Devices = allDevices;
     model.Probed = probed;
     model.Active = active;
+    model.DeviceNamed = deviceSelector is not null;
     model.SelectScaler = want => { pendingScaler = want; model!.Touch(); };
     model.ToggleHdr = () => pendingHdrToggle = true;
     model.SelectMode = (m, fps) => { try { pump!.Select(m, fps); } catch (Exception ex) { Log.Error("mode switch failed", ex); } };
@@ -237,7 +270,7 @@ try
                          && model.AudioInputs.Any(e => e.Id == saved)
         ? saved
         : AudioEndpoints.MatchTo(active.Device)?.Id;
-    pendingAudioRestart = true;
+    pendingAudioRestart = HasSound(active.Device);
 
     if (settings.Borderless) pendingWindowKind = WindowKind.BorderlessFullscreen;
     if (forcedScreen is not null)
@@ -342,6 +375,20 @@ static void ReportFirstFrame(FramePump pump)
             break;
     }
 }
+
+// Everything that can be a source: what Windows lists, and after it any sender named on the
+// command line. Windows knows nothing about those, so they are added back after every
+// enumeration or they would vanish the first time the device list was refreshed.
+List<CaptureDeviceInfo> EnumerateDevices()
+{
+    var devices = CaptureDevice.Enumerate();
+    if (netAddress is not null) devices.Add(NetDevice.Create(netAddress, devices.Count));
+    return devices;
+}
+
+// A sender on the network carries no sound yet. Playing the remembered card's input under
+// another machine's picture would be worse than silence, so audio is left alone for it.
+static bool HasSound(CaptureDeviceInfo device) => device.Bus != DeviceBus.Network;
 
 // Re-lists the WASAPI endpoints. Called at start-up and whenever the audio card is shown,
 // so a headset plugged in mid-session appears without polling WASAPI every frame.
@@ -687,7 +734,7 @@ bool FrameServerEnabled()
 /// </para>
 /// </summary>
 void ReportBench(FramePump pump, TimeSpan window, TimeSpan cpu,
-                 double[] gpuMs, double[] cpuMs, string scalerPath, string composition)
+                 double[] gpuMs, double[] cpuMs, string scalerPath, string composition, double[] flowMs)
 {
     var (delays, intervals) = pump.Recording();
     var d = delays.Where(x => !double.IsNaN(x)).OrderBy(x => x).ToArray();
@@ -709,7 +756,7 @@ void ReportBench(FramePump pump, TimeSpan window, TimeSpan cpu,
     // How much of the delay is simply the frame crossing the wire. At the top modes this
     // card uses most of the link, so it is not a rounding term - it is nearly all of it,
     // and anything blamed on software has to be what is left after subtracting it.
-    if (pump.CurrentMode is { IsCompressed: false } m)
+    if (pump.CurrentMode is { IsCompressed: false } m && pump.Device.Bus != DeviceBus.Network)
     {
         double mib = m.Format.BytesPerFrame(m.Width, m.Height) / (1024.0 * 1024.0);
         double wireMiBs = (UsbDescriptors.Read(pump.Device)?.PracticalBytesPerSecond ?? 0) / (1024 * 1024);
@@ -736,6 +783,33 @@ void ReportBench(FramePump pump, TimeSpan window, TimeSpan cpu,
     if (c.Length >= 30)
         Log.Info($"  our CPU per frame min {P(c, 0):0.00}   p50 {P(c, 50):0.00}   p95 {P(c, 95):0.00}   " +
                  $"p99 {P(c, 99):0.00}   max {P(c, 100):0.00} ms");
+
+    // Estimating motion, when it was on. Already counted in the GPU line above.
+    var fl = flowMs.Where(x => x > 0).OrderBy(x => x).ToArray();
+    if (fl.Length >= 30)
+        Log.Info($"  of which flow     min {P(fl, 0):0.00}   p50 {P(fl, 50):0.00}   p95 {P(fl, 95):0.00}   " +
+                 $"p99 {P(fl, 99):0.00}   max {P(fl, 100):0.00} ms");
+
+    // For a sender on the network the pipeline delay above is a sum, and these are what it
+    // is the sum of. They are measured separately: the first on the Deck, the last here,
+    // and the middle one from both clocks once a ping has compared them.
+    if (pump.NetworkRecording() is { } net && pump.Network is { } link)
+    {
+        static double[] Sorted(double[] values) => values.Where(x => !double.IsNaN(x)).OrderBy(x => x).ToArray();
+        static string Line(double[] v) => v.Length < 30
+            ? "too few samples"
+            : $"min {P(v, 0):0.00}   p50 {P(v, 50):0.00}   p95 {P(v, 95):0.00}   p99 {P(v, 99):0.00}   max {P(v, 100):0.00}";
+
+        Log.Info($"  on the Deck       {Line(Sorted(net.EncodeMs))} ms   (frame in hand to encoded)");
+        Log.Info(link.ClockKnown
+            ? $"  network           {Line(Sorted(net.NetworkMs))} ms   (encoded to last packet here)"
+            : "  network           n/a - no ping came back, so the two clocks were never compared");
+        Log.Info($"  decode            {Line(Sorted(net.DecodeMs))} ms   (last packet to decoded on the GPU)");
+        Log.Info($"  frame size        {Line(Sorted(net.FrameKb))} kB");
+        Log.Info($"  link              {link.Mbps:0.0} Mbit/s, round trip {link.RoundTripMs:0.00} ms, " +
+                 $"{link.FramesLost} frame(s) lost, {link.PacketsLate} late packet(s), " +
+                 $"{link.KeyframesRequested} keyframe request(s), decoder '{link.Decoder}'");
+    }
 
     var s = pump.Snapshot();
     Log.Info($"  dropped {s.FramesDropped}, late {s.FramesLate}");
@@ -825,6 +899,16 @@ void Report(DeviceProbe p)
     Log.Section($"[{d.Ordinal}] {d.FriendlyName}");
     Log.Info($"  path   {d.ShortId}{(d.IsVirtual ? "   (software device - its mode list describes no wire)" : "")}");
 
+    // None of what follows applies to a sender on the network: it has no link budget and no
+    // descriptors, and there is nothing to infer about its transport.
+    if (d.Bus == DeviceBus.Network)
+    {
+        if (!p.IsReady) { Log.Warn($"  state  {p.Problem}"); return; }
+        Log.Info($"  state  ready - {p.Modes.Count} sizes, {NetDevice.BitrateKbps / 1000.0:0.#} Mbit/s asked for");
+        Log.Info("  wire   HEVC, always: the Deck encodes and this machine decodes");
+        return;
+    }
+
     if (!p.IsReady)
     {
         Log.Warn($"  state  {p.Availability.ToString().ToLowerInvariant()} - {p.Problem}");
@@ -895,6 +979,7 @@ void RunLoop()
     // Our own per-present cost, sampled beside the capture delay so the whole budget can
     // be read off one report instead of two.
     var benchGpu = new List<double>();
+    var benchFlow = new List<double>();
     var benchCpu = new List<double>();
     var audioRetryClock = System.Diagnostics.Stopwatch.StartNew();
     var displayClock = System.Diagnostics.Stopwatch.StartNew();
@@ -921,6 +1006,18 @@ void RunLoop()
     {
         if (!Win32.PumpMessages()) break;
 
+        // Lets the pump rebuild the video surface on this thread when a network sender
+        // turns out to deliver another size than was asked for. Nothing to do for a card.
+        pump!.Service();
+
+        // A controller's input is sent to a network sender only while this is the window
+        // in front; Windows reports it to every program regardless.
+        pump.HasFocus = Win32.GetForegroundWindow() == hwnd;
+        ApplyInputCapture();
+
+        // The decode of a network frame is only timed while someone can see the result.
+        pump.MeasureDecode = model!.ShowTelemetry || benchSeconds > 0;
+
         // Requests from the message pump and from the UI are applied here, on the thread
         // that owns the device, and never allowed to escape as an exception.
         if (pendingDeviceSwitch is { } target)
@@ -934,7 +1031,7 @@ void RunLoop()
             try
             {
                 model!.Audio.Stop();
-                if (model.AudioEnabled) model.Audio.Start(model.AudioInputId, model.AudioOutputId);
+                if (model.AudioEnabled && HasSound(pump!.Device)) model.Audio.Start(model.AudioInputId, model.AudioOutputId);
             }
             catch (Exception ex) { Log.Error("audio restart failed", ex); }
         }
@@ -994,7 +1091,12 @@ void RunLoop()
 
         model!.AppCpuMs = appCpuMs;
         model.GpuMs = renderer.LastGpuMs;
-        if (benchRecording) { benchGpu.Add(renderer.LastGpuMs); benchCpu.Add(appCpuMs); }
+        if (benchRecording)
+        {
+            benchGpu.Add(renderer.LastGpuMs);
+            benchCpu.Add(appCpuMs);
+            if (renderer.Flow is { View: not FlowView.Off }) benchFlow.Add(renderer.LastFlowMs);
+        }
         renderer.OverlayNits = model.OverlayNits;
         renderer.VideoNits = model.VideoNits;
         // A pending capture holds the panel open: otherwise the idle timer hides it before
@@ -1060,7 +1162,8 @@ void RunLoop()
         // Sound is expected to come back on its own. The HDMI audio endpoint disappears
         // whenever the console sleeps and returns when it wakes, and a one-shot attempt at
         // start-up leaves the user with silence and no way back short of a restart.
-        if (model.AudioEnabled && !model.Audio.Running && audioRetryClock.ElapsedMilliseconds >= 5000)
+        if (model.AudioEnabled && !model.Audio.Running && HasSound(pump.Device)
+            && audioRetryClock.ElapsedMilliseconds >= 5000)
         {
             audioRetryClock.Restart();
             try
@@ -1143,7 +1246,7 @@ void RunLoop()
 
                 ReportBench(pump, benchClock.Elapsed,
                             System.Diagnostics.Process.GetCurrentProcess().TotalProcessorTime - benchCpuStart,
-                            [.. benchGpu], [.. benchCpu], path, renderer.DescribeCompositionMode());
+                            [.. benchGpu], [.. benchCpu], path, renderer.DescribeCompositionMode(), [.. benchFlow]);
                 quit = true;
             }
         }
@@ -1204,6 +1307,19 @@ void RunLoop()
                 $"x{(uniqueFps > 0 ? presentFps / uniqueFps : 0),4:0.00})  " +
                 $"vblank {(vblankHz > 0 ? $"{vblankHz,5:0.0}Hz" : "  n/a")}  " +
                 $"late {s.FramesLate} slow {slowFrames} dropped {s.FramesDropped}  {model.Composition}");
+
+            // The age above, taken apart, when the frames come over the network.
+            if (pump.Network is { } net)
+                Log.Info($"net  deck {net.EncodeMs,5:0.00}ms  network " +
+                         (net.ClockKnown ? $"{net.NetworkMs,5:0.00}ms" : "  n/a  ") +
+                         "  decode " + (net.DecodeKnown ? $"{net.DecodeMs,5:0.00}ms" : "  n/a  ") +
+                         $"  {net.Mbps,5:0.0} Mbit/s  rtt {net.RoundTripMs:0.00}ms  " +
+                         $"lost {net.FramesLost}  late packets {net.PacketsLate}  keyframes asked {net.KeyframesRequested}");
+
+            // What estimating the motion costs. It is inside the gpu figure above, not beside it.
+            if (renderer.Flow is { View: not FlowView.Off } shownFlow)
+                Log.Info($"flow {renderer.LastFlowMs,5:0.00}ms  {shownFlow.FieldSize.Width}x{shownFlow.FieldSize.Height} vectors" +
+                         (shownFlow.LastError is { } flowError ? $"  unavailable: {flowError}" : ""));
         }
     }
 }
@@ -1323,7 +1439,7 @@ void ShowModeMenu(int screenX, int screenY)
     var submenus = new List<IntPtr>();
 
     // Re-enumerated on every open, so a card plugged in mid-session is simply there.
-    try { allDevices = CaptureDevice.Enumerate(); if (model is not null) model.Devices = allDevices; }
+    try { allDevices = EnumerateDevices(); if (model is not null) model.Devices = allDevices; }
     catch (Exception ex) { Log.Warn($"device re-enumeration failed: {ex.Message}"); }
 
     if (allDevices.Count > 1)
@@ -1419,8 +1535,44 @@ IntPtr WindowProc(IntPtr h, uint msg, IntPtr wParam, IntPtr lParam)
     }
 }
 
+// Does for the window what capturing the keyboard and mouse implies, on the thread that
+// owns it. The pointer is pinned to one invisible spot in the middle of the picture: its
+// movement is being sent to the Deck, and it must not wander off here and click on
+// something else. The title says how to get out, for the times it can be seen.
+void ApplyInputCapture()
+{
+    bool captured = pump is { InputCaptured: true };
+    if (captured == captureApplied) return;
+    captureApplied = captured;
+
+    if (!captured)
+    {
+        Win32.ClipCursor(IntPtr.Zero);
+        Win32.SetWindowTextW(hwnd, "Rayxel");
+        return;
+    }
+
+    Win32.GetClientRect(hwnd, out var client);
+    var centre = new Win32.POINT { X = (client.Right - client.Left) / 2, Y = (client.Bottom - client.Top) / 2 };
+    Win32.ClientToScreen(hwnd, ref centre);
+    var spot = new Win32.RECT { Left = centre.X, Top = centre.Y, Right = centre.X + 1, Bottom = centre.Y + 1 };
+    Win32.ClipCursor(ref spot);
+    Win32.SetCursor(IntPtr.Zero);
+    Win32.SetWindowTextW(hwnd, $"Rayxel - keyboard and mouse go to the Deck ({DeskForwarder.Key.Name} takes them back)");
+    if (model is not null) { model.ShowBar = false; model.Flyout = Flyout.None; }
+}
+
 IntPtr WindowProcCore(IntPtr h, uint msg, IntPtr wParam, IntPtr lParam)
 {
+    // While the keyboard and mouse are captured they are the Deck's. Nothing they do may
+    // also work this window: no hotkey, no bar, no window menu from Alt, no closing from
+    // Alt+F4. The key that ends the capture is read by the thread that forwards the rest.
+    if (pump is { InputCaptured: true })
+    {
+        if (msg == Win32.WM_SETCURSOR) { Win32.SetCursor(IntPtr.Zero); return 1; }
+        if (msg is (>= 0x0100 and <= 0x0109) or (>= 0x0200 and <= 0x020E)) return IntPtr.Zero;
+    }
+
     if (renderer?.Ui is { Available: true } ui)
     {
         // WM_SETCURSOR is the only place a cursor change sticks; Windows resets it on
@@ -1529,6 +1681,19 @@ void HandleKey(int vk, IntPtr h)
         case 'T': model?.CycleTelemetry(); break;
         case 'M': model?.ToggleFlyout(Flyout.Mode); break;
         case 'H': pendingHdrToggle = true; break;
+        // Optical flow: off, the vectors over the picture, the vectors alone.
+        case 'O':
+            if (renderer?.Flow is { } opticalFlow)
+            {
+                opticalFlow.View = opticalFlow.View switch
+                {
+                    FlowView.Off => FlowView.Overlay,
+                    FlowView.Overlay => FlowView.Only,
+                    _ => FlowView.Off
+                };
+                Log.Info($"optical flow view: {opticalFlow.View}");
+            }
+            break;
         // F11 walks the three window modes, in the order the panel lists them.
         case 0x7A: pendingWindowKind = windowMode?.Kind switch
             {

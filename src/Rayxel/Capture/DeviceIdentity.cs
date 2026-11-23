@@ -22,6 +22,13 @@ public enum DeviceBus
     /// </summary>
     Virtual,
 
+    /// <summary>
+    /// Not attached to this machine at all: a Steam Deck running <c>rayxel-send</c>, reached
+    /// over the network. Its "path" is <c>net://host:port</c>. There is always a codec in
+    /// its path, and its latency is set by the encoder and the network rather than a wire.
+    /// </summary>
+    Network,
+
     Other
 }
 
@@ -67,6 +74,9 @@ public readonly record struct DeviceHardwareId(
     public static DeviceHardwareId Parse(string? symbolicLink)
     {
         if (string.IsNullOrWhiteSpace(symbolicLink)) return Unknown;
+
+        if (symbolicLink.StartsWith(NetDevice.Scheme, StringComparison.OrdinalIgnoreCase))
+            return new DeviceHardwareId(DeviceBus.Network, "net", -1, -1, -1, symbolicLink[NetDevice.Scheme.Length..]);
 
         const string prefix = @"\\?\";
         var body = symbolicLink.StartsWith(prefix, StringComparison.Ordinal)

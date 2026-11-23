@@ -129,6 +129,22 @@ public sealed class Renderer : IDisposable
 
     public bool UseNis => NisEnabled && !UseProcessor && Nis is not null;
 
+    /// <summary>
+    /// Motion estimated between consecutive frames. It only runs while something asks for
+    /// it; see <see cref="OpticalFlow.View"/>.
+    /// </summary>
+    public OpticalFlow? Flow { get; private set; }
+
+    /// <summary>GPU milliseconds the last motion estimate took. Part of <see cref="LastGpuMs"/>, not on top of it.</summary>
+    public double LastFlowMs { get; private set; }
+
+    // Counts frames copied in, so the estimate runs once per new frame and never twice on
+    // the same one when the window is redrawn without a new picture.
+    private long _uploadSerial, _flowSerial;
+    private readonly ID3D11Query[] _tsFlowStart = new ID3D11Query[QueryDepth];
+    private readonly ID3D11Query[] _tsFlowEnd = new ID3D11Query[QueryDepth];
+    private readonly bool[] _flowTimed = new bool[QueryDepth];
+
     // Intermediate RGB surface: NIS consumes colour, not YUV planes, so the conversion
     // shader has to run into a texture before the compute pass can see it.
     private ID3D11Texture2D? _rgbIntermediate;
@@ -225,6 +241,7 @@ public sealed class Renderer : IDisposable
         CreatePipeline();
         Processor = new VideoProcessor(_device);
         Nis = new NisScaler(_device);
+        Flow = new OpticalFlow(_device);
 
         ReadAdapterInfo();
         Log.Info($"adapter: {AdapterName}, driver {DriverVersion}");
@@ -400,6 +417,8 @@ public sealed class Renderer : IDisposable
             _disjoint[i] = _device.CreateQuery(new QueryDescription(QueryType.TimestampDisjoint));
             _tsStart[i] = _device.CreateQuery(new QueryDescription(QueryType.Timestamp));
             _tsEnd[i] = _device.CreateQuery(new QueryDescription(QueryType.Timestamp));
+            _tsFlowStart[i] = _device.CreateQuery(new QueryDescription(QueryType.Timestamp));
+            _tsFlowEnd[i] = _device.CreateQuery(new QueryDescription(QueryType.Timestamp));
         }
     }
 
@@ -420,6 +439,12 @@ public sealed class Renderer : IDisposable
         if (end <= start) return;
 
         LastGpuMs = (end - start) * 1000.0 / dj.Frequency;
+
+        if (_flowTimed[slot]
+            && _context.GetData(_tsFlowStart[slot], out ulong flowStart)
+            && _context.GetData(_tsFlowEnd[slot], out ulong flowEnd)
+            && flowEnd > flowStart)
+            LastFlowMs = (flowEnd - flowStart) * 1000.0 / dj.Frequency;
     }
 
     /// <summary>
@@ -428,6 +453,14 @@ public sealed class Renderer : IDisposable
     /// same shader maths covers both because P010 stores its 10 bits left-aligned in 16.
     /// </summary>
     public void ConfigureVideo(int width, int height, bool isTenBit)
+    {
+        // Under the same lock as the copies into these textures. A capture card's thread is
+        // stopped before its surface is rebuilt; the network thread is not, because there
+        // the size is only learned from the frames it is already receiving.
+        lock (_context) ConfigureVideoLocked(width, height, isTenBit);
+    }
+
+    private void ConfigureVideoLocked(int width, int height, bool isTenBit)
     {
         var format = isTenBit ? Format.P010 : Format.NV12;
         if (_videoTexture is not null && _videoWidth == width && _videoHeight == height && _videoFormat == format)
@@ -499,9 +532,68 @@ public sealed class Renderer : IDisposable
         // put both threads in contention on the same lock for tens of milliseconds a frame.
         lock (_context)
         {
+            _uploadSerial++;
             _context.CopySubresourceRegion(_videoTexture, 0, 0, 0, 0, source, (uint)subresource);
             if (UseProcessor && _vpTexture is not null)
                 _context.CopySubresourceRegion(_vpTexture, 0, 0, 0, 0, source, (uint)subresource);
+        }
+    }
+
+    /// <summary>
+    /// The same copy for a source that may be larger than the picture. A decoder's texture
+    /// is as big as the size the stream is coded at, which is the picture rounded up to
+    /// whole blocks, so only the picture's own rectangle is taken. Skipped when the surface
+    /// is not this size yet — the frame is one late, not one to stretch.
+    /// <para>
+    /// With <paramref name="mark"/> a marker is left in the GPU's queue right behind the
+    /// copy, for <see cref="WaitForUpload"/>. Returns whether one was left.
+    /// </para>
+    /// </summary>
+    public bool UploadFrame(ID3D11Texture2D source, int subresource, int width, int height, bool mark = false)
+    {
+        var picture = new Vortice.Mathematics.Box(0, 0, 0, width, height, 1);
+        lock (_context)
+        {
+            if (_videoTexture is null || width != _videoWidth || height != _videoHeight) return false;
+            _uploadSerial++;
+            _context.CopySubresourceRegion(_videoTexture, 0, 0, 0, 0, source, (uint)subresource, picture);
+            if (UseProcessor && _vpTexture is not null)
+                _context.CopySubresourceRegion(_vpTexture, 0, 0, 0, 0, source, (uint)subresource, picture);
+
+            if (!mark) return false;
+            _uploadMark ??= _device.CreateQuery(new QueryDescription(QueryType.Event));
+            _context.End(_uploadMark);
+            return true;
+        }
+    }
+
+    // Reached by the GPU when it has finished the copy it was left behind.
+    private ID3D11Query? _uploadMark;
+
+    /// <summary>
+    /// Waits until the GPU has really done the upload last marked — and so the decode that
+    /// had to produce the picture before it could be copied. Handing a frame to a hardware
+    /// decoder returns at once; the decoding happens afterwards, on the GPU, and this is
+    /// the only way to see how long it took. False if it is not done within the limit.
+    /// <para>
+    /// It spins rather than sleeps, because the wait is a millisecond or two and a sleep
+    /// cannot be that short. That costs a little CPU, so it is only asked for while the
+    /// figure is on screen or being recorded.
+    /// </para>
+    /// </summary>
+    public bool WaitForUpload(double limitMs)
+    {
+        long started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var spin = new SpinWait();
+        while (true)
+        {
+            lock (_context)
+            {
+                if (_uploadMark is null) return false;
+                if (_context.GetData(_uploadMark, out int reached) && reached != 0) return true;
+            }
+            if (System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds > limitMs) return false;
+            spin.SpinOnce(sleep1Threshold: -1);
         }
     }
 
@@ -513,6 +605,19 @@ public sealed class Renderer : IDisposable
             int slot = (int)(_queryFrame % QueryDepth);
             _context.Begin(_disjoint[slot]);
             _context.End(_tsStart[slot]);
+
+            // Motion since the previous frame: once per new frame, and only while something
+            // is using it. Done first because it leaves its own targets and shaders set,
+            // and everything below sets its own again.
+            _flowTimed[slot] = false;
+            if (Flow is { View: not FlowView.Off } flow && _lumaView is not null && _uploadSerial != _flowSerial)
+            {
+                _flowSerial = _uploadSerial;
+                _context.End(_tsFlowStart[slot]);
+                flow.Estimate(_context, _lumaView, _videoWidth, _videoHeight, _sampler);
+                _context.End(_tsFlowEnd[slot]);
+                _flowTimed[slot] = true;
+            }
 
             _context.OMSetRenderTargets(_backBufferView);
             _context.RSSetViewport(0, 0, Width, Height);
@@ -591,6 +696,14 @@ public sealed class Renderer : IDisposable
                 _context.PSSetShaderResource(2, _hudView);
                 _context.OMSetBlendState(_alphaBlend);
                 _context.Draw(4, 0);
+                _context.OMSetBlendState(null);
+            }
+
+            // The estimated motion, drawn over the rectangle the video occupies.
+            if (Flow is { View: not FlowView.Off, Ready: true } shown)
+            {
+                var (_, _, shownW, shownH) = FitPixels(_videoWidth, _videoHeight, Width, Height);
+                shown.Draw(_context, fx, fy, fw, fh, shownW, shownH, SwapChainIsPq, OverlayNits, _sampler, _alphaBlend);
                 _context.OMSetBlendState(null);
             }
 
@@ -891,6 +1004,7 @@ public sealed class Renderer : IDisposable
         Ui?.Dispose();
         Processor?.Dispose();
         Nis?.Dispose();
+        Flow?.Dispose();
         _rgbIntermediateSrv?.Dispose(); _rgbIntermediateRtv?.Dispose(); _rgbIntermediate?.Dispose();
         ReleaseVideoResources();
         _hudView?.Dispose(); _hudTexture?.Dispose();

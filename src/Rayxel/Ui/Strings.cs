@@ -80,6 +80,14 @@ public static partial class Strings
             ["tFrames"] = "кадра",
             ["tJitter"] = "дрожание",
             ["tDropped"] = "потеряно",
+            ["tEnc"] = "кодер",
+            ["tNet"] = "сеть",
+            ["tDec"] = "декодер",
+
+            // The badge shown while the keyboard and mouse are sent to a network sender.
+            ["captureOn"] = "Клавиатура и мышь — на Deck",
+            ["captureBack"] = "{0} — вернуть",
+            ["mbit"] = "Мбит/с",
             ["tLate"] = "опоздали",
             ["nsTitle"] = "Нет сигнала",
             ["nsBody"] = "Устройство подключено, но кадры не приходят. Обычно консоль спит или отключён HDMI.",
@@ -158,6 +166,14 @@ public static partial class Strings
             ["tFrames"] = "frames",
             ["tJitter"] = "jitter",
             ["tDropped"] = "dropped",
+            ["tEnc"] = "encode",
+            ["tNet"] = "network",
+            ["tDec"] = "decode",
+
+            // The badge shown while the keyboard and mouse are sent to a network sender.
+            ["captureOn"] = "Keyboard and mouse go to the Deck",
+            ["captureBack"] = "{0} takes them back",
+            ["mbit"] = "Mbit/s",
             ["tLate"] = "late",
             ["nsTitle"] = "No signal",
             ["nsBody"] = "The device is connected but no frames are arriving. Usually the console is asleep or HDMI is unplugged.",
@@ -237,6 +253,14 @@ public static partial class Strings
             ["tFrames"] = "кадру",
             ["tJitter"] = "тремтіння",
             ["tDropped"] = "втрачено",
+            ["tEnc"] = "кодер",
+            ["tNet"] = "мережа",
+            ["tDec"] = "декодер",
+
+            // The badge shown while the keyboard and mouse are sent to a network sender.
+            ["captureOn"] = "Клавіатура і миша — на Deck",
+            ["captureBack"] = "{0} — повернути",
+            ["mbit"] = "Мбіт/с",
             ["tLate"] = "запізнилися",
             ["nsTitle"] = "Немає сигналу",
             ["nsBody"] = "Пристрій підключено, але кадри не надходять. Зазвичай консоль спить або від'єднано HDMI.",
@@ -315,6 +339,14 @@ public static partial class Strings
             ["tFrames"] = "Bilder",
             ["tJitter"] = "Jitter",
             ["tDropped"] = "verloren",
+            ["tEnc"] = "Encoder",
+            ["tNet"] = "Netz",
+            ["tDec"] = "Decoder",
+
+            // The badge shown while the keyboard and mouse are sent to a network sender.
+            ["captureOn"] = "Tastatur und Maus gehen an das Deck",
+            ["captureBack"] = "{0} holt sie zurück",
+            ["mbit"] = "Mbit/s",
             ["tLate"] = "verspätet",
             ["nsTitle"] = "Kein Signal",
             ["nsBody"] = "Das Gerät ist verbunden, aber es kommen keine Bilder. Meist schläft die Konsole oder HDMI ist abgezogen.",
@@ -393,6 +425,14 @@ public static partial class Strings
             ["tFrames"] = "fotogramas",
             ["tJitter"] = "jitter",
             ["tDropped"] = "perdidos",
+            ["tEnc"] = "codificador",
+            ["tNet"] = "red",
+            ["tDec"] = "decodificador",
+
+            // The badge shown while the keyboard and mouse are sent to a network sender.
+            ["captureOn"] = "Teclado y ratón van a la Deck",
+            ["captureBack"] = "{0} los devuelve",
+            ["mbit"] = "Mbit/s",
             ["tLate"] = "tarde",
             ["nsTitle"] = "Sin señal",
             ["nsBody"] = "El dispositivo está conectado, pero no llegan fotogramas. Normalmente la consola está en reposo o el HDMI desconectado.",

@@ -59,7 +59,7 @@ public sealed class PumpStats
 /// into the renderer's texture. Runs its own thread because ReadSample blocks until a
 /// frame is ready, which would otherwise stall the window's message loop.
 /// </summary>
-public sealed class FramePump : IDisposable
+public sealed class FramePump : IDisposable, INetSink
 {
     private readonly Renderer _renderer;
     private readonly AutoResetEvent _frameReady = new(false);
@@ -69,6 +69,24 @@ public sealed class FramePump : IDisposable
     private IMFDXGIDeviceManager? _dxgiManager;
     private Thread? _thread;
     private volatile bool _running;
+
+    // Used instead of a reader when the device is a sender on the network. The size is the
+    // one the surface is built for, packed as width and height, and the pending one is what
+    // the network thread saw arrive instead.
+    private NetFeed? _net;
+    private long _lastAliveTicks;
+    private long _netSize, _pendingNetSize;
+
+    // Where in the delay log the frame whose age is still being measured goes.
+    private int _deferredDelaySlot = -1;
+
+    /// <summary>
+    /// Time a network frame's decode by waiting for the GPU to finish it. That is what makes
+    /// the decode figure, and the age that includes it, real rather than the time it took
+    /// to hand the frame over — and it costs a brief spin per frame, so it is switched on
+    /// only while the figures are being shown or recorded.
+    /// </summary>
+    public volatile bool MeasureDecode;
 
     // Rolling window over the last second, so the HUD reflects now rather than an average
     // since startup — a mode switch has to show up immediately to be verifiable.
@@ -132,6 +150,11 @@ public sealed class FramePump : IDisposable
             long since = last != 0 ? last : Volatile.Read(ref _startedTicks);
             if (since == 0) return s;
 
+            // A sender on the network says so when it is there with nothing new to show: a
+            // paused game produces no frames at all, and that is not a lost signal.
+            long alive = Volatile.Read(ref _lastAliveTicks);
+            if (alive > since) since = alive;
+
             double sinceMs = (Stopwatch.GetTimestamp() - since) * 1000.0 / Stopwatch.Frequency;
             double frameMs = CurrentFps > 0 ? 1000.0 / CurrentFps : 0;
 
@@ -191,6 +214,12 @@ public sealed class FramePump : IDisposable
     {
         Stop();
 
+        if (Device.Bus == DeviceBus.Network)
+        {
+            SelectNetwork(mode, fps);
+            return;
+        }
+
         Log.Section($"switching to #{mode.TypeIndex}: {mode.Width}x{mode.Height} @ {fps:0.##} {mode.Format.Name}");
         Log.Info($"requested : {mode.Width}x{mode.Height} @ {fps:0.##} {mode.Format.Name} " +
                  $"[{DescribeTransport(mode)}]");
@@ -238,12 +267,7 @@ public sealed class FramePump : IDisposable
             }
             _renderer.ConfigureVideo((int)w, (int)h, tenBit);
 
-            lock (_statsGate)
-            {
-                _framesArrived = 0; _framesDropped = 0; _framesLate = 0;
-                _emaIntervalMs = 0; _emaJitterMs = 0; _lastArrivalTicks = 0;
-                _emaPipelineDelayMs = 0; _pipelineDelaySamples = 0; _pipelineDelayRejected = 0;
-            }
+            ResetStats();
 
             CurrentMode = mode;
             CurrentFps = actualFps;
@@ -258,6 +282,126 @@ public sealed class FramePump : IDisposable
         _thread = new Thread(CaptureLoop) { IsBackground = true, Name = "capture", Priority = ThreadPriority.Highest };
         _thread.Start();
     }
+
+    private void ResetStats()
+    {
+        lock (_statsGate)
+        {
+            _framesArrived = 0; _framesDropped = 0; _framesLate = 0;
+            _emaIntervalMs = 0; _emaJitterMs = 0; _lastArrivalTicks = 0;
+            _emaPipelineDelayMs = 0; _pipelineDelaySamples = 0; _pipelineDelayRejected = 0;
+        }
+    }
+
+    /// <summary>
+    /// The network counterpart of <see cref="Select"/>: asks the sender for this size and
+    /// starts receiving. "Mode" here means a size to request, and the rate is the one the
+    /// bitrate is budgeted for — the frames themselves come when the Deck draws them.
+    /// </summary>
+    private void SelectNetwork(CaptureMode mode, double fps)
+    {
+        Log.Section($"network source: {mode.Width}x{mode.Height} @ {fps:0.##} HEVC from {Device.Hardware.Instance}");
+
+        if (_dxgiManager is null)
+            throw new InvalidOperationException("the decoder needs the Direct3D device attached first");
+        if (!NetDevice.TryGetEndPoint(Device, out var endPoint, out string problem))
+        {
+            Fail(CaptureState.Lost, problem);
+            return;
+        }
+
+        // What the decoder produces, whatever is on the wire.
+        ActiveSubtype = "NV12";
+        ConverterInserted = false;
+        _renderer.ConfigureVideo(mode.Width, mode.Height, false);
+        Volatile.Write(ref _netSize, PackSize(mode.Width, mode.Height));
+        Volatile.Write(ref _pendingNetSize, 0);
+        ResetStats();
+
+        CurrentMode = mode;
+        CurrentFps = fps;
+        Volatile.Write(ref LastArrivalQpc, 0);
+        Volatile.Write(ref _lastAliveTicks, 0);
+        Volatile.Write(ref _startedTicks, Stopwatch.GetTimestamp());
+        StateDetail = null;
+        _state = CaptureState.Starting;
+
+        _running = true;
+        _net = new NetFeed(endPoint, mode.Width, mode.Height, (int)Math.Round(fps), NetDevice.BitrateKbps, _dxgiManager, this,
+                           () => _hasFocus);
+        _net.Start();
+    }
+
+    private static long PackSize(int width, int height) => ((long)width << 32) | (uint)height;
+
+    private volatile bool _hasFocus;
+
+    /// <summary>
+    /// Whether this app's window is the one the user is working in. Set every frame by the
+    /// thread that owns the window; a network source forwards the controller only while
+    /// it is true.
+    /// </summary>
+    public bool HasFocus { get => _hasFocus; set => _hasFocus = value; }
+
+    /// <summary>
+    /// True while a network source has the keyboard and mouse: they are then the Deck's, and
+    /// the window must leave them alone.
+    /// </summary>
+    public bool InputCaptured => _net?.InputCaptured == true;
+
+    bool INetSink.NetPicture(ID3D11Texture2D texture, int subresource, int width, int height, long captureTime)
+    {
+        if (!_running) return false;
+        _state = CaptureState.Streaming;
+
+        // The sender may deliver another size than was asked for: gamescope fits the request
+        // into its own picture and never scales up. Rebuilding the surface belongs to the
+        // thread that owns the renderer, so the size is left for it and this frame is not
+        // shown; the next one finds a surface that fits.
+        long size = PackSize(width, height);
+        bool timed = false;
+        if (size != Volatile.Read(ref _netSize)) Volatile.Write(ref _pendingNetSize, size);
+        else timed = _renderer.UploadFrame(texture, subresource, width, height, mark: MeasureDecode);
+
+        // The frame loop is woken before the wait, not after it: its drawing goes into the
+        // GPU's queue behind the decode either way, and holding it back until the decode is
+        // finished would add the wake-up to every frame for the sake of a measurement.
+        RecordArrival(captureTime, deferDelay: timed);
+        _frameReady.Set();
+
+        if (!timed) return false;
+        if (!_renderer.WaitForUpload(20)) return false;
+        RecordDeferredDelay(captureTime);
+        return true;
+    }
+
+    void INetSink.NetLost(long frames) => Interlocked.Add(ref _framesDropped, frames);
+
+    void INetSink.NetAlive() => Volatile.Write(ref _lastAliveTicks, Stopwatch.GetTimestamp());
+
+    void INetSink.NetFailed(string detail) => Fail(CaptureState.Lost, detail);
+
+    /// <summary>
+    /// Does what the network thread could only ask for. Called every frame from the thread
+    /// that owns the renderer; a no-op for a capture card.
+    /// </summary>
+    public void Service()
+    {
+        long size = Interlocked.Exchange(ref _pendingNetSize, 0);
+        if (size == 0 || size == Volatile.Read(ref _netSize)) return;
+
+        int width = (int)(size >> 32), height = (int)(size & 0xFFFFFFFF);
+        _renderer.ConfigureVideo(width, height, false);
+        Volatile.Write(ref _netSize, size);
+        if (CurrentMode is { } mode) CurrentMode = mode with { Width = width, Height = height };
+        Log.Info($"the sender's picture is {width}x{height}, not the size asked for; showing it as it is");
+    }
+
+    /// <summary>Where each frame's time went between the Deck and here; null for a capture card.</summary>
+    public NetStats? Network => _net?.Snapshot();
+
+    /// <summary>The per-frame figures recorded since <see cref="StartRecording"/>; null for a capture card.</summary>
+    public NetRecording? NetworkRecording() => _net?.Recording();
 
     public static string DescribeTransport(CaptureMode m) => m.Transport switch
     {
@@ -379,7 +523,9 @@ public sealed class FramePump : IDisposable
             _delayLog = new double[capacity];
             _intervalLog = new double[capacity];
             _logCount = 0;
+            _deferredDelaySlot = -1;
         }
+        _net?.StartRecording(capacity);
     }
 
     /// <summary>Recorded frames so far. NaN entries are frames with nothing trustworthy to say.</summary>
@@ -392,7 +538,7 @@ public sealed class FramePump : IDisposable
         }
     }
 
-    private void RecordArrival(long sampleTime100Ns)
+    private void RecordArrival(long sampleTime100Ns, bool deferDelay = false)
     {
         long now = Stopwatch.GetTimestamp();
         long mfNow = MfSystemTime();
@@ -416,31 +562,58 @@ public sealed class FramePump : IDisposable
             }
             _lastArrivalTicks = now;
 
-            // Live capture sources are supposed to stamp samples on the system clock, but
-            // that is not guaranteed — some stamp a device clock, or start from zero. A
-            // reading is only trusted when it lands in a physically plausible window;
-            // otherwise the timestamps are on a different clock and the figure is junk.
-            if (sampleTime100Ns > 0)
-            {
-                double delayMs = (mfNow - sampleTime100Ns) / 10_000.0;
-                if (delayMs is > 0 and < 500)
-                {
-                    delaySample = delayMs;
-                    _emaPipelineDelayMs = _emaPipelineDelayMs == 0
-                        ? delayMs
-                        : _emaPipelineDelayMs * 0.9 + delayMs * 0.1;
-                    _pipelineDelaySamples++;
-                }
-                else _pipelineDelayRejected++;
-            }
-            else _pipelineDelayRejected++;
+            // The age is taken here unless the caller will take it later, when the frame is
+            // really ready; the log keeps its place for that reading.
+            if (!deferDelay) delaySample = NoteDelay(sampleTime100Ns, mfNow);
 
+            _deferredDelaySlot = -1;
             if (_delayLog is not null && _logCount < _delayLog.Length)
             {
+                if (deferDelay) _deferredDelaySlot = _logCount;
                 _delayLog[_logCount] = delaySample;
                 _intervalLog![_logCount] = intervalMs;
                 _logCount++;
             }
+        }
+    }
+
+    /// <summary>
+    /// One reading of a frame's age, taken against <paramref name="mfNow"/>. NaN when it
+    /// cannot be trusted. The caller holds the stats lock.
+    /// </summary>
+    private double NoteDelay(long sampleTime100Ns, long mfNow)
+    {
+        // Live capture sources are supposed to stamp samples on the system clock, but
+        // that is not guaranteed — some stamp a device clock, or start from zero. A
+        // reading is only trusted when it lands in a physically plausible window;
+        // otherwise the timestamps are on a different clock and the figure is junk.
+        double delayMs = sampleTime100Ns > 0 ? (mfNow - sampleTime100Ns) / 10_000.0 : double.NaN;
+        if (delayMs is not (> 0 and < 500))
+        {
+            _pipelineDelayRejected++;
+            return double.NaN;
+        }
+
+        _emaPipelineDelayMs = _emaPipelineDelayMs == 0
+            ? delayMs
+            : _emaPipelineDelayMs * 0.9 + delayMs * 0.1;
+        _pipelineDelaySamples++;
+        return delayMs;
+    }
+
+    /// <summary>
+    /// The age of the frame last recorded with its delay deferred, taken now: for a network
+    /// frame, the moment the GPU has finished decoding it.
+    /// </summary>
+    private void RecordDeferredDelay(long sampleTime100Ns)
+    {
+        long mfNow = MfSystemTime();
+        lock (_statsGate)
+        {
+            double delay = NoteDelay(sampleTime100Ns, mfNow);
+            if (_deferredDelaySlot >= 0 && _delayLog is not null && _deferredDelaySlot < _delayLog.Length)
+                _delayLog[_deferredDelaySlot] = delay;
+            _deferredDelaySlot = -1;
         }
     }
 
@@ -471,6 +644,8 @@ public sealed class FramePump : IDisposable
         _running = false;
         _thread?.Join(500);
         _thread = null;
+        _net?.Dispose();
+        _net = null;
         // Keep a Lost state: it explains why the video went away. A clean stop is just idle.
         if (_state != CaptureState.Lost) _state = CaptureState.Idle;
     }

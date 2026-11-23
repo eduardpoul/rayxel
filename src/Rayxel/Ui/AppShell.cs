@@ -37,6 +37,7 @@ public static class AppShell
 
                 if (model.ShowTelemetry) TelemetryOverlay.Draw(model);
                 BottomBar.Draw(model);
+                if (model.Pump.InputCaptured) CaptureBadge.Draw(model);
                 break;
         }
 
@@ -152,9 +153,10 @@ public static class AppShell
         if (model.SplashElapsedMs < Screens.SplashDurationMs) return;
 
         // Straight past the picker when there is nothing to pick between: a chooser with
-        // one row is a dialog asking permission to do the only possible thing.
+        // one row is a dialog asking permission to do the only possible thing. The same
+        // goes for a device named on the command line, however many others there are.
         int choices = model.Devices.Count(d => !d.IsVirtual);
-        model.Screen = choices > 1 ? Screen.Devices : Screen.App;
+        model.Screen = choices > 1 && !model.DeviceNamed ? Screen.Devices : Screen.App;
 
         // The bar comes up with the first picture, so the first thing anyone sees is
         // where the controls are — and then, five seconds later, that they go away.

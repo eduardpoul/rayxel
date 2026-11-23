@@ -66,10 +66,20 @@ public static class TelemetryOverlay
 
             // Age in frames rather than milliseconds: comparing raw milliseconds between two
             // frame rates is meaningless, and people read it wrong when only the ms is shown.
-            Item("tAge", live && stats.PipelineDelayValid && model.BudgetMs > 0
-                    ? $"{Strings.Num(stats.PipelineDelayMs / model.BudgetMs, "0.00")} {Strings.T("tFrames")}"
-                    : "n/a",
-                 Theme.TextPrimary);
+            bool aged = live && stats.PipelineDelayValid && model.BudgetMs > 0;
+            string age = aged ? $"{Strings.Num(stats.PipelineDelayMs / model.BudgetMs, "0.00")} {Strings.T("tFrames")}" : "n/a";
+
+            // A frame from the network has an age made of three parts, each measured, so they
+            // are shown: the Deck's encoder, the network, this machine's decoder. They are in
+            // milliseconds because they add up, and the age then states the sum the same way.
+            if (model.ShownNet is { } net)
+            {
+                Item("tAge", aged ? $"{Strings.Ms(stats.PipelineDelayMs, "0.0")} · {age}" : "n/a", Theme.TextPrimary);
+                Item("tEnc", live ? Strings.Ms(net.EncodeMs, "0.0") : "n/a", Theme.TextPrimary);
+                Item("tNet", live && net.ClockKnown ? Strings.Ms(net.NetworkMs, "0.0") : "n/a", Theme.TextPrimary);
+                Item("tDec", live && net.DecodeKnown ? Strings.Ms(net.DecodeMs, "0.0") : "n/a", Theme.TextPrimary);
+            }
+            else Item("tAge", age, Theme.TextPrimary);
 
             // Steadiness, not delay. It has been read as latency more than once.
             Item("tJitter", live ? Strings.Ms(stats.IntervalJitterMs) : "n/a", Theme.TextPrimary);
@@ -117,6 +127,7 @@ public static class TelemetryOverlay
             Budget(model);
             ImGui.Dummy(new Vector2(0, Layout.S(6)));
             Metrics(model, stats, live);
+            if (model.ShownNet is { } net) Network(net, live);
             ImGui.Dummy(new Vector2(0, Layout.S(6)));
             Widgets.FrameGraph(model.History.Samples, model.BudgetMs, 44f);
             ImGui.Dummy(new Vector2(0, Layout.S(4)));
@@ -233,6 +244,39 @@ public static class TelemetryOverlay
             Widgets.Text(f.Caption, Theme.TextTertiary, label);
             Widgets.BaselineRow((f.Subtitle, colour, value, 0f), (f.Caption, Theme.TextTertiary, unit, 4f));
             if (note.Length > 0) Widgets.Text(f.Caption, Theme.TextTertiary, note);
+        }
+    }
+
+    /// <summary>
+    /// What the age is made of when the frames come over the network: the three stages
+    /// between the Deck's compositor and a decoded picture here, and the state of the link.
+    /// </summary>
+    private static void Network(NetStats net, bool live)
+    {
+        var f = Widgets.F;
+
+        ImGui.PushStyleVar(ImGuiStyleVar.CellPadding, new Vector2(0, Layout.S(4)));
+        if (ImGui.BeginTable("##network", 3, ImGuiTableFlags.SizingStretchSame))
+        {
+            // Sentence case, like the cells above; the one-line readout uses the same words lower.
+            Cell(Strings.Sentence(Strings.T("tEnc")), live ? Strings.Num(net.EncodeMs, "0.00") : "n/a");
+            Cell(Strings.Sentence(Strings.T("tNet")), live && net.ClockKnown ? Strings.Num(net.NetworkMs, "0.00") : "n/a");
+            Cell(Strings.Sentence(Strings.T("tDec")), live && net.DecodeKnown ? Strings.Num(net.DecodeMs, "0.00") : "n/a");
+            ImGui.EndTable();
+        }
+        ImGui.PopStyleVar();
+
+        Widgets.Text(f.Caption, net.FramesLost > 0 ? Theme.Caution : Theme.TextSecondary,
+            $"{Strings.Num(net.Mbps, "0.0")} {Strings.T("mbit")} · RTT {Strings.Ms(net.RoundTripMs, "0.0")} · " +
+            $"{net.FramesLost} {Strings.T("droppedC")}");
+
+        static void Cell(string label, string value)
+        {
+            var f = Widgets.F;
+            ImGui.TableNextColumn();
+            Widgets.Text(f.Caption, Theme.TextTertiary, label);
+            Widgets.BaselineRow((f.Subtitle, Theme.TextPrimary, value, 0f),
+                                (f.Caption, Theme.TextTertiary, value == "n/a" ? "" : Strings.T("ms"), 4f));
         }
     }
 

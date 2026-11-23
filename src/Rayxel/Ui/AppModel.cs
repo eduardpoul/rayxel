@@ -39,6 +39,9 @@ public sealed class AppModel
     // live figures repaint 120 times a second and the last digits never stop moving, which
     // makes a panel of numbers unreadable and looks like something is wrong.
     public PumpStats Shown = new();
+
+    /// <summary>The same, for what a frame's age is made of; null unless the source is on the network.</summary>
+    public NetStats? ShownNet;
     public double ShownCpuMs;
     public double ShownGpuMs;
     public string Composition = "?";
@@ -47,6 +50,7 @@ public sealed class AppModel
     public void SampleForDisplay(string composition)
     {
         Shown = Pump.Snapshot();
+        ShownNet = Pump.Network;
         ShownCpuMs = AppCpuMs;
         ShownGpuMs = GpuMs;
         Composition = composition;
@@ -78,6 +82,12 @@ public sealed class AppModel
     /// <summary>Level our own shader encodes the video at for a PQ swapchain.</summary>
     public float VideoNits = 200f;
     public double SplashElapsedMs;
+
+    /// <summary>
+    /// The device was named on the command line. The picker is then not shown at start-up:
+    /// it would be asking which device to use of someone who has just said.
+    /// </summary>
+    public bool DeviceNamed;
 
     /// <summary>Diagnostic only: renders the no-signal card without unplugging anything.</summary>
     public bool ForceNoSignal;
