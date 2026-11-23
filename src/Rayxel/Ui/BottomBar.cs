@@ -244,7 +244,9 @@ public static class BottomBar
         if (ImGui.InvisibleButton("##hdr", new Vector2(width, line)) && can) model.ToggleHdr();
         bool hovered = ImGui.IsItemHovered() && can;
         bool held = ImGui.IsItemActive() && can;
-        Widgets.Tooltip(can ? $"RTX Video HDR · +{Strings.Ms(HdrCostMs)} · H" : Strings.Sentence(reason));
+        Widgets.Tooltip(!can ? Strings.Sentence(reason)
+            : model.Renderer.SourceIsHdr ? Strings.Sentence(reason) + " · H"
+            : $"RTX Video HDR · +{Strings.Ms(HdrCostMs)} · H");
 
         var draw = ImGui.GetWindowDrawList();
         float cy = min.Y + line / 2f;
@@ -791,8 +793,21 @@ public static class BottomBar
         }
         else
         {
-            Widgets.Wrapped(f.Caption, Theme.TextTertiary,
-                $"{Strings.T("videoBright")}: {Strings.T("videoBrightDriver")}");
+            Widgets.Wrapped(f.Caption, Theme.TextTertiary, model.Renderer.SourceIsHdr
+                ? $"{Strings.T("videoBright")}: {Strings.T("hdrSrcAsIs")}"
+                : $"{Strings.T("videoBright")}: {Strings.T("videoBrightDriver")}");
+        }
+
+        // What the source is taken to be. A capture card does not always say that it is
+        // passing HDR on, so what it says can be overruled either way.
+        ImGui.Dummy(new Vector2(0, Layout.S(4)));
+        string[] ranges = [Strings.T("srcAuto"), "SDR", "HDR"];
+        int range = Math.Clamp(model.Renderer.SourceRange, 0, 2);
+        Widgets.LabelValue(Strings.T("srcRange"), model.Renderer.SourceIsHdr ? "HDR" : "SDR", Theme.TextSecondary);
+        if (Widgets.Combo("##srcrange", ranges[range], ranges, range, out int picked) && picked != range)
+        {
+            model.Renderer.SourceRange = picked;
+            model.Touch();
         }
     }
 

@@ -27,7 +27,9 @@ string? netAddress = null;
 FlowView startFlow = FlowView.Off;
 string? shotPath = null;
 bool shotCompares = false;
-bool testPattern = false;
+bool testPattern = false, testPatternHdr = false;
+bool? forcedHdrAsIs = null;
+int forcedSourceRange = -1;
 string? forcedScreen = null;
 string? forcedMode = null;
 int forcedScaler = -1;
@@ -62,6 +64,14 @@ foreach (var arg in args)
     // is written beside the screenshot as numbers (.csv). For measuring what a path does
     // to colour.
     else if (arg is "--pattern") testPattern = true;
+    // The same with the picture an HDR10 source would send.
+    else if (arg is "--pattern=hdr") { testPattern = true; testPatternHdr = true; }
+    // What the source is taken to be, whatever it says of itself: --source=auto|sdr|hdr.
+    else if (arg.StartsWith("--source=", StringComparison.OrdinalIgnoreCase))
+        forcedSourceRange = arg[9..].ToLowerInvariant() switch { "auto" => 0, "sdr" => 1, "hdr" => 2, _ => -1 };
+    // And what is done with an HDR source: --hdr-source=asis shows it untouched, =sdr converts it.
+    else if (arg.StartsWith("--hdr-source=", StringComparison.OrdinalIgnoreCase))
+        forcedHdrAsIs = arg[13..].ToLowerInvariant() switch { "asis" => true, "sdr" => false, _ => null };
     else if (arg is "--tele") startWithTelemetry = true;
     // Runs a fixed measurement and exits: warm up, record every frame for N seconds,
     // print percentiles. For comparing one pipeline configuration against another, which
@@ -257,6 +267,9 @@ try
     renderer = new Renderer();
     renderer.Initialize(hwnd, WindowWidth, WindowHeight);
     renderer.TestPattern = testPattern;
+    renderer.TestPatternHdr = testPatternHdr;
+    renderer.SourceRange = forcedSourceRange >= 0 ? forcedSourceRange : Math.Clamp(settings.SourceRange, 0, 2);
+    renderer.HdrAsIs = forcedHdrAsIs ?? settings.HdrSourceAsIs;
     if (renderer.Flow is { } startingFlow) startingFlow.View = startFlow;
 
     pump = new FramePump(active.Device, renderer);
@@ -1883,6 +1896,21 @@ void ToggleDlss()
 
 void ToggleHdr()
 {
+    // With an HDR source the switch means something else: the source as it is, or
+    // converted to SDR. RTX Video HDR, which makes HDR out of SDR, does not come into it.
+    if (renderer is { SourceIsHdr: true })
+    {
+        if (!renderer.DisplaySupportsHdr)
+        {
+            Log.Warn("the source is HDR but Windows has this display in SDR: it is converted to SDR, and cannot be shown as it is");
+            return;
+        }
+        renderer.HdrAsIs = !renderer.HdrAsIs;
+        model?.Touch();
+        Log.Info($"HDR source now {(renderer.HdrAsIs ? "shown as it is" : "converted to SDR")}");
+        return;
+    }
+
     var p = renderer?.Processor;
     if (p is null || !p.Available) { Log.Warn("RTX HDR unavailable: no D3D11 video device"); return; }
     if (!renderer!.DisplaySupportsHdr)

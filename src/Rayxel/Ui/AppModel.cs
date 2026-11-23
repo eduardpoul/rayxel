@@ -212,7 +212,10 @@ public sealed class AppModel
     {
         s.Language = Strings.Current;
         s.Scaler = ScalerIndex;
-        s.Hdr = HdrOn;
+        // The switch has two meanings and each keeps its own setting.
+        if (!Renderer.SourceIsHdr) s.Hdr = HdrOn;
+        s.HdrSourceAsIs = Renderer.HdrAsIs;
+        s.SourceRange = Renderer.SourceRange;
         s.NisSharpness = Renderer.Nis?.Sharpness ?? s.NisSharpness;
         s.DlssModel = (int)(Renderer.Dlss?.Model ?? (DlssModel)s.DlssModel);
         s.OverlayNits = OverlayNits;
@@ -244,7 +247,11 @@ public sealed class AppModel
     public int ScalerIndex =>
         Renderer.UseDlss ? 3 : Renderer.UseNis ? 1 : Renderer.Processor?.SuperResolutionEnabled == true ? 2 : 0;
 
-    public bool HdrOn => Renderer.Processor?.HdrEnabled == true;
+    /// <summary>
+    /// The HDR switch's position. For an SDR source: RTX Video HDR is making an HDR
+    /// picture of it. For an HDR source: it is going to the display as it is.
+    /// </summary>
+    public bool HdrOn => Renderer.SourceIsHdr ? Renderer.PassingHdrThrough : Renderer.Processor?.HdrEnabled == true;
 
     public bool DriverPathAvailable => Renderer.Processor is { Available: true };
 
@@ -254,6 +261,12 @@ public sealed class AppModel
     /// </summary>
     public (bool Can, string Reason) HdrReachable()
     {
+        if (Renderer.SourceIsHdr)
+        {
+            if (!Renderer.DisplaySupportsHdr) return (false, Strings.T("hdrSrcNoDisplay"));
+            if (Renderer.UseNis || Renderer.UseDlss) return (false, Strings.T("hdrSrcScaler"));
+            return (true, Renderer.HdrAsIs ? Strings.T("hdrSrcAsIs") : Strings.T("hdrSrcToSdr"));
+        }
         if (!DriverPathAvailable) return (false, Strings.T("hdrVendor"));
         if (!Renderer.DisplaySupportsHdr) return (false, Strings.T("hdrNa"));
         if (Renderer.UseNis || Renderer.UseDlss) return (false, Strings.T("hdrPath"));

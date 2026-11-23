@@ -21,6 +21,12 @@ public sealed class AppSettings
     public int Scaler { get; set; }
 
     public bool Hdr { get; set; } = true;
+
+    /// <summary>What the source is taken to be: 0 = what the device says, 1 = SDR, 2 = HDR10.</summary>
+    public int SourceRange { get; set; }
+
+    /// <summary>An HDR source shown as it is, untouched (true), or converted to SDR.</summary>
+    public bool HdrSourceAsIs { get; set; } = true;
     public float NisSharpness { get; set; } = 0.4f;
 
     /// <summary>

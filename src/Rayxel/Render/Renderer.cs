@@ -118,8 +118,14 @@ public sealed class Renderer : IDisposable
     /// </summary>
     public VideoProcessor? Processor { get; private set; }
 
-    /// <summary>True while a frame should be routed through the video processor.</summary>
-    public bool UseProcessor => Processor is { Available: true } p && (p.SuperResolutionEnabled || p.HdrEnabled);
+    /// <summary>
+    /// True while a frame should be routed through the video processor. Not for an HDR
+    /// source that is to be converted to SDR: the driver's own conversion clips everything
+    /// above about 100 nits to white (measured on the HDR test pattern), so that case is
+    /// left to our shader and the driver's filters stand down for it.
+    /// </summary>
+    public bool UseProcessor => Processor is { Available: true } p && (p.SuperResolutionEnabled || p.HdrEnabled)
+                                && !(SourceIsHdr && !(HdrAsIs && SwapChainIsPq));
 
     /// <summary>Vendor-neutral upscaler. Mutually exclusive with the driver path.</summary>
     public NisScaler? Nis { get; private set; }
@@ -370,6 +376,34 @@ public sealed class Renderer : IDisposable
     public bool SwapChainIsPq { get; private set; }
 
     /// <summary>
+    /// True when the device itself says its picture is HDR10: PQ over BT.2020. Capture
+    /// cards do not all say, so <see cref="SourceRange"/> can overrule it either way.
+    /// </summary>
+    public bool SourceReportsHdr { get; set; }
+
+    /// <summary>0 = believe the device, 1 = the source is SDR, 2 = the source is HDR10.</summary>
+    public int SourceRange { get; set; }
+
+    /// <summary>What the picture is taken to be: HDR10, or an ordinary SDR one.</summary>
+    public bool SourceIsHdr => TestPattern ? TestPatternHdr : SourceRange == 2 || (SourceRange == 0 && SourceReportsHdr);
+
+    /// <summary>
+    /// For an HDR source: shown as it is, its own values going to the display untouched,
+    /// rather than converted to SDR. Asked for; <see cref="PassingHdrThrough"/> says
+    /// whether that is what happens.
+    /// </summary>
+    public bool HdrAsIs { get; set; } = true;
+
+    /// <summary>
+    /// True while an HDR source really is going through untouched. That needs a display
+    /// in HDR to take it, and nothing that works on the picture in the way: NIS and DLSS
+    /// are given an SDR picture, so with one of them on the source is converted first.
+    /// RTX VSR is the exception: given HDR it returns HDR, the same light to within a
+    /// percent.
+    /// </summary>
+    public bool PassingHdrThrough => SourceIsHdr && HdrAsIs && SwapChainIsPq && !UseNis && !UseDlss;
+
+    /// <summary>
     /// Puts the swapchain into PQ once, at startup, when the desktop is already in HDR.
     /// Everything drawn afterwards is encoded to PQ in the pixel shader.
     /// </summary>
@@ -514,6 +548,8 @@ public sealed class Renderer : IDisposable
 
     private void ConfigureVideoLocked(int width, int height, bool isTenBit)
     {
+        // The pattern decides its own surface: it is drawn in place of whatever the source sends.
+        if (TestPattern) isTenBit = TestPatternHdr;
         var format = isTenBit ? Format.P010 : Format.NV12;
         if (_videoTexture is not null && _videoWidth == width && _videoHeight == height && _videoFormat == format)
             return;
@@ -586,23 +622,46 @@ public sealed class Renderer : IDisposable
     /// </summary>
     public bool TestPattern { get; set; }
 
-    // The rows, as a share of the picture's height, and the patches of each as sRGB values.
-    private static readonly (float Top, float Bottom, string Name, (byte R, byte G, byte B)[] Patches)[] PatternRows =
+    /// <summary>
+    /// With <see cref="TestPattern"/>: the picture an HDR source would send instead - HDR10,
+    /// which is 10-bit P010, BT.2020, PQ. A grey scale from black to 4000 nits, and the
+    /// BT.709 colour bars at 203 nits, HDR's reference white: the colours an SDR picture
+    /// has, as an HDR source carries them.
+    /// </summary>
+    public bool TestPatternHdr { get; set; }
+
+    /// <summary>A patch: for the SDR pattern its sRGB values out of 255, for the HDR one nits in BT.2020 primaries.</summary>
+    private readonly record struct Patch(string Name, float A, float B, float C);
+
+    private static readonly string[] BarNames = ["white", "yellow", "cyan", "green", "magenta", "red", "blue", "black"];
+    private static readonly (int R, int G, int B)[] BarColours =
+        [(1, 1, 1), (1, 1, 0), (0, 1, 1), (0, 1, 0), (1, 0, 1), (1, 0, 0), (0, 0, 1), (0, 0, 0)];
+
+    // The rows, as a share of the picture's height, and the patches of each.
+    private static readonly (float Top, float Bottom, Patch[] Patches)[] SdrRows =
     [
-        (0f, 0.375f, "bars 100%", Bars(255)),
-        (0.375f, 0.6875f, "grey", [.. Enumerable.Range(0, 8).Select(i => { byte v = (byte)Math.Round(i * 255 / 7.0); return (v, v, v); })]),
-        (0.6875f, 0.875f, "bars 75%", Bars(191)),
+        (0f, 0.375f, [.. BarColours.Select((c, i) => new Patch(BarNames[i], c.R * 255, c.G * 255, c.B * 255))]),
+        (0.375f, 0.6875f, [.. Enumerable.Range(0, 8).Select(i => { float v = MathF.Round(i * 255 / 7f); return new Patch($"grey {v:0}", v, v, v); })]),
+        (0.6875f, 0.875f, [.. BarColours.Select((c, i) => new Patch(BarNames[i] + " 75%", c.R * 191, c.G * 191, c.B * 191))]),
     ];
 
-    private static (byte, byte, byte)[] Bars(byte on) =>
+    private static readonly (float Top, float Bottom, Patch[] Patches)[] HdrRows =
     [
-        (on, on, on), (on, on, 0), (0, on, on), (0, on, 0), (on, 0, on), (on, 0, 0), (0, 0, on), (0, 0, 0)
+        (0f, 0.375f, [.. new float[] { 0, 25, 50, 100, 203, 400, 1000, 4000 }.Select(n => new Patch($"grey {n:0} nits", n, n, n))]),
+        (0.375f, 0.6875f, [.. BarColours.Select((c, i) => new Patch(BarNames[i] + " 709",
+            203f * (0.6274f * c.R + 0.3293f * c.G + 0.0433f * c.B),
+            203f * (0.0691f * c.R + 0.9195f * c.G + 0.0114f * c.B),
+            203f * (0.0164f * c.R + 0.0880f * c.G + 0.8956f * c.B)))]),
     ];
+
+    private (float Top, float Bottom, Patch[] Patches)[] PatternRows => TestPatternHdr ? HdrRows : SdrRows;
 
     private unsafe void FillTestPattern()
     {
-        if (_videoTexture is null || _videoFormat != Format.NV12) return;
+        bool hdr = _videoFormat == Format.P010;
+        if (_videoTexture is null || hdr != TestPatternHdr) return;
         int width = _videoWidth, height = _videoHeight;
+        var rows = PatternRows;
 
         using var staging = _device.CreateTexture2D(new Texture2DDescription
         {
@@ -610,29 +669,45 @@ public sealed class Renderer : IDisposable
             Height = (uint)height,
             MipLevels = 1,
             ArraySize = 1,
-            Format = Format.NV12,
+            Format = _videoFormat,
             SampleDescription = new SampleDescription(1, 0),
             Usage = ResourceUsage.Staging,
             CPUAccessFlags = CpuAccessFlags.Write
         });
 
-        (byte R, byte G, byte B) At(int x, int y)
+        Patch At(int x, int y)
         {
             float v = y / (float)height;
-            foreach (var row in PatternRows)
+            foreach (var row in rows)
                 if (v >= row.Top && v < row.Bottom)
                     return row.Patches[Math.Min(row.Patches.Length - 1, x * row.Patches.Length / width)];
-            return (0, 0, 0);
+            return default;
         }
 
-        // R'G'B' to Y'CbCr, BT.709, 16-235 and 16-240.
-        static (byte Y, byte Cb, byte Cr) ToYuv((byte R, byte G, byte B) c)
+        // SMPTE ST 2084: nits to the encoded value.
+        static double Pq(double nits)
         {
-            double r = c.R / 255.0, g = c.G / 255.0, b = c.B / 255.0;
-            double y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-            return ((byte)Math.Round(16 + 219 * y),
-                    (byte)Math.Round(128 + 224 * (b - y) / 1.8556),
-                    (byte)Math.Round(128 + 224 * (r - y) / 1.5748));
+            const double m1 = 0.1593017578125, m2 = 78.84375, c1 = 0.8359375, c2 = 18.8515625, c3 = 18.6875;
+            double l = Math.Pow(Math.Clamp(nits / 10000.0, 0, 1), m1);
+            return Math.Pow((c1 + c2 * l) / (1 + c3 * l), m2);
+        }
+
+        // A patch as Y' in 0..1 and Cb, Cr in -0.5..0.5: BT.709 for the SDR picture,
+        // BT.2020 over PQ for the HDR one.
+        (double Y, double Cb, double Cr) ToYuv(Patch p)
+        {
+            if (hdr)
+            {
+                double r = Pq(p.A), g = Pq(p.B), b = Pq(p.C);
+                double y = 0.2627 * r + 0.6780 * g + 0.0593 * b;
+                return (y, (b - y) / 1.8814, (r - y) / 1.4746);
+            }
+            else
+            {
+                double r = p.A / 255.0, g = p.B / 255.0, b = p.C / 255.0;
+                double y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+                return (y, (b - y) / 1.8556, (r - y) / 1.5748);
+            }
         }
 
         var map = _context.Map(staging, 0, MapMode.Write);
@@ -643,13 +718,27 @@ public sealed class Renderer : IDisposable
             byte* chroma = luma + (long)map.RowPitch * height;
             for (int y = 0; y < height; y++)
                 for (int x = 0; x < width; x++)
-                    luma[y * (long)map.RowPitch + x] = ToYuv(At(x, y)).Y;
+                {
+                    double v = ToYuv(At(x, y)).Y;
+                    // Ten bits sit in the top of sixteen.
+                    if (hdr) ((ushort*)(luma + y * (long)map.RowPitch))[x] = (ushort)((int)Math.Round(64 + 876 * v) << 6);
+                    else luma[y * (long)map.RowPitch + x] = (byte)Math.Round(16 + 219 * v);
+                }
             for (int y = 0; y < height / 2; y++)
                 for (int x = 0; x < width / 2; x++)
                 {
                     var c = ToYuv(At(x * 2, y * 2));
-                    chroma[y * (long)map.RowPitch + x * 2] = c.Cb;
-                    chroma[y * (long)map.RowPitch + x * 2 + 1] = c.Cr;
+                    if (hdr)
+                    {
+                        var line = (ushort*)(chroma + y * (long)map.RowPitch);
+                        line[x * 2] = (ushort)((int)Math.Round(512 + 896 * c.Cb) << 6);
+                        line[x * 2 + 1] = (ushort)((int)Math.Round(512 + 896 * c.Cr) << 6);
+                    }
+                    else
+                    {
+                        chroma[y * (long)map.RowPitch + x * 2] = (byte)Math.Round(128 + 224 * c.Cb);
+                        chroma[y * (long)map.RowPitch + x * 2 + 1] = (byte)Math.Round(128 + 224 * c.Cr);
+                    }
                 }
         }
         finally { _context.Unmap(staging, 0); }
@@ -657,15 +746,16 @@ public sealed class Renderer : IDisposable
         _context.CopyResource(_videoTexture, staging);
         if (_vpTexture is not null) _context.CopyResource(_vpTexture, staging);
         _uploadSerial++;
-        Log.Info($"test pattern {width}x{height} in place of the video");
+        Log.Info($"test pattern {width}x{height} ({(hdr ? "HDR10" : "SDR")}) in place of the video");
     }
 
     /// <summary>
     /// For each patch of the test pattern, what it was meant to be and what is in the
     /// back buffer where it was drawn: the swapchain's own 10-bit values, averaged over
-    /// the middle of the patch. One line a patch: row, column, the sRGB it stands for,
-    /// then red, green and blue out of 1023. Whether those are PQ or sRGB is in the first
-    /// line, with the level SDR video is being encoded at.
+    /// the middle of the patch. One line a patch: row, column, name, the three numbers
+    /// it stands for (sRGB out of 255 for the SDR pattern, nits in BT.2020 for the HDR
+    /// one), then red, green and blue out of 1023. The first line says which pattern,
+    /// whether the swapchain is PQ or sRGB, and the level SDR video is encoded at.
     /// </summary>
     public bool SavePatternReadings(string path)
     {
@@ -680,11 +770,12 @@ public sealed class Renderer : IDisposable
             desc.MiscFlags = ResourceOptionFlags.None;
             using var staging = _device.CreateTexture2D(desc);
 
+            var rows = PatternRows;
             var (left, top, shownWidth, shownHeight) = FitPixels(_videoWidth, _videoHeight, Width, Height);
             using var file = new StreamWriter(path);
             file.WriteLine(FormattableString.Invariant(
-                $"# swapchain {(SwapChainIsPq ? "PQ BT.2020" : "sRGB")}, video at {VideoNits:0} nits, {Width}x{Height}, picture {shownWidth}x{shownHeight}"));
-            file.WriteLine("row,column,name,r8,g8,b8,r10,g10,b10");
+                $"# pattern {(TestPatternHdr ? "hdr" : "sdr")}, swapchain {(SwapChainIsPq ? "PQ BT.2020" : "sRGB")}, video at {VideoNits:0} nits, {Width}x{Height}, picture {shownWidth}x{shownHeight}"));
+            file.WriteLine("row,column,name,a,b,c,r10,g10,b10");
 
             lock (_context)
             {
@@ -694,9 +785,9 @@ public sealed class Renderer : IDisposable
                 {
                     unsafe
                     {
-                        for (int r = 0; r < PatternRows.Length; r++)
+                        for (int r = 0; r < rows.Length; r++)
                         {
-                            var row = PatternRows[r];
+                            var row = rows[r];
                             int cy = top + (int)((row.Top + row.Bottom) / 2 * shownHeight);
                             for (int c = 0; c < row.Patches.Length; c++)
                             {
@@ -715,7 +806,7 @@ public sealed class Renderer : IDisposable
                                 double n = (2 * Half + 1) * (2 * Half + 1);
                                 var p = row.Patches[c];
                                 file.WriteLine(FormattableString.Invariant(
-                                    $"{r},{c},{row.Name},{p.R},{p.G},{p.B},{red / n:0.0},{green / n:0.0},{blue / n:0.0}"));
+                                    $"{r},{c},{p.Name},{p.A:0.##},{p.B:0.##},{p.C:0.##},{red / n:0.0},{green / n:0.0},{blue / n:0.0}"));
                             }
                         }
                     }
@@ -866,6 +957,15 @@ public sealed class Renderer : IDisposable
             if (Processor is { Available: true } proc && _vpTexture is not null && _videoWidth > 0)
             {
                 var (_, _, fitW, fitH) = FitPixels(_videoWidth, _videoHeight, Width, Height);
+                // An HDR source through the driver comes out HDR when it is to be shown
+                // as it is, and SDR when it is to be converted: the driver does either.
+                proc.SourceHdr = SourceIsHdr;
+                if (SourceIsHdr)
+                {
+                    // RTX Video HDR makes HDR out of SDR; a source that is HDR already has no use for it.
+                    if (proc.HdrEnabled) { proc.ToggleHdr(); HdrOutput = false; }
+                    proc.SetOutputHdr(HdrAsIs && SwapChainIsPq);
+                }
                 proc.Configure(_videoWidth, _videoHeight, _videoFormat, fitW, fitH);
                 if (UseProcessor) proc.Process(_vpTexture);
             }
@@ -1312,6 +1412,9 @@ public sealed class Renderer : IDisposable
                 ((uint*)p)[4] = mode;
                 ((uint*)p)[5] = forceNoPq ? 0u : NeedsPqEncode(mode);
                 p[6] = VideoNits;
+                // What the YUV planes hold. A picture made for a scaler (forceNoPq) is
+                // always an SDR one.
+                ((uint*)p)[7] = mode != 0 || !SourceIsHdr ? 0u : !forceNoPq && PassingHdrThrough ? 1u : 2u;
             }
             _context.Unmap(_constants, 0);
         }
@@ -1419,7 +1522,7 @@ public sealed class Renderer : IDisposable
             uint   Mode;   // 0 = YUV video, 1 = HUD overlay, 2 = pre-converted RGB
             uint   IsHdr;  // 1 when the swapchain is presenting PQ / BT.2020
             float  Nits;   // level SDR video is encoded at for a PQ swapchain
-            uint   _pad;
+            uint   Source; // video: 0 = SDR, 1 = HDR10 shown as it is, 2 = HDR10 converted to SDR
         };
 
         // SMPTE ST 2084. Input is absolute luminance normalised to 10000 nits.
@@ -1445,6 +1548,44 @@ public sealed class Renderer : IDisposable
         float3 SdrToPQ(float3 srgb, float nits)
         {
             return LinearToPQ(mul(Rec709To2020, pow(srgb, 2.2)) * (nits / 10000.0));
+        }
+
+        // SMPTE ST 2084 backwards: the encoded value to nits.
+        float3 PQToNits(float3 e)
+        {
+            const float m1 = 0.1593017578125, m2 = 78.84375;
+            const float c1 = 0.8359375, c2 = 18.8515625, c3 = 18.6875;
+            float3 p = pow(saturate(e), 1.0 / m2);
+            return 10000.0 * pow(max(p - c1, 0.0) / (c2 - c3 * p), 1.0 / m1);
+        }
+
+        static const float3x3 Rec2020To709 = {
+             1.6605, -0.5876, -0.0728,
+            -0.1246,  1.1329, -0.0083,
+            -0.0182, -0.1006,  1.1187 };
+
+        // An HDR10 picture as an SDR one. HDR's reference white, 203 nits, is where SDR
+        // white belongs, so what an HDR picture shows at ordinary brightness - faces, the
+        // interface - comes out as an SDR picture would have it. Up to three quarters of
+        // that nothing is changed; above it the rest of the range, up to 1000 nits, is
+        // folded into the quarter that is left, by brightness and not channel by channel,
+        // so that a highlight keeps its colour as it is brought down.
+        float3 HdrToSdr(float3 pq)
+        {
+            const float White = 203.0;
+            const float Most = 1000.0 / White;
+            const float Knee = 0.75;
+
+            float3 light = PQToNits(pq) / White;
+            float  lum = dot(light, float3(0.2627, 0.6780, 0.0593));
+            if (lum > Knee)
+            {
+                float x = (lum - Knee) / (1.0 - Knee);
+                float top = (Most - Knee) / (1.0 - Knee);
+                float folded = Knee + (1.0 - Knee) * x / (1.0 + x) * (1.0 + top) / top;
+                light *= min(folded, 1.0) / lum;
+            }
+            return pow(saturate(mul(Rec2020To709, light)), 1.0 / 2.2);
         }
 
         Texture2D<float>  LumaTex   : register(t0);
@@ -1486,6 +1627,21 @@ public sealed class Renderer : IDisposable
             // normalised values land on the same scale as 8-bit and need no special case.
             float  y  = LumaTex.Sample(Samp, i.uv);
             float2 cb = ChromaTex.Sample(Samp, i.uv) - 0.5;
+
+            if (Source != 0)
+            {
+                // HDR10: BT.2020, ten bits in 64-940 and 64-960, PQ.
+                float  yh = (y - 0.0625) * 1.16893;
+                float3 pq = saturate(float3(yh + 1.68523 * cb.y,
+                                            yh - 0.18806 * cb.x - 0.65296 * cb.y,
+                                            yh + 2.15013 * cb.x));
+                // As it is: the swapchain is PQ / BT.2020 too, so these are its values already.
+                if (Source == 1) return float4(pq, 1.0);
+
+                float3 sdr = HdrToSdr(pq);
+                if (IsHdr != 0) sdr = SdrToPQ(sdr, Nits);
+                return float4(sdr, 1.0);
+            }
 
             y = (y - 0.0625) * 1.1643836;
             float r = y + 1.7927410 * cb.y;

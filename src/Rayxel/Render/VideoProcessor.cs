@@ -129,7 +129,7 @@ public sealed class VideoProcessor : IDisposable
         if (!Available) return;
         if (_processor is not null && _inWidth == inWidth && _inHeight == inHeight
             && _outWidth == outWidth && _outHeight == outHeight && _inFormat == inFormat
-            && _builtForHdr == _outputHdr)
+            && _builtForHdr == _outputHdr && _builtForHdrSource == SourceHdr)
             return;
 
         ReleaseProcessor();
@@ -172,6 +172,7 @@ public sealed class VideoProcessor : IDisposable
         _inWidth = inWidth; _inHeight = inHeight; _inFormat = inFormat;
         _outWidth = outWidth; _outHeight = outHeight;
         _builtForHdr = _outputHdr;
+        _builtForHdrSource = SourceHdr;
 
         Log.Info($"video processor: {inWidth}x{inHeight} {inFormat} -> {outWidth}x{outHeight} " +
                  $"(scale {outWidth / (double)inWidth:0.00}x), {(_outputHdr ? "HDR" : "SDR")} out");
@@ -189,12 +190,14 @@ public sealed class VideoProcessor : IDisposable
                 YCbCr_xvYCC = 0,
                 Nominal_Range = 1    // 1 = 16-235 studio range
             };
-            _videoContext!.VideoProcessorSetStreamColorSpace(_processor, 0, input);
+            // An HDR10 source cannot be said in this older form at all.
+            if (!SourceHdr) _videoContext!.VideoProcessorSetStreamColorSpace(_processor, 0, input);
             // The same again in the newer form. The output is described in that form
             // (ApplyOutputColorSpace), and the two halves of a conversion are better
             // stated in one vocabulary than in two.
-            using (var vc1 = _videoContext.QueryInterfaceOrNull<ID3D11VideoContext1>())
-                vc1?.VideoProcessorSetStreamColorSpace1(_processor, 0, ColorSpaceType.YcbcrStudioG22LeftP709);
+            using (var vc1 = _videoContext!.QueryInterfaceOrNull<ID3D11VideoContext1>())
+                vc1?.VideoProcessorSetStreamColorSpace1(_processor, 0,
+                    SourceHdr ? ColorSpaceType.YcbcrStudioG2084LeftP2020 : ColorSpaceType.YcbcrStudioG22LeftP709);
 
             ApplyOutputColorSpace();
 
@@ -213,7 +216,13 @@ public sealed class VideoProcessor : IDisposable
         if (HdrEnabled) ApplyHdr(true);
     }
 
-    private bool _outputHdr, _builtForHdr;
+    private bool _outputHdr, _builtForHdr, _builtForHdrSource;
+
+    /// <summary>
+    /// True when the frames given to <see cref="Process"/> are HDR10 (PQ, BT.2020) rather
+    /// than SDR. Read by the next <see cref="Configure"/>, which rebuilds when it has changed.
+    /// </summary>
+    public bool SourceHdr { get; set; }
 
     /// <summary>
     /// Whether the processor is to produce an HDR picture (PQ / BT.2020), which is what
