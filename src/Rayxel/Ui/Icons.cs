@@ -6,7 +6,7 @@ namespace Rayxel.Ui;
 public enum Icon
 {
     ChevronDown, ChevronUp, Close, More, Volume, Muted, Pulse,
-    FullScreen, BackToWindow, Scale, Frames, Warning, Camera, MonitorOff, Lock
+    FullScreen, BackToWindow, Scale, Frames, Info, Warning, Camera, MonitorOff, Lock
 }
 
 /// <summary>
@@ -89,6 +89,13 @@ public static class Icons
                 p.Rect(2.5f, 5.5f, 10.5f, 13.5f, 1.2f);
                 p.Move(5.5f, 3.5f); p.To(5.5f, 2.5f); p.To(13.5f, 2.5f); p.To(13.5f, 10.5f); p.To(12.5f, 10.5f);
                 p.Stroke();
+                break;
+
+            // Fluent's info mark: a ring with a lower-case i in it.
+            case Icon.Info:
+                p.Arc(8, 8, 6f, 0f, MathF.PI * 2f);
+                p.Dot(8, 5.3f, 0.8f);
+                p.Line(8, 7.4f, 8, 11f);
                 break;
 
             case Icon.Warning:

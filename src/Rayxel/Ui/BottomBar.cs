@@ -128,7 +128,9 @@ public static class BottomBar
 
         string main = mode is null ? "—"
             : $"{mode.Width}×{mode.Height} · {Strings.Num(model.Pump.CurrentFps, "0.##")} {Strings.T("hz")}";
-        string tag = noSignal ? Strings.T("stNoSignal") : mode?.WireTag ?? "";
+        // The word for the wire — raw, zip — is in the list of modes, on every row; here the
+        // dot's colour says it. Only "no signal" is spelt out, being a state, not a property.
+        string tag = noSignal ? Strings.T("stNoSignal") : "";
         var tagColour = noSignal ? Theme.TextTertiary
                       : mode?.Transport == WireTransport.Raw ? Theme.Success : Theme.Caution;
 
@@ -177,11 +179,12 @@ public static class BottomBar
             : upscaler.Short();
 
         // Paying for an upscaler that has nothing to enlarge is worth a colour: the cost
-        // is real and the picture is unchanged.
+        // is real and the picture is unchanged. The cost itself is not on the bar — it is
+        // in the flyout, beside the others it can be compared with.
         bool wasted = upscaler.Index == 2 && model.ScalerInert;
 
-        _scalerMin = TechniqueChip("##scalerchip", Icon.Scale, label, upscaler.Index == 0 ? "" : upscaler.CostText,
-            wasted ? Theme.Caution : Theme.TextSecondary, model.Flyout == Flyout.Scaler, line,
+        _scalerMin = TechniqueChip("##scalerchip", Icon.Scale, wasted ? Theme.Caution : Theme.TextPrimary, label, "",
+            Theme.TextSecondary, model.Flyout == Flyout.Scaler, line,
             wasted ? string.Format(Strings.T("scaleInert"), label) : Strings.T("ttScaler"),
             () => model.ToggleFlyout(Flyout.Scaler));
     }
@@ -197,7 +200,8 @@ public static class BottomBar
         string state = off ? Strings.T("fgStateOff")
             : $"×{model.FrameGenOutput(generator.Variant() ?? "2").Factor}";
 
-        _frameGenMin = TechniqueChip("##framegenchip", Icon.Frames, off ? Strings.T("fgChip") : generator.Short(), state,
+        _frameGenMin = TechniqueChip("##framegenchip", Icon.Frames, Theme.TextPrimary,
+            off ? Strings.T("fgChip") : generator.Short(), state,
             off ? Theme.TextTertiary : Theme.TextSecondary, model.Flyout == Flyout.FrameGen, line,
             Strings.T("ttFrameGen"), () => model.ToggleFlyout(Flyout.FrameGen));
     }
@@ -207,8 +211,8 @@ public static class BottomBar
     /// the chevron of the flyout it opens. Returns where it was drawn, for anchoring that
     /// flyout.
     /// </summary>
-    private static Vector2 TechniqueChip(string id, Icon glyph, string label, string note, Vector4 noteColour,
-                                         bool open, float line, string tooltip, Action toggle)
+    private static Vector2 TechniqueChip(string id, Icon glyph, Vector4 glyphColour, string label, string note,
+                                         Vector4 noteColour, bool open, float line, string tooltip, Action toggle)
     {
         var f = Widgets.F;
 
@@ -224,7 +228,7 @@ public static class BottomBar
         var draw = ImGui.GetWindowDrawList();
         float cy = min.Y + line / 2f, x = min.X + pad;
 
-        Icons.Draw(draw, glyph, new Vector2(x, cy - icon / 2f), icon, Theme.TextPrimary);
+        Icons.Draw(draw, glyph, new Vector2(x, cy - icon / 2f), icon, glyphColour);
         x += icon + gap;
         Widgets.DrawText(draw, f.Body, new Vector2(x, cy - labelSize.Y / 2f), Theme.TextPrimary, label);
         x += labelSize.X + gap;
@@ -494,15 +498,15 @@ public static class BottomBar
     // ── techniques: upscaling and frame generation ───────────────────────────────
 
     // Both flyouts are rows of settings, the way a game's graphics menu is: what it is
-    // called on the left, the choice on the right. The first row picks the technique from
-    // a list that gives each one's cost and, for one that cannot be used, the reason; the
-    // rows under it belong to whichever technique is chosen.
-    private const float RowInset = 12f, RowLabel = 120f, RowHeight = 32f, RowGap = 6f;
+    // called on the left, an ordinary combo box on the right. What there is to explain
+    // about a row sits behind an info button beside its label, not on the surface: the
+    // flyout is for choosing, and whoever wants the reasoning asks for it.
+    private const float RowInset = 12f, RowLabel = 132f, RowHeight = 32f, RowGap = 6f;
 
     /// <summary>
     /// Which upscaler, then what goes with it: DLSS's network and the one really running,
-    /// FSR's variant, NIS's sharpness. The footer says how much enlarging there is to do at
-    /// all, which is what decides whether any of this matters.
+    /// FSR's variant, NIS's sharpness. Each one's cost is in the list it is chosen from,
+    /// and the chosen one's is in the header — the only places it is shown.
     /// </summary>
     private static bool ScalerFlyout(AppModel model)
     {
@@ -513,7 +517,12 @@ public static class BottomBar
         var current = model.Upscaler;
         Header(Strings.T("scalerTitle"), string.Format(Strings.T("costPerFrame"), current.CostText));
 
-        TechniqueRows(model, "##up", model.Upscalers, current, t => model.SelectScaler(t.Index));
+        // How much enlarging there is to do at all, which is what decides whether any of
+        // this matters. Part of what the technique's info button says.
+        string scale = model.Pump.CurrentMode is { Height: > 0 } mode && model.ScaleFactor > 0 && !model.ScalerInert
+            ? string.Format(Strings.T("scaleUp"), model.ScaleLabel, mode.Height, (int)Math.Round(mode.Height * model.ScaleFactor))
+            : "";
+        TechniqueRows(model, "##up", model.Upscalers, current, scale, t => model.SelectScaler(t.Index));
 
         if (current.Index == 1 && model.Renderer.Nis is { } nis)
         {
@@ -541,84 +550,36 @@ public static class BottomBar
             ImGui.Dummy(new Vector2(width, Layout.S(RowHeight)));
         }
 
-        // How much enlarging there is to do at all. At ×1 or below nothing is enlarged and
-        // every upscaler only costs.
-        float inset = Layout.S(RowInset);
-        ImGui.Dummy(new Vector2(0, Layout.S(10)));
-        ImGui.Indent(inset);
-        ImGui.PushTextWrapPos(Widgets.ContentRight() - inset);
-        if (model.Pump.CurrentMode is { Height: > 0 } mode && model.ScaleFactor > 0)
-        {
-            if (model.ScalerInert)
-                Widgets.Text(f.Caption, Theme.Caution, string.Format(Strings.T("scaleInert"), model.Upscalers[2].Name()));
-            else
-                Widgets.Text(f.Caption, Theme.TextTertiary, string.Format(Strings.T("scaleUp"), model.ScaleLabel,
-                    mode.Height, (int)Math.Round(mode.Height * model.ScaleFactor)));
-        }
-        ImGui.PopTextWrapPos();
-        ImGui.Unindent(inset);
-        ImGui.Dummy(new Vector2(0, Layout.S(8)));
+        // The one thing said out loud: at ×1 or below nothing is enlarged, and an upscaler
+        // that is on is being paid for and doing nothing.
+        if (model.ScalerInert && current.Index != 0)
+            Note(string.Format(Strings.T("scaleInert"), current.Short()), Theme.Caution);
 
+        ImGui.Dummy(new Vector2(0, Layout.S(12)));
         return EndFlyout();
     }
 
     /// <summary>
-    /// Frame generation, the same rows for the same kind of choice: which generator, how
-    /// many frames it shows for each one that arrives, and what that comes to on this
-    /// source and this display.
+    /// Frame generation, the same rows for the same kind of choice: which generator, and
+    /// how many frames it shows for each one that arrives.
     /// <para>
-    /// Nothing is behind it yet, and it says so in a sentence rather than by being grey
-    /// alone. The two figures it does show are arithmetic and are worded as such: the rate
-    /// a multiplier makes, and the least delay any generator of this kind adds. The GPU
-    /// time nobody has measured, so it reads as not measured.
+    /// Nothing is behind it yet. The generators are in the list, greyed, each with its
+    /// reason behind an info mark, and the technique's own info button is amber and says
+    /// the same; the multiplier is on show and cannot be set. What a multiplier would come
+    /// to — the rate, and the least delay it can add — is arithmetic, worded as such, behind
+    /// the multiplier's info button.
     /// </para>
     /// </summary>
     private static bool FrameGenFlyout(AppModel model)
     {
-        var f = Widgets.F;
         BeginFlyout("##framegen", new Vector2(_frameGenMin.X, _barMin.Y - Layout.S(8)), new Vector2(0, 1),
                     Layout.S(420), new Vector2(Layout.S(4)), Vector2.Zero);
 
         var current = model.FrameGenerator;
-        bool on = current.Index != 0 && current.Usable;
         Header(Strings.T("fgTitle"), string.Format(Strings.T("costPerFrame"), current.CostText));
+        TechniqueRows(model, "##fg", model.FrameGenerators, current, "", t => model.SelectFrameGen(t.Index));
 
-        TechniqueRows(model, "##fg", model.FrameGenerators, current, t => model.SelectFrameGen(t.Index));
-
-        if (model.Pump.CurrentFps > 0)
-        {
-            var (factor, hz) = model.FrameGenOutput(current.Variant() ?? "2");
-            string hzUnit = Strings.T("hz");
-            string result = $"{Strings.Num(model.Pump.CurrentFps, "0.##")} → {Strings.Num(hz, "0.##")} {hzUnit}";
-            if (model.DisplayHz > 0) result += " · " + string.Format(Strings.T("fgDisplay"), model.DisplayHz);
-
-            TextRow(Strings.T("fgResult"), result, on ? Theme.TextSecondary : Theme.TextTertiary, on);
-            TextRow(Strings.T("fgCost"),
-                    string.Format(Strings.T("fgCostV"), Strings.Ms(model.FrameGenDelayFloorMs(factor), "0.0")),
-                    on ? Theme.TextSecondary : Theme.TextTertiary, on);
-
-            // Frames past the display's own rate are generated and never shown.
-            if (model.DisplayHz > 0 && hz > model.DisplayHz + 0.5)
-                Note(string.Format(Strings.T("fgPast"), model.DisplayHz), on ? Theme.Caution : Theme.TextTertiary);
-        }
-
-        // Why nothing here can be turned on, said once for all of them when the reason is
-        // the same; the list gives each generator's own reason when they differ.
-        string? blocked = null;
-        foreach (var generator in model.FrameGenerators)
-        {
-            if (generator.Index == 0) continue;
-            blocked = generator.Unavailable();
-            if (blocked is null) break;
-        }
-        if (blocked is not null) Note(blocked, Theme.Caution);
-
-        ImGui.Dummy(new Vector2(0, Layout.S(10)));
-        ImGui.Indent(Layout.S(RowInset));
-        Widgets.Text(f.Caption, Theme.TextTertiary, Strings.T("closeG"));
-        ImGui.Unindent(Layout.S(RowInset));
-        ImGui.Dummy(new Vector2(0, Layout.S(8)));
-
+        ImGui.Dummy(new Vector2(0, Layout.S(12)));
         return EndFlyout();
     }
 
@@ -627,171 +588,128 @@ public static class BottomBar
     /// really running when that can differ from what was asked.
     /// </summary>
     private static void TechniqueRows(AppModel model, string id, IReadOnlyList<Technique> techniques,
-                                      Technique current, Action<Technique> select)
+                                      Technique current, string extraInfo, Action<Technique> select)
     {
-        float width = BeginRow(Strings.T("tvTechnique"));
+        // The list: a name and its cost, one line each. One that cannot be used stays in
+        // it, greyed, with its reason on an info mark instead of a cost it does not have.
+        var items = new Widgets.ComboItem[techniques.Count];
+        int index = 0;
+        bool anyOtherUsable = false;
+        for (int i = 0; i < items.Length; i++)
+        {
+            var technique = techniques[i];
+            string? why = technique.Unavailable();
+            items[i] = new(technique.Short(), why is null ? technique.CostText : "", why is null, why);
+            if (ReferenceEquals(technique, current)) index = i;
+            else if (why is null) anyOtherUsable = true;
+        }
+
         bool open = model.OpenTechniqueList;
         model.OpenTechniqueList = false;
-        TechniqueCombo(id, techniques, current, width, open, select);
+
+        // Amber when there is nothing here to choose between: that is then the thing to read.
+        float width = BeginRow(Strings.T("tvTechnique"), true, TechniqueInfo(techniques, current, extraInfo),
+                               warning: !anyOtherUsable, shown: model.ShowTechniqueInfo);
+        if (Widgets.Combo(id, items[index].Text, items, index, out int chosen, width, true, open))
+            select(techniques[chosen]);
 
         if (current.Variants.Count > 0)
         {
             // Greyed when there is nothing for it to set: the technique cannot be used, or
             // the variants are only on show beside something that is off.
             bool settable = current.Usable && !current.VariantsLocked;
-            width = BeginRow(Strings.T(current.VariantsLabel), settable);
+            width = BeginRow(Strings.T(current.VariantsLabel), settable, current.VariantsInfo());
 
             string? asked = current.Variant();
-            int index = 0;
+            int variant = 0;
             var names = new string[current.Variants.Count];
             for (int i = 0; i < names.Length; i++)
             {
                 names[i] = current.Variants[i].Text;
-                if (current.Variants[i].Id == asked) index = i;
+                if (current.Variants[i].Id == asked) variant = i;
             }
-            if (Widgets.Combo(id + "variant", names[index], names, index, out int chosen, width, settable))
-                current.SetVariant(current.Variants[chosen].Id);
+            if (Widgets.Combo(id + "variant", names[variant], names, variant, out int picked, width, settable))
+                current.SetVariant(current.Variants[picked].Id);
         }
 
         // Amber when something overrode the choice, because the row above is then not
-        // being obeyed.
+        // being obeyed; what overrode it is behind the info button.
         if (current.Running() is { } running)
-            TextRow(Strings.T("tvRunning"),
-                    running.Overridden ? string.Format(Strings.T("dlssForced"), running.Text) : running.Text,
-                    running.Overridden ? Theme.Caution : Theme.TextSecondary);
+            TextRow(Strings.T("tvRunning"), running.Text,
+                    running.Overridden is null ? Theme.TextSecondary : Theme.Caution,
+                    running.Overridden, warning: true);
     }
 
     /// <summary>
-    /// The technique's combo box. Its list is wider than the box — the width of the flyout —
-    /// because each row carries what the bar's chip cannot: one line on what the technique
-    /// does and what it costs, or, for one that cannot be used, why not. Such a row cannot
-    /// be chosen; it is there to be read.
+    /// What the technique's info button says: the chosen one's full name and what it does,
+    /// anything the caller adds, and then each one that cannot be used with its reason —
+    /// those sharing a reason named together, so a sentence is not repeated per technique.
     /// </summary>
-    private static void TechniqueCombo(string id, IReadOnlyList<Technique> techniques, Technique current,
-                                       float width, bool open, Action<Technique> select)
+    private static string TechniqueInfo(IReadOnlyList<Technique> techniques, Technique current, string extra)
     {
-        var f = Widgets.F;
-        string popup = id + "##list";
-        var size = new Vector2(width, Layout.S(RowHeight));
-        if (Widgets.ComboFace(id, current.Name(), size, true, out var min) || open) ImGui.OpenPopup(popup);
+        var text = new System.Text.StringBuilder();
+        text.Append(current.Name()).Append('\n').Append(current.Description());
+        if (extra.Length > 0) text.Append('\n').Append(extra);
 
-        float inset = Layout.S(12), padY = Layout.S(4), costColumn = Layout.S(72);
-        float listLeft = ImGui.GetWindowPos().X + Layout.S(4);
-        float listWidth = ImGui.GetWindowSize().X - Layout.S(8);
-        float wrap = listWidth - Layout.S(8) - inset * 2 - costColumn;
-
-        // A reason can run to two lines in some languages, so every row is measured.
-        Span<float> heights = stackalloc float[techniques.Count];
-        float nameH = Widgets.Measure(f.Body, "0").Y, listH = padY * 2;
-        for (int i = 0; i < techniques.Count; i++)
+        string? reason = null;
+        foreach (var technique in techniques)
         {
-            string second = techniques[i].Unavailable() ?? techniques[i].Description();
-            heights[i] = Math.Max(Layout.S(52), Layout.S(18) + nameH + Widgets.MeasureWrapped(f.Caption, second, wrap).Y);
-            listH += heights[i];
-        }
+            string? why = technique.Unavailable();
+            if (why is null) continue;
 
-        // Downwards only while the list ends clear of the bar. The flyout stands on the bar,
-        // so that is rare; otherwise it opens upwards, over the flyout's own header.
-        bool above = min.Y + size.Y + Layout.S(4) + listH > _barMin.Y - Layout.S(8);
-        ImGui.SetNextWindowPos(above ? new Vector2(listLeft, min.Y - Layout.S(4)) : new Vector2(listLeft, min.Y + size.Y + Layout.S(4)),
-                               ImGuiCond.Always, above ? new Vector2(0, 1) : Vector2.Zero);
-        ImGui.SetNextWindowSize(new Vector2(listWidth, listH));
-        ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(Layout.S(4), padY));
-        ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, Vector2.Zero);
-
-        if (ImGui.BeginPopup(popup))
-        {
-            var draw = ImGui.GetWindowDrawList();
-            for (int i = 0; i < techniques.Count; i++)
+            if (why == reason) text.Append(", ").Append(technique.Short());
+            else
             {
-                var technique = techniques[i];
-                string? why = technique.Unavailable();
-                bool usable = why is null, selected = ReferenceEquals(technique, current);
-
-                if (Widgets.ListRow($"{id}#{technique.Index}", heights[i], selected, usable, out var rowMin, out var rowMax)
-                    && !selected)
-                {
-                    select(technique);
-                    ImGui.CloseCurrentPopup();
-                }
-                var next = ImGui.GetCursorScreenPos();
-
-                float top = rowMin.Y + Layout.S(8);
-                Widgets.DrawText(draw, f.Body, new Vector2(rowMin.X + inset, top),
-                                 usable ? Theme.TextPrimary : Theme.TextDisabled, technique.Name());
-
-                ImGui.SetCursorScreenPos(new Vector2(rowMin.X + inset, top + nameH + Layout.S(2)));
-                ImGui.PushTextWrapPos(ImGui.GetCursorPosX() + wrap);
-                Widgets.Text(f.Caption, usable ? Theme.TextTertiary : Theme.Alpha(Theme.Caution, 0.8f),
-                             why ?? technique.Description());
-                ImGui.PopTextWrapPos();
-                ImGui.SetCursorScreenPos(next);
-
-                // The cost where it can be compared with the one above and below it; a lock
-                // where there is no using it, so the column never shows a figure for
-                // something that cannot be had.
-                float cy = (rowMin.Y + rowMax.Y) / 2f;
-                if (usable)
-                {
-                    string cost = technique.CostText;
-                    var c = Widgets.Measure(f.Caption, cost);
-                    Widgets.DrawText(draw, f.Caption, new Vector2(rowMax.X - inset - c.X, cy - c.Y / 2f), Theme.TextSecondary, cost);
-                }
-                else
-                {
-                    float glyph = Layout.S(16);
-                    Icons.Draw(draw, Icon.Lock, new Vector2(rowMax.X - inset - glyph, cy - glyph / 2f), glyph, Theme.Caution);
-                }
+                if (reason is not null) text.Append(": ").Append(reason);
+                text.Append("\n\n").Append(technique.Short());
+                reason = why;
             }
-            ImGui.EndPopup();
         }
-
-        ImGui.PopStyleVar(2);
+        if (reason is not null) text.Append(": ").Append(reason);
+        return text.ToString();
     }
 
     /// <summary>
-    /// Starts a row: writes its label and leaves the cursor where the control goes.
-    /// Returns the width the control has. A row is one control tall; a control that is not
-    /// must claim that height itself.
+    /// Starts a row: writes its label, with an info button after it when there is something
+    /// to say, and leaves the cursor where the control goes. Returns the width the control
+    /// has. A row is one control tall; a control that is not must claim that height itself.
     /// </summary>
-    private static float BeginRow(string label, bool enabled = true)
+    private static float BeginRow(string label, bool enabled = true, string? info = null,
+                                  bool warning = false, bool shown = false)
     {
         var f = Widgets.F;
         ImGui.Dummy(new Vector2(0, Layout.S(RowGap)));
 
         var pos = ImGui.GetCursorScreenPos();
-        float inset = Layout.S(RowInset), labelWidth = Layout.S(RowLabel);
+        float inset = Layout.S(RowInset), labelWidth = Layout.S(RowLabel), row = Layout.S(RowHeight);
         float control = ImGui.GetContentRegionAvail().X - inset * 2 - labelWidth;
 
         var size = Widgets.Measure(f.Body, label);
-        Widgets.DrawText(ImGui.GetWindowDrawList(), f.Body,
-                         new Vector2(pos.X + inset, pos.Y + (Layout.S(RowHeight) - size.Y) / 2f),
+        Widgets.DrawText(ImGui.GetWindowDrawList(), f.Body, new Vector2(pos.X + inset, pos.Y + (row - size.Y) / 2f),
                          enabled ? Theme.TextPrimary : Theme.TextDisabled, label);
+
+        if (info is { Length: > 0 })
+        {
+            ImGui.SetCursorScreenPos(new Vector2(pos.X + inset + size.X + Layout.S(4), pos.Y + (row - Layout.S(20)) / 2f));
+            Widgets.InfoButton("##info" + label, info, warning, shown);
+        }
 
         ImGui.SetCursorScreenPos(new Vector2(pos.X + inset + labelWidth, pos.Y));
         return control;
     }
 
     /// <summary>A row whose right-hand side is a statement rather than a control.</summary>
-    private static void TextRow(string label, string value, Vector4 colour, bool enabled = true)
+    private static void TextRow(string label, string value, Vector4 colour, string? info = null, bool warning = false)
     {
         var f = Widgets.F;
-        float width = BeginRow(label, enabled);
+        float width = BeginRow(label, true, info, warning);
         var at = ImGui.GetCursorScreenPos();
+        float row = Layout.S(RowHeight);
 
-        // Wrapped, and the row grows with it: a statement in German is not a short thing.
         // Starts where a combo box's own text does, so the column reads as one.
-        float lead = Layout.S(11);
-        width -= lead;
-        at.X += lead;
-        float textH = Widgets.MeasureWrapped(f.Body, value, width).Y;
-        float row = Math.Max(Layout.S(RowHeight), textH + Layout.S(8));
-
-        ImGui.SetCursorScreenPos(at + new Vector2(0, (row - textH) / 2f));
-        ImGui.PushTextWrapPos(ImGui.GetCursorPosX() + width);
-        Widgets.Text(f.Body, colour, value);
-        ImGui.PopTextWrapPos();
-        ImGui.SetCursorScreenPos(at);
+        var size = Widgets.Measure(f.Body, value);
+        Widgets.DrawText(ImGui.GetWindowDrawList(), f.Body,
+                         new Vector2(at.X + Layout.S(11), at.Y + (row - size.Y) / 2f), colour, value);
         ImGui.Dummy(new Vector2(width, row));
     }
 

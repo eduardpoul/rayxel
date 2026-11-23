@@ -51,15 +51,6 @@ public static class Widgets
         return size;
     }
 
-    /// <summary>The size <paramref name="text"/> takes when wrapped at <paramref name="wrapWidth"/> pixels.</summary>
-    public static Vector2 MeasureWrapped(ImFontPtr font, string text, float wrapWidth)
-    {
-        bool pushed = Push(font);
-        var size = ImGui.CalcTextSize(text, false, wrapWidth);
-        if (pushed) ImGui.PopFont();
-        return size;
-    }
-
     private static bool Push(ImFontPtr font)
     {
         unsafe { if (font.NativePtr == null) return false; }
@@ -370,13 +361,33 @@ public static class Widgets
     public static bool Combo(string id, string preview, IReadOnlyList<string> options, int current, out int chosen,
                              float width = 0f, bool enabled = true)
     {
+        var items = new ComboItem[options.Count];
+        for (int i = 0; i < items.Length; i++) items[i] = new(options[i]);
+        return Combo(id, preview, items, current, out chosen, width, enabled);
+    }
+
+    /// <summary>
+    /// One row of a combo box's list: its name, an optional quiet note at the right end, and
+    /// whether it can be chosen. A row that cannot keeps its place, greyed, and carries an
+    /// info mark whose tooltip says why — that is what <paramref name="Info"/> is for.
+    /// </summary>
+    public readonly record struct ComboItem(string Text, string Trailing = "", bool Enabled = true, string? Info = null);
+
+    /// <summary>
+    /// The same combo box over rows that carry more than a name. The list is as wide as
+    /// the box and a row is one line, as Fluent's is; <paramref name="open"/> drops it open
+    /// without a click.
+    /// </summary>
+    public static bool Combo(string id, string preview, ReadOnlySpan<ComboItem> options, int current, out int chosen,
+                             float width = 0f, bool enabled = true, bool open = false)
+    {
         chosen = current;
         if (width <= 0) width = ImGui.GetContentRegionAvail().X;
         var size = new Vector2(width, Layout.S(32));
-        if (ComboFace(id, preview, size, enabled, out var min)) ImGui.OpenPopup(id + "##list");
+        if (ComboFace(id, preview, size, enabled, out var min) || open) ImGui.OpenPopup(id + "##list");
 
         float rowH = Layout.S(36), padY = Layout.S(4);
-        float listH = Math.Min(rowH * options.Count + padY * 2, Layout.S(360));
+        float listH = Math.Min(rowH * options.Length + padY * 2, Layout.S(360));
         float display = ImGui.GetIO().DisplaySize.Y;
         bool above = min.Y + size.Y + Layout.S(4) + listH > display - Layout.S(8);
 
@@ -389,24 +400,71 @@ public static class Widgets
         bool changed = false;
         if (ImGui.BeginPopup(id + "##list"))
         {
-            for (int i = 0; i < options.Count; i++)
+            var draw = ImGui.GetWindowDrawList();
+            float inset = Layout.S(12), gap = Layout.S(8), glyph = Layout.S(16);
+
+            for (int i = 0; i < options.Length; i++)
             {
-                if (ListRow($"{id}#{i}", rowH, i == current, true, out var rowMin, out var rowMax) && i != current)
+                var option = options[i];
+                if (ListRow($"{id}#{i}", rowH, i == current, option.Enabled, out var rowMin, out var rowMax) && i != current)
                 {
                     chosen = i;
                     changed = true;
                     ImGui.CloseCurrentPopup();
                 }
-                var t = Measure(F.Body, options[i]);
-                DrawText(ImGui.GetWindowDrawList(), F.Body,
-                         new Vector2(rowMin.X + Layout.S(12), rowMin.Y + (rowMax.Y - rowMin.Y - t.Y) / 2f),
-                         Theme.TextPrimary, options[i]);
+                bool hovered = ImGui.IsItemHovered();
+                float cy = (rowMin.Y + rowMax.Y) / 2f, right = rowMax.X - inset;
+
+                // Why a row cannot be chosen, on the row itself: the mark shows there is
+                // something to read, the tooltip is the reading.
+                if (option.Info is { } info)
+                {
+                    Icons.Draw(draw, Icon.Info, new Vector2(right - glyph, cy - glyph / 2f), glyph,
+                               option.Enabled ? Theme.TextSecondary : Theme.Caution);
+                    right -= glyph + gap;
+                    if (hovered) ShowTooltip(info);
+                }
+
+                if (option.Trailing.Length > 0)
+                {
+                    var note = Measure(F.Caption, option.Trailing);
+                    DrawText(draw, F.Caption, new Vector2(right - note.X, cy - note.Y / 2f),
+                             option.Enabled ? Theme.TextSecondary : Theme.TextDisabled, option.Trailing);
+                    right -= note.X + gap;
+                }
+
+                var t = Measure(F.Body, option.Text);
+                draw.PushClipRect(rowMin, new Vector2(right, rowMax.Y), true);
+                DrawText(draw, F.Body, new Vector2(rowMin.X + inset, cy - t.Y / 2f),
+                         option.Enabled ? Theme.TextPrimary : Theme.TextDisabled, option.Text);
+                draw.PopClipRect();
             }
             ImGui.EndPopup();
         }
 
         ImGui.PopStyleVar(2);
         return changed;
+    }
+
+    /// <summary>
+    /// Fluent's info button: a small mark beside a label, with what there is to say about
+    /// it in a tooltip. The tooltip stands on the button rather than following the pointer,
+    /// so it reads as belonging to that label. <paramref name="warning"/> colours the mark
+    /// when the thing to read is the reason something is not as asked.
+    /// </summary>
+    public static void InfoButton(string id, string text, bool warning = false, bool shown = false)
+    {
+        float side = Layout.S(20), glyph = Layout.S(16);
+        var min = ImGui.GetCursorScreenPos();
+        ImGui.InvisibleButton(id, new Vector2(side));
+        bool hovered = ImGui.IsItemHovered();
+
+        Icons.Draw(ImGui.GetWindowDrawList(), Icon.Info, min + new Vector2((side - glyph) / 2f), glyph,
+                   warning ? Theme.Caution : hovered ? Theme.TextPrimary : Theme.TextSecondary);
+        if (!hovered && !shown) return;
+
+        ImGui.SetNextWindowPos(new Vector2(min.X, min.Y - Layout.S(6)), ImGuiCond.Always, new Vector2(0f, 1f));
+        ShowTooltip(text);
     }
 
     /// <summary>

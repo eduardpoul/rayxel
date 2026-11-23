@@ -75,12 +75,15 @@ public sealed class Technique
     /// </summary>
     public bool VariantsLocked { get; init; }
 
+    /// <summary>What there is to say about the variant asked for, for its info button; null for nothing.</summary>
+    public Func<string?> VariantsInfo { get; init; } = () => null;
+
     /// <summary>
-    /// What is actually running, when that can differ from what was asked for, and whether
-    /// something overrode the choice — which is worth a colour, because the buttons are
-    /// then not being obeyed.
+    /// What is actually running, when that can differ from what was asked for. When
+    /// something overrode the choice, <c>Overridden</c> says what did, as a sentence — and
+    /// that is worth a colour, because the setting above it is then not being obeyed.
     /// </summary>
-    public Func<(string Text, bool Overridden)?> Running { get; init; } = () => null;
+    public Func<(string Text, string? Overridden)?> Running { get; init; } = () => null;
 
     public bool Usable => Unavailable() is null;
 
@@ -396,7 +399,8 @@ public sealed class AppModel
             },
             // Not always what was asked for: the driver's own "DLSS override" names a
             // network for every program and wins.
-            Running = () => Renderer.Dlss is { ModelInUse: { } letter } dlss ? (letter, dlss.ModelForced) : null
+            Running = () => Renderer.Dlss is { ModelInUse: { } letter } dlss
+                ? (letter, dlss.ModelForced ? Strings.T("dlssForcedInfo") : null) : null
         },
         // FSR has no backend in this build. To plug one in: make Unavailable read it, give
         // the measured CostMs, wire Variant and SetVariant to it, and teach SelectScaler in
@@ -425,6 +429,9 @@ public sealed class AppModel
     /// </summary>
     public bool OpenTechniqueList;
 
+    /// <summary>Diagnostic only: shows the technique row's info tooltip without a pointer over it.</summary>
+    public bool ShowTechniqueInfo;
+
     /// <summary>
     /// Frame generation, built exactly as the upscalers are — and with nothing behind it
     /// yet. Rayxel presents through Direct3D 11 and every frame generator needs Direct3D
@@ -445,6 +452,7 @@ public sealed class AppModel
             VariantsLabel = "tvFrames",
             Variants = FrameMultipliers,
             Variant = () => FrameMultiplierId,
+            VariantsInfo = FrameGenFacts,
             VariantsLocked = true
         },
         new()
@@ -456,7 +464,8 @@ public sealed class AppModel
             Unavailable = () => Strings.T("naFrameGen"),
             VariantsLabel = "tvFrames",
             Variants = FrameMultipliers,
-            Variant = () => FrameMultiplierId
+            Variant = () => FrameMultiplierId,
+            VariantsInfo = FrameGenFacts
         },
         new()
         {
@@ -467,7 +476,8 @@ public sealed class AppModel
             Unavailable = () => Strings.T("naFrameGen"),
             VariantsLabel = "tvFrames",
             Variants = FrameMultipliers,
-            Variant = () => FrameMultiplierId
+            Variant = () => FrameMultiplierId,
+            VariantsInfo = FrameGenFacts
         }
     ];
 
@@ -517,6 +527,24 @@ public sealed class AppModel
     /// </summary>
     public double FrameGenDelayFloorMs(int factor) =>
         Pump.CurrentFps > 0 && factor > 1 ? 1000.0 / Pump.CurrentFps * (factor - 1) / factor : 0;
+
+    /// <summary>
+    /// What the multiplier comes to, for its info button: the rate it makes against the
+    /// display's own, and the least it adds to the delay. Both are arithmetic and worded as
+    /// such; the GPU time nobody has measured, and it says that too.
+    /// </summary>
+    private string? FrameGenFacts()
+    {
+        if (Pump.CurrentFps <= 0) return null;
+
+        var (factor, hz) = FrameGenOutput(FrameMultiplierId);
+        string text = $"{Strings.Num(Pump.CurrentFps, "0.##")} → {Strings.Num(hz, "0.##")} {Strings.T("hz")}";
+        if (DisplayHz > 0) text += " · " + string.Format(Strings.T("fgDisplay"), DisplayHz);
+        // Frames past the display's own rate are generated and never shown.
+        if (DisplayHz > 0 && hz > DisplayHz + 0.5) text += "\n" + string.Format(Strings.T("fgPast"), DisplayHz);
+        return text + "\n" + Strings.Sentence(
+            string.Format(Strings.T("fgCostV"), Strings.Ms(FrameGenDelayFloorMs(factor), "0.0")));
+    }
 
     // ── delay ────────────────────────────────────────────────────────────────────
 

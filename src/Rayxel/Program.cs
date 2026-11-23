@@ -306,6 +306,9 @@ try
     // one that cannot be used says about itself, is the thing to inspect.
     if (forcedScreen == "scaler-list") { model.Flyout = Flyout.Scaler; model.OpenTechniqueList = true; }
     if (forcedScreen == "framegen-list") { model.Flyout = Flyout.FrameGen; model.OpenTechniqueList = true; }
+    // And with the technique's info tooltip up, which otherwise needs a pointer over its mark.
+    if (forcedScreen == "scaler-info") { model.Flyout = Flyout.Scaler; model.ShowTechniqueInfo = true; }
+    if (forcedScreen == "framegen-info") { model.Flyout = Flyout.FrameGen; model.ShowTechniqueInfo = true; }
     if (forcedScreen == "more") model.Flyout = Flyout.More;
     if (forcedScreen == "quit") model.ConfirmQuit = true;
 

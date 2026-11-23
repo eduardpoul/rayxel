@@ -93,17 +93,19 @@ badge on the control bar say so too.
 
 Move the mouse over the picture to bring up the control bar:
 
-- **Capture mode** — resolution, rate and whether it is `raw` or `zip`; opens the list of
-  modes.
+- **Capture mode** — resolution and rate, with a dot in the wire's colour: green when the
+  picture arrives uncompressed, amber when a codec carries it. Opens the list of modes,
+  where every mode says `raw` or `zip`.
 - **Scaling** — rows of settings, as in a game's graphics menu. The technique comes from a
-  list that gives each one's cost per frame — none, NIS, RTX VSR, DLSS, FSR — and, for one
-  that cannot be used, the reason. Under it is whatever belongs to the one chosen: NIS's
-  sharpness, DLSS's model and a note of which one the driver actually ran. FSR has its
-  place in the list but no backend in this build yet, and says so.
-- **Frame generation** — the same rows for the same kind of choice: the generator, how many
-  frames it shows for each one that arrives, the rate that makes on this display and the
-  least delay it can add. **Nothing is behind it yet**: it needs Direct3D 12, and until
-  then it says so and can only be off.
+  dropdown that gives each one's cost per frame: off, NIS, RTX VSR, DLSS, FSR. One that
+  cannot be used stays in it, greyed, with the reason on its info mark. Under it is
+  whatever belongs to the one chosen: NIS's sharpness, DLSS's model and which one the
+  driver actually ran. What a row has to explain is behind the **ⓘ** beside its label.
+  FSR has its place in the list but no backend in this build yet.
+- **Frame generation** — the same rows for the same kind of choice: the generator, and how
+  many frames it shows for each one that arrives. **Nothing is behind it yet**: it needs
+  Direct3D 12, so the generators are greyed and it can only be off. The info marks say
+  why, and what a multiplier would come to on this display.
 - **HDR** — RTX Video HDR on or off; explains itself when it is unavailable.
 - **Audio, telemetry, full screen**, and **…** for device, audio routing, HDR brightness,
   window mode and language.
@@ -148,7 +150,7 @@ Everything is optional; the app needs no arguments.
 | `--console` | attach to the terminal it was started from and print the log there |
 | `--verbose` | debug-level logging |
 | `--shot=<file.png>` | render for a few seconds, save the frame as a PNG, and exit |
-| `--screen=<name>` | force a state for inspection: `splash`, `devices`, `app`, `nosignal`, `busy`, `composed`, `modes`, `scaler`, `scaler-list`, `framegen`, `framegen-list`, `more`, `quit` |
+| `--screen=<name>` | force a state for inspection: `splash`, `devices`, `app`, `nosignal`, `busy`, `composed`, `modes`, `scaler`, `scaler-list`, `scaler-info`, `framegen`, `framegen-list`, `framegen-info`, `more`, `quit` |
 
 `--shot` saves the back buffer rather than the screen, so it works even when the window is
 covered or on a display nobody is looking at.
