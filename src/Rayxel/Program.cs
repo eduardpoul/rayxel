@@ -26,6 +26,7 @@ string? deviceSelector = null;
 string? netAddress = null;
 FlowView startFlow = FlowView.Off;
 string? shotPath = null;
+bool shotCompares = false;
 string? forcedScreen = null;
 string? forcedMode = null;
 int forcedScaler = -1;
@@ -49,6 +50,10 @@ foreach (var arg in args)
     // Diagnostic: run for a few seconds, write what was rendered to a PNG, exit. Captures
     // the back buffer rather than the screen, so it works when the window is not visible.
     else if (arg.StartsWith("--shot=", StringComparison.OrdinalIgnoreCase)) shotPath = arg[7..];
+    // With --shot: the same frame written three ways (-none, -vsr, -dlss in the name)
+    // instead of the one picture. Wants --scaler=dlss, so that DLSS is already running, and
+    // --no-auto-hdr, so that the three are the same kind of picture.
+    else if (arg is "--compare") shotCompares = true;
     else if (arg is "--tele") startWithTelemetry = true;
     // Runs a fixed measurement and exits: warm up, record every frame for N seconds,
     // print percentiles. For comparing one pipeline configuration against another, which
@@ -1229,7 +1234,8 @@ void RunLoop()
         // state, grab one frame, and stop.
         if (shotPath is not null && presented > 400)
         {
-            renderer.SaveBackBuffer(shotPath);
+            if (shotCompares) renderer.SaveComparison(shotPath);
+            else renderer.SaveBackBuffer(shotPath);
             // With the motion drawn in the picture, the vectors themselves go beside it.
             renderer.SaveFlow(Path.ChangeExtension(shotPath, ".flow"));
             shotPath = null;

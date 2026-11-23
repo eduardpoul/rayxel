@@ -913,6 +913,70 @@ public sealed class Renderer : IDisposable
         }
     }
 
+    /// <summary>
+    /// The frame now on screen, drawn three ways - as it arrived, through the driver's
+    /// super resolution, and through DLSS - and each written beside <paramref name="path"/>
+    /// with the way in its name. Diagnostic only.
+    /// <para>
+    /// Two captures taken one after another are of two different frames, and a picture
+    /// that moves at all cannot be compared across them. Here nothing new is let in while
+    /// the three are drawn, so they differ in the scaler and in nothing else. DLSS has to
+    /// have been the scaler in use up to this point: what it shows is built from the
+    /// frames before as well, and that cannot be made up on the spot.
+    /// </para>
+    /// </summary>
+    public bool SaveComparison(string path)
+    {
+        string Named(string way) => Path.Combine(Path.GetDirectoryName(path) ?? "",
+            Path.GetFileNameWithoutExtension(path) + "-" + way + Path.GetExtension(path));
+
+        // Held throughout, so that no frame arrives in between.
+        lock (_context)
+        {
+            bool dlssWas = DlssEnabled, nisWas = NisEnabled;
+            bool vsrWas = Processor?.SuperResolutionEnabled == true;
+            bool ok = true;
+
+            // DLSS first, exactly as it would have been shown: a frame that has been
+            // through already is not put through again for this.
+            if (UseDlss)
+            {
+                int settlingWas = _dlssSettling;
+                if (_uploadSerial == _dlssSerial) _dlssSettling = DlssSettleFrames;
+                Render();
+                ok &= SaveBackBuffer(Named("dlss"));
+                _dlssSettling = settlingWas;
+            }
+
+            DlssEnabled = false;
+            NisEnabled = false;
+            if (vsrWas) Processor!.ToggleSuperResolution();
+            Render();
+            ok &= SaveBackBuffer(Named("none"));
+
+            // The driver's filter reads its own copy of the frame, which is only kept up
+            // to date while that filter is on.
+            if (Processor is { Available: true, SuperResolutionSupported: true } processor
+                && _vpTexture is not null && _videoTexture is not null)
+            {
+                _context.CopyResource(_vpTexture, _videoTexture);
+                if (processor.ToggleSuperResolution())
+                {
+                    // More than once: whether the filter is fully in effect on the first
+                    // frame after it is switched on is the driver's business.
+                    for (int i = 0; i < 4; i++) Render();
+                    ok &= SaveBackBuffer(Named("vsr"));
+                    processor.ToggleSuperResolution();
+                }
+            }
+
+            if (vsrWas) Processor!.ToggleSuperResolution();
+            NisEnabled = nisWas;
+            DlssEnabled = dlssWas;
+            return ok;
+        }
+    }
+
     /// <summary>The estimated motion as numbers, beside a diagnostic capture; see <see cref="OpticalFlow.Save"/>.</summary>
     public bool SaveFlow(string path)
     {
