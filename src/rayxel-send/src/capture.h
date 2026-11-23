@@ -71,4 +71,22 @@ int capture_run(struct capture *capture, int timeout_ms);
 void capture_stop(struct capture *capture);
 
 const char *capture_error(const struct capture *capture);
+
+/*
+ * A capture is never closed while pictures are flowing. gamescope (3.16, src/pipewire.cpp)
+ * hands its buffers to its compositor thread without a lock, and a consumer that vanishes
+ * mid-stream has the buffers freed on one thread while the other is still picking one up.
+ * That takes gamescope down, and the whole Steam session and the game in it with it. What
+ * it survives is being paused first: it then stops handing buffers out, and once the one
+ * in flight has come back there is nothing left to race over.
+ *
+ * So: capture_pause, then the loop runs for CAPTURE_SETTLE_MS, then capture_close. On a
+ * loop of its own capture_close does all three. On a borrowed loop the owner does the
+ * first two, because the waiting is the loop's to do and close may be called from inside
+ * one of its callbacks.
+ *
+ * After capture_pause no callback is made again.
+ */
+#define CAPTURE_SETTLE_MS 200
+void capture_pause(struct capture *capture);
 void capture_close(struct capture *capture);

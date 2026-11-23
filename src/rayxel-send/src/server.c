@@ -66,6 +66,17 @@ struct server {
 	struct wire_hello wanted;
 
 	struct capture *capture;
+
+	/* A capture that has been paused and is waiting out CAPTURE_SETTLE_MS before it may
+	 * be closed - see capture.h. No other is opened while there is one: a request that
+	 * comes meanwhile is kept and started by the tick that closes it. */
+	struct capture *leaving;
+	uint64_t leaving_since_ns;
+	bool pending;
+	struct sockaddr_in pending_from;
+	struct wire_hello pending_hello;
+	bool quitting;
+
 	struct encoder *encoder;
 	struct cursor *cursor; /* the Deck's mouse pointer, which the capture does not have */
 	struct capture_format format;
@@ -111,9 +122,14 @@ static void stop_stream(struct server *s, const char *why)
 	char name[64];
 	printf("stopped  : %s (%s)\n", why, viewer_name(s, name, sizeof(name)));
 
-	/* Closing the capture is what makes gamescope stop producing pictures for us. */
-	capture_close(s->capture);
-	s->capture = NULL;
+	/* Pausing the capture is what makes gamescope stop producing pictures for us. It is
+	 * closed a moment later, by the tick, and not here: see capture.h. */
+	if (s->capture) {
+		capture_pause(s->capture);
+		s->leaving = s->capture;
+		s->leaving_since_ns = now_ns();
+		s->capture = NULL;
+	}
 	encoder_close(s->encoder);
 	s->encoder = NULL;
 	cursor_close(s->cursor);
@@ -292,7 +308,14 @@ static void start_stream(struct server *s, const struct sockaddr_in *from, const
 {
 	char name[64];
 
+	if (s->quitting) return;
 	stop_stream(s, "replaced by a new request");
+	if (s->leaving) {
+		s->pending = true;
+		s->pending_from = *from;
+		s->pending_hello = *hello;
+		return;
+	}
 
 	s->viewer = *from;
 	s->session = hello->session;
@@ -480,8 +503,15 @@ static void on_socket(void *data, int fd, uint32_t mask)
 		}
 		case WIRE_KEYFRAME:
 		case WIRE_BYE: {
-			if ((size_t)n < sizeof(struct wire_session) || !from_viewer) break;
-			if (((const struct wire_session *)packet)->session != s->session) break;
+			if ((size_t)n < sizeof(struct wire_session)) break;
+			uint32_t session = ((const struct wire_session *)packet)->session;
+
+			/* A viewer that left before the picture it asked for could be started. */
+			if (header->type == WIRE_BYE && s->pending && session == s->pending_hello.session &&
+			    from.sin_addr.s_addr == s->pending_from.sin_addr.s_addr && from.sin_port == s->pending_from.sin_port)
+				s->pending = false;
+
+			if (!from_viewer || session != s->session) break;
 			if (header->type == WIRE_KEYFRAME) s->keyframe_wanted = true;
 			else stop_stream(s, "the viewer said goodbye");
 			break;
@@ -515,6 +545,18 @@ static void on_tick(void *data, uint64_t expirations)
 	if (s->broken) stop_stream(s, s->broken_reason);
 	else if (s->watching && now - s->last_hello_ns > VIEWER_TIMEOUT_NS) stop_stream(s, "the viewer went quiet");
 
+	if (s->leaving && now - s->leaving_since_ns >= CAPTURE_SETTLE_MS * 1000000ull) {
+		capture_close(s->leaving);
+		s->leaving = NULL;
+		if (s->quitting) {
+			pw_main_loop_quit(s->loop);
+		} else if (s->pending) {
+			s->pending = false;
+			start_stream(s, &s->pending_from, &s->pending_hello);
+			now = now_ns();
+		}
+	}
+
 	if (s->watching && now - s->last_sent_ns >= ALIVE_AFTER_NS) {
 		struct wire_session alive = {
 			.header = { .magic = WIRE_MAGIC, .version = WIRE_VERSION, .type = WIRE_ALIVE },
@@ -544,7 +586,12 @@ static void on_tick(void *data, uint64_t expirations)
 static void on_signal(void *data, int number)
 {
 	struct server *s = data;
-	pw_main_loop_quit(s->loop);
+
+	/* Not at once while a picture is flowing: the tick quits once the capture is closed. */
+	stop_stream(s, "shutting down");
+	s->pending = false;
+	if (s->leaving) s->quitting = true;
+	else pw_main_loop_quit(s->loop);
 }
 
 int server_run(const struct server_options *options)
@@ -593,7 +640,7 @@ int server_run(const struct server_options *options)
 
 	pw_main_loop_run(s->loop);
 
-	stop_stream(s, "shutting down");
+	capture_close(s->leaving); /* only if the loop ended some other way than by a signal */
 	pw_loop_destroy_source(loop, sigterm);
 	pw_loop_destroy_source(loop, sigint);
 	pw_loop_destroy_source(loop, timer);

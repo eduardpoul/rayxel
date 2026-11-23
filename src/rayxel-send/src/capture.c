@@ -25,6 +25,7 @@ struct capture {
 	struct capture_format format;
 	bool owns_loop;
 	bool timed_out;
+	bool paused; /* told to stop; nothing is reported from here on */
 	char error[256];
 };
 
@@ -41,6 +42,7 @@ static void on_state_changed(void *data, enum pw_stream_state old, enum pw_strea
 {
 	struct capture *c = data;
 
+	if (c->paused) return;
 	if (c->config.on_state) c->config.on_state(c->config.user, pw_stream_state_as_string(state), error);
 
 	if (state == PW_STREAM_STATE_ERROR) failed(c, error ? error : "stream error");
@@ -54,7 +56,7 @@ static void on_param_changed(void *data, uint32_t id, const struct spa_pod *para
 	uint32_t media_type, media_subtype;
 	struct spa_video_info_raw info;
 
-	if (param == NULL || id != SPA_PARAM_Format) return;
+	if (param == NULL || id != SPA_PARAM_Format || c->paused) return;
 	if (spa_format_parse(param, &media_type, &media_subtype) < 0) return;
 	if (media_type != SPA_MEDIA_TYPE_video || media_subtype != SPA_MEDIA_SUBTYPE_raw) return;
 
@@ -118,6 +120,12 @@ static void on_process(void *data)
 		newest = next;
 	}
 	if (!newest) return;
+
+	/* One that was already on its way when the capture was paused: straight back. */
+	if (c->paused) {
+		pw_stream_queue_buffer(c->stream, newest);
+		return;
+	}
 
 	uint64_t arrival = now_ns();
 	struct spa_buffer *buffer = newest->buffer;
@@ -278,9 +286,28 @@ const char *capture_error(const struct capture *c)
 	return c->error;
 }
 
+void capture_pause(struct capture *c)
+{
+	if (!c || c->paused) return;
+	c->paused = true;
+
+	/* An inactive consumer is what puts the source's node into its paused state. */
+	if (c->stream) pw_stream_set_active(c->stream, false);
+}
+
 void capture_close(struct capture *c)
 {
 	if (!c) return;
+
+	/* With a loop of its own there is nobody else to do the waiting; see capture.h. */
+	if (c->owns_loop && c->stream && c->timer) {
+		struct timespec settle = { .tv_nsec = CAPTURE_SETTLE_MS * 1000000L };
+
+		capture_pause(c);
+		pw_loop_update_timer(pw_main_loop_get_loop(c->loop), c->timer, &settle, NULL, false);
+		pw_main_loop_run(c->loop);
+	}
+
 	if (c->stream) pw_stream_destroy(c->stream);
 	if (c->timer) pw_loop_destroy_source(pw_main_loop_get_loop(c->loop), c->timer);
 	if (c->core) pw_core_disconnect(c->core);
