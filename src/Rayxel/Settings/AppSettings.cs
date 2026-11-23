@@ -23,8 +23,11 @@ public sealed class AppSettings
     public bool Hdr { get; set; } = true;
     public float NisSharpness { get; set; } = 0.4f;
 
-    /// <summary>Which network DLSS is asked for: 0 leaves it to DLSS, else 11 = K, 12 = L, 13 = M.</summary>
-    public int DlssModel { get; set; }
+    /// <summary>
+    /// Which network DLSS is asked for: 0 leaves it to DLSS, else 11 = K, 12 = L, 13 = M.
+    /// L to begin with; <see cref="Render.DlssScaler.Model"/> says why.
+    /// </summary>
+    public int DlssModel { get; set; } = (int)Render.DlssModel.L;
     public float OverlayNits { get; set; } = 230f;
 
     /// <summary>

@@ -276,7 +276,7 @@ try
     if (renderer.Nis is { } nisScaler) nisScaler.Sharpness = settings.NisSharpness;
     if (renderer.Dlss is { } dlssScaler)
         dlssScaler.Model = forcedDlssModel
-            ?? (Enum.IsDefined((DlssModel)settings.DlssModel) ? (DlssModel)settings.DlssModel : DlssModel.Auto);
+            ?? (Enum.IsDefined((DlssModel)settings.DlssModel) ? (DlssModel)settings.DlssModel : DlssModel.L);
 
     // Audio endpoints are listed once here and refreshed when the user opens a combo, so a
     // headset plugged in mid-session shows up without polling WASAPI every frame.

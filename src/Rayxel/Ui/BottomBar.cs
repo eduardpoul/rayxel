@@ -25,11 +25,11 @@ public static class BottomBar
 {
     // Measured on this machine with --bench rather than taken from a vendor sheet: against
     // our own blit NIS is free to inside the noise and RTX VSR costs 4.1 ms, HDR on top of
-    // it 0.66. DLSS is 1.1 ms and the motion estimate it cannot do without 0.35, taking
-    // 1280x800 to 2304x1440 on an RTX 5080 with the network the driver picked. Shown as
-    // fixed figures, because a cost that moves while it is being read cannot be compared
-    // with the one beside it.
-    private const double NisCostMs = 0.1, VsrCostMs = 4.1, DlssCostMs = 1.5, HdrCostMs = 0.66;
+    // it 0.66. DLSS with its model L, and the motion estimate it cannot do without, add
+    // 1.1 ms between them (1.69 a frame against 0.62), taking 1280x800 to 2304x1440 on an
+    // RTX 5080. Shown as fixed figures, because a cost that moves while it is being read
+    // cannot be compared with the one beside it.
+    private const double NisCostMs = 0.1, VsrCostMs = 4.1, DlssCostMs = 1.1, HdrCostMs = 0.66;
 
     // This frame's layout, for anchoring what opens above the bar. The bar is always
     // drawn first, so these are current by the time a flyout reads them.
