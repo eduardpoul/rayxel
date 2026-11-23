@@ -51,7 +51,8 @@ foreach (var arg in args)
     // Diagnostic: run for a few seconds, write what was rendered to a PNG, exit. Captures
     // the back buffer rather than the screen, so it works when the window is not visible.
     else if (arg.StartsWith("--shot=", StringComparison.OrdinalIgnoreCase)) shotPath = arg[7..];
-    // With --shot: the same frame written three ways (-none, -vsr, -dlss in the name)
+    // With --shot: the same frame written several ways (-none, -vsr, -dlss in the name, and
+    // -dlss-K-still and so on for each DLSS network on that frame held still)
     // instead of the one picture. Wants --scaler=dlss, so that DLSS is already running, and
     // --no-auto-hdr, so that the three are the same kind of picture.
     else if (arg is "--compare") shotCompares = true;

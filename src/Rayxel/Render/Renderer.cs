@@ -158,6 +158,10 @@ public sealed class Renderer : IDisposable
     // "nothing moved", so that what stays on screen is the settled result.
     private const int DlssSettleFrames = 8;
 
+    // How many times over a network is shown the one frame before SaveComparison takes its
+    // picture of it.
+    private const int ComparisonStillFrames = 24;
+
     /// <summary>
     /// Loads DLSS and finds out whether it can run here, ahead of the first frame that
     /// needs it. The reason is in <see cref="DlssScaler.LastError"/> when it cannot.
@@ -924,6 +928,10 @@ public sealed class Renderer : IDisposable
     /// have been the scaler in use up to this point: what it shows is built from the
     /// frames before as well, and that cannot be made up on the spot.
     /// </para>
+    /// <para>
+    /// After those come DLSS's networks K, L and M on the same frame held still, with
+    /// "-still" in the name.
+    /// </para>
     /// </summary>
     public bool SaveComparison(string path)
     {
@@ -968,6 +976,28 @@ public sealed class Renderer : IDisposable
                     ok &= SaveBackBuffer(Named("vsr"));
                     processor.ToggleSuperResolution();
                 }
+            }
+
+            // DLSS's networks beside each other. Each is given this same frame over and
+            // over, as a picture in which nothing moves, until it has settled. That shows
+            // what each makes of a frame at rest; how they differ in coping with movement
+            // does not show here, and cannot on a single frame.
+            if (dlssWas && Dlss is { Possible: true } dlss)
+            {
+                var modelWas = dlss.Model;
+                DlssEnabled = true;
+                foreach (var model in (DlssModel[])[DlssModel.K, DlssModel.L, DlssModel.M])
+                {
+                    dlss.Model = model;
+                    for (int i = 0; i < ComparisonStillFrames; i++)
+                    {
+                        _dlssSettling = 0;
+                        Render();
+                    }
+                    // Named for the network that ran, which the driver may have chosen instead.
+                    ok &= SaveBackBuffer(Named("dlss-" + (dlss.ModelInUse ?? model.ToString()) + "-still"));
+                }
+                dlss.Model = modelWas;
             }
 
             if (vsrWas) Processor!.ToggleSuperResolution();
