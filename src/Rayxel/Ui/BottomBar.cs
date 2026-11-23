@@ -586,9 +586,9 @@ public static class BottomBar
     /// <summary>
     /// The rows every technique has: which one, and the variant it is set to.
     /// <para>
-    /// What is really running has no row of its own. It is the chosen variant, and where it
-    /// is not — DLSS left to choose for itself, or the driver overriding the choice — the
-    /// variant's box shows both, asked and running, and the list marks the one that runs.
+    /// What is really running has no row of its own: the variant's box shows it. When the
+    /// choice has been overridden the box cannot be set, and the reason and the way out are
+    /// written under it.
     /// </para>
     /// </summary>
     private static void TechniqueRows(AppModel model, string id, IReadOnlyList<Technique> techniques,
@@ -619,39 +619,51 @@ public static class BottomBar
 
         if (current.Variants.Count == 0) return;
 
-        // Greyed when there is nothing for it to set: the technique cannot be used, or the
-        // variants are only on show beside something that is off.
-        bool settable = current.Usable && !current.VariantsLocked;
         string? asked = current.Variant();
         var running = current.Running();
+        string? overridden = running?.Overridden;
+
+        // Greyed when there is nothing for it to set: the technique cannot be used, the
+        // variants are only on show beside something that is off, or something else has
+        // overridden the choice — and then nothing chosen here would be obeyed.
+        bool settable = current.Usable && !current.VariantsLocked && overridden is null;
 
         var variants = new Widgets.ComboItem[current.Variants.Count];
-        int variant = 0;
+        int variant = 0, runs = -1;
+        for (int i = 0; i < variants.Length; i++)
+        {
+            if (current.Variants[i].Id == asked) variant = i;
+            if (current.Variants[i].Text == running?.Text) runs = i;
+        }
         for (int i = 0; i < variants.Length; i++)
         {
             var v = current.Variants[i];
-            // The one that is running says so in the list, whichever one was asked for.
-            variants[i] = new(v.Text, running?.Text == v.Text ? Strings.T("tvRunning").ToLowerInvariant() : "",
+            // Marked in the list only when it is not simply the one chosen.
+            variants[i] = new(v.Text, i == runs && runs != variant ? Strings.T("tvRunning").ToLowerInvariant() : "",
                               true, current.VariantInfo(v.Id));
-            if (v.Id == asked) variant = i;
         }
 
-        // Asked and running side by side when they differ — amber when the difference is
-        // someone else's doing, and then the info button says whose.
-        string preview = variants[variant].Text;
-        bool differs = running is { } r && r.Text != preview;
-        if (differs) preview = $"{preview} → {running!.Value.Text}";
-        string? overridden = running?.Overridden;
+        // The box shows what is running. That is the variant chosen, except when the choice
+        // was left to the technique — then the choice and what it came to — or overridden,
+        // and then only what runs: the choice is not in force.
+        string preview = runs < 0 || runs == variant ? variants[variant].Text
+            : overridden is null ? $"{variants[variant].Text} · {variants[runs].Text}"
+            : variants[runs].Text;
+        int shown = overridden is not null && runs >= 0 ? runs : variant;
 
         // A list that cannot be opened cannot speak for its rows, so the label does.
-        width = BeginRow(Strings.T(current.VariantsLabel), settable,
-                         overridden ?? (settable ? null : current.VariantInfo(asked ?? "")),
-                         warning: overridden is not null);
+        width = BeginRow(Strings.T(current.VariantsLabel), settable || overridden is not null,
+                         settable ? null : current.VariantInfo(current.Variants[shown].Id));
         int variantAt = settable ? Math.Min(model.OpenVariantAt, variants.Length - 1) : -1;
         model.OpenVariantAt = -1;
+        // Overridden, the box is shut but what it shows is what runs, so it is not greyed.
         if (Widgets.Combo(id + "variant", preview, variants, variant, out int picked, width, settable, variantAt,
-                          overridden is not null ? Theme.Caution : null))
+                          valueStands: overridden is not null))
             current.SetVariant(current.Variants[picked].Id);
+
+        // Why it cannot be set and what to do about it, written out: this is something to
+        // act on, not something to look up.
+        if (overridden is not null) Note(overridden, Theme.Caution);
     }
 
     /// <summary>

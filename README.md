@@ -100,9 +100,10 @@ Move the mouse over the picture to bring up the control bar:
   dropdown that gives each one's cost per frame: off, NIS, RTX VSR, DLSS, FSR. Point at a
   row, or walk the list with the arrow keys, and what that row is appears beside it; one
   that cannot be used stays in the list, greyed, and says why there. Under it is whatever
-  belongs to the one chosen: NIS's sharpness, DLSS's model. When the model running is not
-  the one asked for — DLSS choosing for itself, or the driver overriding — the box shows
-  both, `L → M`, and the list marks the one that runs. What concerns a row as a whole is
+  belongs to the one chosen: NIS's sharpness, DLSS's model. The model's box shows the one
+  that is running. When the driver's own DLSS override names the model, nothing chosen in
+  Rayxel would be obeyed, so the box is shut and the reason is written under it together
+  with where in the NVIDIA app to switch that off. What concerns a row as a whole is
   behind the **ⓘ** beside its label. FSR has its place in the list but no backend in this
   build yet.
 - **Frame generation** — the same rows for the same kind of choice: the generator, and how

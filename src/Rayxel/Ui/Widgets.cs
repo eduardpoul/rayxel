@@ -402,14 +402,14 @@ public static class Widgets
     /// </para>
     /// </summary>
     public static bool Combo(string id, string preview, ReadOnlySpan<ComboItem> options, int current, out int chosen,
-                             float width = 0f, bool enabled = true, int openAt = -1, Vector4? previewColour = null)
+                             float width = 0f, bool enabled = true, int openAt = -1, bool valueStands = false)
     {
         chosen = current;
         if (width <= 0) width = ImGui.GetContentRegionAvail().X;
         var size = new Vector2(width, Layout.S(32));
         string popup = id + "##list";
 
-        bool opened = ComboFace(id, preview, size, enabled, out var min, previewColour) || openAt >= 0;
+        bool opened = ComboFace(id, preview, size, enabled, out var min, valueStands) || openAt >= 0;
         if (opened)
         {
             ImGui.OpenPopup(popup);
@@ -552,10 +552,12 @@ public static class Widgets
     /// <summary>
     /// A combo box's closed face alone — the value and the chevron — for a caller that
     /// opens a list of its own under it. True when it was clicked. Disabled, it keeps its
-    /// value in view and takes no clicks; saying why is the caller's business.
+    /// value in view and takes no clicks; saying why is the caller's business. The value is
+    /// greyed with the rest unless <paramref name="valueStands"/>: a box that cannot be set
+    /// because something else set it is still showing what is true.
     /// </summary>
     public static bool ComboFace(string id, string preview, Vector2 size, bool enabled, out Vector2 min,
-                                 Vector4? previewColour = null)
+                                 bool valueStands = false)
     {
         min = ImGui.GetCursorScreenPos();
         bool clicked = ImGui.InvisibleButton(id, size) && enabled;
@@ -572,7 +574,7 @@ public static class Widgets
         var textSize = Measure(F.Body, preview);
         draw.PushClipRect(min, min + new Vector2(size.X - pad - chevron - Layout.S(4), size.Y), true);
         DrawText(draw, F.Body, new Vector2(min.X + pad, min.Y + (size.Y - textSize.Y) / 2f),
-                 !enabled ? Theme.TextDisabled : previewColour ?? Theme.TextPrimary, preview);
+                 enabled || valueStands ? Theme.TextPrimary : Theme.TextDisabled, preview);
         draw.PopClipRect();
         Icons.Draw(draw, Icon.ChevronDown, new Vector2(min.X + size.X - pad - chevron, min.Y + (size.Y - chevron) / 2f),
                    chevron, enabled ? Theme.TextSecondary : Theme.TextDisabled);

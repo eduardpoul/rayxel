@@ -84,9 +84,9 @@ public sealed class Technique
     /// <summary>
     /// What is actually running, by the name of one of <see cref="Variants"/>, when that
     /// can differ from what was asked for. The menu has no row for it: the variant's own
-    /// box shows the two side by side when they differ. When something overrode the
-    /// choice, <c>Overridden</c> says what did, as a sentence — and that is worth a colour,
-    /// because the setting is then not being obeyed.
+    /// box shows it. When something overrode the choice, <c>Overridden</c> says what did
+    /// and how to undo it, as sentences — the box then cannot be set, since nothing chosen
+    /// in it would be obeyed, and those sentences are written under it.
     /// </summary>
     public Func<(string Text, string? Overridden)?> Running { get; init; } = () => null;
 
@@ -406,7 +406,7 @@ public sealed class AppModel
             // Not always what was asked for: the driver's own "DLSS override" names a
             // network for every program and wins.
             Running = () => Renderer.Dlss is { ModelInUse: { } letter } dlss
-                ? (letter, dlss.ModelForced ? string.Format(Strings.T("dlssForcedInfo"), letter) : null) : null
+                ? (letter, dlss.ModelForced ? DlssOverrideAdvice() : null) : null
         },
         // FSR has no backend in this build. To plug one in: make Unavailable read it, give
         // the measured CostMs, wire Variant and SetVariant to it, and teach SelectScaler in
@@ -424,6 +424,29 @@ public sealed class AppModel
     ];
 
     private bool IntelDriver => Renderer.Processor?.Vendor == VideoProcessor.GpuVendor.Intel;
+
+    private long _dlssDllLooked = -10_000;
+    private bool _dlssDllBeside;
+
+    /// <summary>
+    /// Why the DLSS model cannot be chosen while the driver's override names one, and where
+    /// that is switched off. With no nvngx_dlss.dll beside this program there is a step
+    /// before it: the driver lends its own copy only while the override is on, so turning
+    /// it off first would take DLSS away altogether. Looked for at most every two seconds;
+    /// the file can be put there while the menu is open.
+    /// </summary>
+    private string DlssOverrideAdvice()
+    {
+        long now = Environment.TickCount64;
+        if (now - _dlssDllLooked > 2000)
+        {
+            _dlssDllLooked = now;
+            _dlssDllBeside = File.Exists(Path.Combine(AppContext.BaseDirectory, "nvngx_dlss.dll"));
+        }
+        return _dlssDllBeside
+            ? Strings.T("dlssForcedInfo")
+            : Strings.T("dlssForcedInfo") + ". " + Strings.T("dlssForcedNoDll");
+    }
 
     /// <summary>The upscaler that is running.</summary>
     public Technique Upscaler => Upscalers[Math.Clamp(ScalerIndex, 0, Upscalers.Count - 1)];
