@@ -112,28 +112,21 @@ public sealed class Renderer : IDisposable
     public uint LastSyncRefreshCount { get; private set; }
 
     /// <summary>
-    /// The VSR/RTX-HDR path. Null until <see cref="Initialize"/> runs. When either
-    /// feature is on, frames go through VideoProcessorBlt instead of our own shader,
-    /// because that is the only place the driver exposes them.
+    /// The driver's video processor, which is where RTX Video HDR lives: it cannot be
+    /// applied to a texture, only switched on for a video stream. Null until
+    /// <see cref="Initialize"/> runs. While that filter is on, frames go through
+    /// VideoProcessorBlt instead of our own shader.
     /// </summary>
     public VideoProcessor? Processor { get; private set; }
 
     /// <summary>
-    /// True while a frame should be routed through the video processor. Not for an HDR
-    /// source that is to be converted to SDR: the driver's own conversion clips everything
-    /// above about 100 nits to white (measured on the HDR test pattern), so that case is
-    /// left to our shader and the driver's filters stand down for it.
+    /// True while a frame should be routed through the video processor: RTX Video HDR is
+    /// on, and the source is an SDR one for it to work on. An HDR source is never the
+    /// driver's - shown as it is, it is ours to pass through untouched, and converted to
+    /// SDR the driver's conversion clips everything above about 100 nits to white
+    /// (measured on the HDR test pattern).
     /// </summary>
-    public bool UseProcessor => Processor is { Available: true } p && (p.SuperResolutionEnabled || p.HdrEnabled)
-                                && !(SourceIsHdr && !(HdrAsIs && SwapChainIsPq));
-
-    /// <summary>Vendor-neutral upscaler. Mutually exclusive with the driver path.</summary>
-    public NisScaler? Nis { get; private set; }
-
-    /// <summary>Requested by the user; only actually used when the driver path is off.</summary>
-    public bool NisEnabled { get; set; }
-
-    public bool UseNis => NisEnabled && !UseProcessor && Nis is not null;
+    public bool UseProcessor => Processor is { Available: true, HdrEnabled: true } && !SourceIsHdr;
 
     /// <summary>DLSS Super Resolution, fed by <see cref="Flow"/>. Null until <see cref="Initialize"/> runs.</summary>
     public DlssScaler? Dlss { get; private set; }
@@ -142,10 +135,10 @@ public sealed class Renderer : IDisposable
     public bool DlssEnabled { get; set; }
 
     /// <summary>
-    /// True while DLSS has the frame: asked for, neither of the other two in the way, and
+    /// True while DLSS has the frame: asked for, the driver's path not in the way, and
     /// not yet found to be impossible here.
     /// </summary>
-    public bool UseDlss => DlssEnabled && !UseProcessor && !NisEnabled && Dlss is { Possible: true };
+    public bool UseDlss => DlssEnabled && !UseProcessor && Dlss is { Possible: true };
 
     /// <summary>
     /// GPU milliseconds the last DLSS pass took, with the colour conversion and the
@@ -160,10 +153,10 @@ public sealed class Renderer : IDisposable
     public bool FsrEnabled { get; set; }
 
     /// <summary>
-    /// True while FSR has the frame: asked for, none of the other three in the way, and
-    /// its library found and not yet seen to fail.
+    /// True while FSR has the frame: asked for, neither DLSS nor the driver's path in the
+    /// way, and its library found and not yet seen to fail.
     /// </summary>
-    public bool UseFsr => FsrEnabled && !UseProcessor && !NisEnabled && !DlssEnabled && Fsr is { Possible: true };
+    public bool UseFsr => FsrEnabled && !UseProcessor && !DlssEnabled && Fsr is { Possible: true };
 
     /// <summary>
     /// GPU milliseconds the last FSR pass took, counted as <see cref="LastDlssMs"/> is,
@@ -231,7 +224,7 @@ public sealed class Renderer : IDisposable
     private readonly ID3D11Query[] _tsFlowEnd = new ID3D11Query[QueryDepth];
     private readonly bool[] _flowTimed = new bool[QueryDepth];
 
-    // Intermediate RGB surface: NIS and DLSS consume colour, not YUV planes, so the
+    // Intermediate RGB surface: DLSS and FSR consume colour, not YUV planes, so the
     // conversion shader has to run into a texture before either can see it.
     private ID3D11Texture2D? _rgbIntermediate;
     private ID3D11RenderTargetView? _rgbIntermediateRtv;
@@ -326,7 +319,6 @@ public sealed class Renderer : IDisposable
         CreateBackBufferView();
         CreatePipeline();
         Processor = new VideoProcessor(_device);
-        Nis = new NisScaler(_device);
         Flow = new OpticalFlow(_device);
         Dlss = new DlssScaler(_device);
         Fsr = new FsrScaler(_device);
@@ -434,12 +426,10 @@ public sealed class Renderer : IDisposable
 
     /// <summary>
     /// True while an HDR source really is going through untouched. That needs a display
-    /// in HDR to take it, and nothing that works on the picture in the way: NIS and DLSS
+    /// in HDR to take it, and nothing that works on the picture in the way: DLSS and FSR
     /// are given an SDR picture, so with one of them on the source is converted first.
-    /// RTX VSR is the exception: given HDR it returns HDR, the same light to within a
-    /// percent.
     /// </summary>
-    public bool PassingHdrThrough => SourceIsHdr && HdrAsIs && SwapChainIsPq && !UseNis && !UseDlss;
+    public bool PassingHdrThrough => SourceIsHdr && HdrAsIs && SwapChainIsPq && !UseDlss && !UseFsr;
 
     /// <summary>
     /// Puts the swapchain into PQ once, at startup, when the desktop is already in HDR.
@@ -616,7 +606,7 @@ public sealed class Renderer : IDisposable
         // The video processor cannot take a ShaderResource-only plane pair as an input
         // view — it needs a decoder-bindable surface. One texture cannot serve both roles,
         // so the video-processor path gets its own and the frame is copied into whichever
-        // one is active. Creating it is best-effort: without it, VSR is simply unavailable.
+        // one is active. Creating it is best-effort: without it, RTX Video HDR is simply unavailable.
         try
         {
             _vpTexture = _device.CreateTexture2D(new Texture2DDescription
@@ -635,7 +625,7 @@ public sealed class Renderer : IDisposable
         catch (Exception ex)
         {
             _vpTexture = null;
-            Log.Warn($"decoder-bindable texture unavailable, VSR/HDR disabled: {ex.Message}");
+            Log.Warn($"decoder-bindable texture unavailable, RTX Video HDR disabled: {ex.Message}");
         }
 
         var lumaFormat = isTenBit ? Format.R16_UNorm : Format.R8_UNorm;
@@ -866,9 +856,8 @@ public sealed class Renderer : IDisposable
     }
 
     /// <summary>
-    /// Copies one MF frame into our sampleable texture, and — when VSR or RTX HDR is on
-    /// — immediately runs it through the video processor so the upscale happens on the
-    /// capture thread's schedule rather than the present thread's.
+    /// Copies one MF frame into our sampleable texture and, while RTX Video HDR is on,
+    /// into the one the video processor reads.
     /// </summary>
     public void UploadFrame(ID3D11Texture2D source, int subresource)
     {
@@ -978,8 +967,8 @@ public sealed class Renderer : IDisposable
 
             var (fx, fy, fw, fh) = FitRect(_videoWidth, _videoHeight, Width, Height);
 
-            // DLSS and FSR, like NIS, want colour in and write colour out, and they want
-            // the motion besides. Both passes that prepare those leave their own state set.
+            // DLSS and FSR want colour in and write colour out, and they want the motion
+            // besides. Both passes that prepare those leave their own state set.
             ID3D11ShaderResourceView? dlssResult = null;
             _dlssTimed[slot] = false;
             if (dlss || fsr)
@@ -996,44 +985,15 @@ public sealed class Renderer : IDisposable
                 _context.RSSetViewport(0, 0, Width, Height);
             }
 
-            // Build the processor even while both toggles are off: extensions are set on an
-            // existing processor, so it must exist before VSR can be switched on at all.
+            // Build the processor even while its filter is off: an extension is set on an
+            // existing processor, so it must exist before RTX Video HDR can be switched on.
             if (Processor is { Available: true } proc && _vpTexture is not null && _videoWidth > 0)
             {
                 var (_, _, fitW, fitH) = FitPixels(_videoWidth, _videoHeight, Width, Height);
-                // An HDR source through the driver comes out HDR when it is to be shown
-                // as it is, and SDR when it is to be converted: the driver does either.
-                proc.SourceHdr = SourceIsHdr;
-                if (SourceIsHdr)
-                {
-                    // RTX Video HDR makes HDR out of SDR; a source that is HDR already has no use for it.
-                    if (proc.HdrEnabled) { proc.ToggleHdr(); HdrOutput = false; }
-                    proc.SetOutputHdr(HdrAsIs && SwapChainIsPq);
-                }
+                // RTX Video HDR makes HDR out of SDR; a source that is HDR already has no use for it.
+                if (SourceIsHdr && proc.HdrEnabled) { proc.ToggleHdr(); HdrOutput = false; }
                 proc.Configure(_videoWidth, _videoHeight, _videoFormat, fitW, fitH);
                 if (UseProcessor) proc.Process(_vpTexture);
-            }
-
-            // NIS wants colour in and writes colour out, so the YUV conversion runs first
-            // into an offscreen surface and the compute pass upscales from there.
-            ID3D11ShaderResourceView? nisResult = null;
-            if (UseNis && _lumaView is not null && _chromaView is not null)
-            {
-                var (_, _, fitW, fitH) = FitPixels(_videoWidth, _videoHeight, Width, Height);
-                if (EnsureIntermediate(_videoWidth, _videoHeight) && ConvertYuvToIntermediate())
-                {
-                    // The intermediate is still bound as a render target here. D3D11 will
-                    // not let the same resource be an RTV and an SRV at once and silently
-                    // drops the SRV, so it has to be released before the compute pass.
-                    _context.OMSetRenderTargets((ID3D11RenderTargetView?)null);
-
-                    var hdrMode = SwapChainIsPq ? NisHdrMode.Pq : NisHdrMode.None;
-                    if (Nis!.Process(_context, _rgbIntermediateSrv!, _videoWidth, _videoHeight, fitW, fitH, hdrMode))
-                        nisResult = Nis.OutputView;
-                }
-                // Restore the back buffer: the conversion pass retargeted the pipeline.
-                _context.OMSetRenderTargets(_backBufferView);
-                _context.RSSetViewport(0, 0, Width, Height);
             }
 
             if (dlssResult is not null)
@@ -1041,14 +1001,6 @@ public sealed class Renderer : IDisposable
                 // SDR RGB at the size it was built for, so it takes the encoding path too.
                 SetConstants(fx, fy, fw, fh, mode: 1);
                 _context.PSSetShaderResource(2, dlssResult);
-                _context.OMSetBlendState(null);
-                _context.Draw(4, 0);
-            }
-            else if (nisResult is not null)
-            {
-                // NIS output is SDR RGB regardless of mode, so it takes the encoding path.
-                SetConstants(fx, fy, fw, fh, mode: 1);
-                _context.PSSetShaderResource(2, nisResult);
                 _context.OMSetBlendState(null);
                 _context.Draw(4, 0);
             }
@@ -1307,9 +1259,9 @@ public sealed class Renderer : IDisposable
     }
 
     /// <summary>
-    /// The frame now on screen, drawn each way there is - as it arrived, through the
-    /// driver's super resolution, through DLSS and through FSR - and each written beside
-    /// <paramref name="path"/> with the way in its name. Diagnostic only.
+    /// The frame now on screen, drawn each way there is - as it arrived, through DLSS and
+    /// through FSR - and each written beside <paramref name="path"/> with the way in its
+    /// name. Diagnostic only.
     /// <para>
     /// Two captures taken one after another are of two different frames, and a picture
     /// that moves at all cannot be compared across them. Here nothing new is let in while
@@ -1331,8 +1283,7 @@ public sealed class Renderer : IDisposable
         // Held throughout, so that no frame arrives in between.
         lock (_context)
         {
-            bool dlssWas = DlssEnabled, fsrWas = FsrEnabled, nisWas = NisEnabled;
-            bool vsrWas = Processor?.SuperResolutionEnabled == true;
+            bool dlssWas = DlssEnabled, fsrWas = FsrEnabled;
             bool ok = true;
 
             // The one in use first, exactly as it would have been shown: a frame that has
@@ -1369,26 +1320,8 @@ public sealed class Renderer : IDisposable
 
             DlssEnabled = false;
             FsrEnabled = false;
-            NisEnabled = false;
-            if (vsrWas) Processor!.ToggleSuperResolution();
             Render();
             ok &= SaveBackBuffer(Named("none"));
-
-            // The driver's filter reads its own copy of the frame, which is only kept up
-            // to date while that filter is on.
-            if (Processor is { Available: true, SuperResolutionSupported: true } processor
-                && _vpTexture is not null && _videoTexture is not null)
-            {
-                _context.CopyResource(_vpTexture, _videoTexture);
-                if (processor.ToggleSuperResolution())
-                {
-                    // More than once: whether the filter is fully in effect on the first
-                    // frame after it is switched on is the driver's business.
-                    for (int i = 0; i < 4; i++) Render();
-                    ok &= SaveBackBuffer(Named("vsr"));
-                    processor.ToggleSuperResolution();
-                }
-            }
 
             // DLSS's networks beside each other. Each is given this same frame over and
             // over, as a picture in which nothing moves, until it has settled. That shows
@@ -1412,8 +1345,6 @@ public sealed class Renderer : IDisposable
                 dlss.Model = modelWas;
             }
 
-            if (vsrWas) Processor!.ToggleSuperResolution();
-            NisEnabled = nisWas;
             DlssEnabled = dlssWas;
             FsrEnabled = fsrWas;
             return ok;
@@ -1608,7 +1539,7 @@ public sealed class Renderer : IDisposable
 
         _context.OMSetRenderTargets(_rgbIntermediateRtv);
         _context.RSSetViewport(0, 0, _videoWidth, _videoHeight);
-        // NIS and DLSS apply their own colour handling, so feed them plain SDR: mode 0 with no
+        // DLSS and FSR apply their own colour handling, so feed them plain SDR: mode 0 with no
         // PQ encoding, which is what SetConstants produces while SwapChainIsPq is false
         // and what the explicit mode-0 path does anyway.
         SetConstants(-1f + 2f * shiftX / _videoWidth, 1f - 2f * shiftY / _videoHeight, 2f, -2f, mode: 0, forceNoPq: true);
@@ -1657,7 +1588,6 @@ public sealed class Renderer : IDisposable
     {
         Ui?.Dispose();
         Processor?.Dispose();
-        Nis?.Dispose();
         Dlss?.Dispose();
         Fsr?.Dispose();
         Flow?.Dispose();
@@ -1806,7 +1736,7 @@ public sealed class Renderer : IDisposable
 
             float3 rgb = saturate(float3(r, g, b));
             // Our own shader only ever produces SDR; map it into PQ so the picture stays
-            // correct when the swapchain is in HDR and VSR/HDR are switched off.
+            // correct when the swapchain is in HDR and RTX Video HDR is switched off.
             if (IsHdr != 0) rgb = SdrToPQ(rgb, Nits);
             return float4(rgb, 1.0);
         }

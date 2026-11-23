@@ -14,8 +14,6 @@ namespace Rayxel.Render;
 /// </summary>
 public enum DlssModel
 {
-    /// <summary>Whichever DLSS takes by itself for the enlargement in hand.</summary>
-    Auto = 0,
     K = 11,
     L = 12,
     M = 13

@@ -23,6 +23,18 @@ public sealed record TechniqueVariant(string Id, string Label, string? LabelKey 
 }
 
 /// <summary>
+/// A list that is asked for again each time it is read, for variants that are not known
+/// when the technique is described - what a library offers on the card it finds.
+/// </summary>
+public sealed class Live<T>(Func<IReadOnlyList<T>> read) : IReadOnlyList<T>
+{
+    public T this[int index] => read()[index];
+    public int Count => read().Count;
+    public IEnumerator<T> GetEnumerator() => read().GetEnumerator();
+    System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+}
+
+/// <summary>
 /// An upscaler or a frame generator as the interface sees it: what it is called, what it
 /// costs, the variants it offers, and whether it can be used right now — with the reason
 /// when it cannot.
@@ -304,12 +316,11 @@ public sealed class AppModel
     public void CaptureInto(AppSettings s)
     {
         s.Language = Strings.Current;
-        s.Scaler = ScalerIndex;
+        s.Upscaler = ScalerIndex;
         // The switch has two meanings and each keeps its own setting.
         if (!Renderer.SourceIsHdr) s.Hdr = HdrOn;
         s.HdrSourceAsIs = Renderer.HdrAsIs;
         s.SourceRange = Renderer.SourceRange;
-        s.NisSharpness = Renderer.Nis?.Sharpness ?? s.NisSharpness;
         s.DlssModel = (int)(Renderer.Dlss?.Model ?? (DlssModel)s.DlssModel);
         if (Renderer.Fsr is { } fsr) { s.FsrVersion = fsr.Version; s.FsrModel = (int)fsr.Model; }
         s.OverlayNits = OverlayNits;
@@ -337,26 +348,27 @@ public sealed class AppModel
     /// <summary>Headroom as displayed — from the held sample, so it does not flicker.</summary>
     public double HeadroomMs => BudgetMs - ShownCpuMs - ShownGpuMs;
 
-    /// <summary>0 = own shader, 1 = NIS, 2 = the driver filter, 3 = DLSS, 4 = FSR.</summary>
-    public int ScalerIndex =>
-        Renderer.UseFsr ? 4
-        : Renderer.UseDlss ? 3 : Renderer.UseNis ? 1 : Renderer.Processor?.SuperResolutionEnabled == true ? 2 : 0;
+    /// <summary>The upscaler that has the picture: 0 = none, 1 = DLSS, 2 = FSR.</summary>
+    public int ScalerIndex => Renderer.UseFsr ? 2 : Renderer.UseDlss ? 1 : 0;
 
     // ── upscalers and frame generators ───────────────────────────────────────────
 
-    // Measured on this machine with --bench rather than taken from a vendor sheet: against
-    // our own blit NIS is free to inside the noise and RTX VSR costs 4.1 ms. DLSS with its
-    // model L, and the motion estimate it cannot do without, add 1.1 ms between them (1.69
-    // a frame against 0.62), taking 1280x800 to 2304x1440 on an RTX 5080. Shown as fixed
-    // figures, because a cost that moves while it is being read cannot be compared with
-    // the one beside it.
-    private const double NisCostMs = 0.1, VsrCostMs = 4.1, DlssCostMs = 1.1;
+    // Measured on this machine with --bench rather than taken from a vendor sheet, taking
+    // 1280x800 to 2304x1440 on an RTX 5080, as what a frame costs more than our own blit's
+    // 0.62 ms. DLSS with its model L, and the motion estimate it cannot do without, add
+    // 1.1 ms between them. FSR 4.1.2 with its full network and the same estimate adds 1.6;
+    // its lighter network 0.8, and FSR 3.1 2.9 - not for its work, which is the least of
+    // the three, but because that is light enough for the driver to drop the card into a
+    // lower power state, where it settles. FSR is listed at the first of these, which is
+    // what runs unless another is picked. Shown as fixed figures, because a cost that
+    // moves while it is being read cannot be compared with the one beside it.
+    private const double DlssCostMs = 1.1, FsrCostMs = 1.6;
 
     private List<Technique>? _upscalers, _frameGenerators;
 
     /// <summary>
     /// Every upscaler the interface offers, in the order of <see cref="ScalerIndex"/> and of
-    /// the keys 1 to 5. One that cannot be used stays in the list and says why.
+    /// the keys 1 to 3. One that cannot be used stays in the list and says why.
     /// </summary>
     public IReadOnlyList<Technique> Upscalers => _upscalers ??=
     [
@@ -371,36 +383,15 @@ public sealed class AppModel
         new()
         {
             Index = 1,
-            Short = () => "NIS",
-            Name = () => "NVIDIA Image Scaling",
-            Description = () => Strings.T("dNis"),
-            CostMs = NisCostMs,
-            CostIsCeiling = true
-        },
-        new()
-        {
-            Index = 2,
-            Short = () => Strings.T(IntelDriver ? "pVsrIntel" : "pVsr"),
-            Name = () => IntelDriver ? Strings.T("pVsrIntel") : "RTX Video Super Resolution",
-            Description = () => Strings.T(IntelDriver ? "dVsrIntel" : "dVsr"),
-            CostMs = VsrCostMs,
-            Unavailable = () => DriverPathAvailable && Renderer.Processor?.SuperResolutionSupported == true
-                ? null : Strings.Sentence(Strings.T("naVendor"))
-        },
-        new()
-        {
-            Index = 3,
             Short = () => "DLSS",
             Name = () => "DLSS Super Resolution",
             Description = () => Strings.T("dDlss"),
             CostMs = DlssCostMs,
             Unavailable = () => Renderer.Dlss is { Possible: true } ? null : Strings.Sentence(Strings.T("naVendor")),
             VariantsLabel = "tvModel",
-            Variants =
-            [
-                new(nameof(DlssModel.Auto), "", "dlssAuto"), new(nameof(DlssModel.K), "K"),
-                new(nameof(DlssModel.L), "L"), new(nameof(DlssModel.M), "M")
-            ],
+            // Newest first. There is no "whichever DLSS likes": left to itself it takes K
+            // for a video, the oldest of them.
+            Variants = [new(nameof(DlssModel.L), "L"), new(nameof(DlssModel.M), "M"), new(nameof(DlssModel.K), "K")],
             Variant = () => Renderer.Dlss?.Model.ToString(),
             VariantInfo = id => Strings.T("dlssInfo" + id),
             SetVariant = id =>
@@ -414,22 +405,53 @@ public sealed class AppModel
             Running = () => Renderer.Dlss is { ModelInUse: { } letter } dlss
                 ? (letter, dlss.ModelForced ? DlssOverrideAdvice() : null) : null
         },
-        // FSR has no backend in this build. To plug one in: make Unavailable read it, give
-        // the measured CostMs, wire Variant and SetVariant to it, and teach SelectScaler in
-        // Program.cs and ScalerIndex above about index 4. Nothing in the interface changes.
         new()
         {
-            Index = 4,
+            Index = 2,
             Short = () => "FSR",
             Name = () => "FidelityFX Super Resolution",
             Description = () => Strings.T("dFsr"),
-            Unavailable = () => Strings.T("naFsrBuild"),
+            CostMs = FsrCostMs,
+            Unavailable = () => Renderer.Fsr is { Possible: true } ? null
+                : FsrScaler.Folder is null ? Strings.T("naFsr") : Strings.Sentence(Strings.T("naVendor")),
             VariantsLabel = "tvVariant",
-            Variants = [new("4.1.2", "4.1.2"), new("4.1.2-lite", "4.1.2 Lite")]
+            // What AMD's library has for this card, which is only known once it is loaded.
+            Variants = new Live<TechniqueVariant>(FsrVariants),
+            Variant = () => Renderer.Fsr?.Chosen?.Label,
+            VariantInfo = id => Renderer.Fsr?.Choices.FirstOrDefault(c => c.Label == id) is { Label: not null } choice
+                ? Strings.T(choice.Model switch
+                {
+                    FsrModel.Full => "fsrInfoFull",
+                    FsrModel.Lite => "fsrInfoLite",
+                    _ => choice.Label.StartsWith('4') ? "fsrInfoOwn" : "fsrInfo3"
+                })
+                : null,
+            SetVariant = id =>
+            {
+                if (Renderer.Fsr is not { } fsr || fsr.Choices.FirstOrDefault(c => c.Label == id) is not { Label: not null } choice) return;
+                fsr.Ask(choice);
+                Touch();
+            },
+            // While one is being built there is nothing running to name.
+            Running = () => Renderer.Fsr is { Building: false, InUse: { } running } ? (running, null) : null
         }
     ];
 
-    private bool IntelDriver => Renderer.Processor?.Vendor == VideoProcessor.GpuVendor.Intel;
+    private readonly List<TechniqueVariant> _fsrVariants = [];
+
+    /// <summary>FSR's choices as the interface's variants, made again only when the choices have changed.</summary>
+    private IReadOnlyList<TechniqueVariant> FsrVariants()
+    {
+        var choices = Renderer.Fsr?.Choices ?? [];
+        bool same = choices.Count == _fsrVariants.Count;
+        for (int i = 0; same && i < choices.Count; i++) same = choices[i].Label == _fsrVariants[i].Id;
+        if (!same)
+        {
+            _fsrVariants.Clear();
+            foreach (var choice in choices) _fsrVariants.Add(new TechniqueVariant(choice.Label, choice.Label));
+        }
+        return _fsrVariants;
+    }
 
     private long _dlssDllLooked = -10_000;
     private bool _dlssDllBeside;
@@ -655,12 +677,12 @@ public sealed class AppModel
         if (Renderer.SourceIsHdr)
         {
             if (!Renderer.DisplaySupportsHdr) return (false, Strings.T("hdrSrcNoDisplay"));
-            if (Renderer.UseNis || Renderer.UseDlss) return (false, Strings.T("hdrSrcScaler"));
+            if (Renderer.UseDlss || Renderer.UseFsr) return (false, Strings.T("hdrSrcScaler"));
             return (true, Renderer.HdrAsIs ? Strings.T("hdrSrcAsIs") : Strings.T("hdrSrcToSdr"));
         }
         if (!DriverPathAvailable) return (false, Strings.T("hdrVendor"));
         if (!Renderer.DisplaySupportsHdr) return (false, Strings.T("hdrNa"));
-        if (Renderer.UseNis || Renderer.UseDlss || Renderer.UseFsr) return (false, Strings.T("hdrPath"));
+        if (Renderer.UseDlss || Renderer.UseFsr) return (false, Strings.T("hdrPath"));
         return (true, HdrOn ? Strings.T("hdrOn") : Strings.T("hdrOff"));
     }
 

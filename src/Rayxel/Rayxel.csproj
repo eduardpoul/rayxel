@@ -21,7 +21,7 @@
   <PropertyGroup>
     <Product>Rayxel</Product>
     <AssemblyTitle>Rayxel</AssemblyTitle>
-    <Description>Low-latency capture-card viewer with RTX VSR, RTX Video HDR and NIS.</Description>
+    <Description>Low-latency capture-card viewer with DLSS, FSR and RTX Video HDR.</Description>
     <Version>1.0.0</Version>
     <NeutralLanguage>en</NeutralLanguage>
 
@@ -54,14 +54,11 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- NVIDIA's MIT-licensed NIS sources, compiled at runtime rather than build time.
-         Embedded, not copied: a single-file build has nowhere to put loose files, and an
-         executable that stops working when moved on its own is not one file. -->
-    <EmbeddedResource Include="Render\NIS\*.h" />
-
     <!-- The same .ico again, this time readable at runtime: WM_SETICON wants an HICON, and
          the icon <ApplicationIcon> puts in the executable's resources belongs to the
-         apphost, not to us. Embedded rather than copied, for the reason above. -->
+         apphost, not to us. Embedded rather than copied: a single-file build has nowhere
+         to put loose files, and an executable that stops working when moved on its own is
+         not one file. -->
     <EmbeddedResource Include="Assets\Brand\rayxel.ico" />
   </ItemGroup>
 

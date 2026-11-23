@@ -17,8 +17,16 @@ public sealed class AppSettings
 {
     public string Language { get; set; } = "ru";
 
-    /// <summary>0 = own shader, 1 = NIS, 2 = the driver filter, 3 = DLSS, 4 = FSR.</summary>
-    public int Scaler { get; set; }
+    /// <summary>The upscaler: 0 = none, 1 = DLSS, 2 = FSR.</summary>
+    public int Upscaler { get; set; }
+
+    /// <summary>
+    /// What versions before this one kept instead, when there were five to choose from:
+    /// 1 NIS, 2 RTX VSR, 3 DLSS, 4 FSR. Read once, turned into <see cref="Upscaler"/>, and
+    /// not written again.
+    /// </summary>
+    [JsonPropertyName("Scaler"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? ScalerBefore { get; set; }
 
     public bool Hdr { get; set; } = true;
 
@@ -27,23 +35,22 @@ public sealed class AppSettings
 
     /// <summary>An HDR source shown as it is, untouched (true), or converted to SDR.</summary>
     public bool HdrSourceAsIs { get; set; } = true;
-    public float NisSharpness { get; set; } = 0.4f;
 
     /// <summary>
-    /// Which network DLSS is asked for: 0 leaves it to DLSS, else 11 = K, 12 = L, 13 = M.
-    /// L to begin with; <see cref="Render.DlssScaler.Model"/> says why.
+    /// Which network DLSS is asked for: 11 = K, 12 = L, 13 = M. L to begin with;
+    /// <see cref="Render.DlssScaler.Model"/> says why.
     /// </summary>
     public int DlssModel { get; set; } = (int)Render.DlssModel.L;
 
     /// <summary>
-    /// Which upscaler FSR is asked for, by the name AMD's library offers it under ("3.1.5").
-    /// Null leaves it to the library, which takes the newest it can run on the card.
+    /// Which upscaler FSR is asked for, by the name AMD's library offers it under ("3.1.6").
+    /// With neither this nor <see cref="FsrModel"/> set, it is the newest the card runs.
     /// </summary>
     public string? FsrVersion { get; set; }
 
     /// <summary>
-    /// Which network of FSR 4 is pressed on AMD's library: 0 none, the library chooses;
-    /// 1 the full one, 2 the lighter one, 3 the full one as built for Radeon RX 6000.
+    /// Which network of FSR 4 is pressed on AMD's library: 0 none in particular, 1 the
+    /// full one, 2 the lighter one, 3 the full one as built for Radeon RX 6000.
     /// </summary>
     public int FsrModel { get; set; }
     public float OverlayNits { get; set; } = 230f;
@@ -104,6 +111,13 @@ public sealed class AppSettings
             var json = File.ReadAllText(FilePath);
             var loaded = JsonSerializer.Deserialize<AppSettings>(json, Options);
             if (loaded is null) throw new InvalidDataException("empty");
+
+            // A file from before NIS and RTX VSR went: its numbers meant something else.
+            if (loaded.ScalerBefore is { } before)
+            {
+                loaded.Upscaler = before switch { 3 => 1, 4 => 2, _ => 0 };
+                loaded.ScalerBefore = null;
+            }
 
             Log.Info($"settings loaded from {FilePath}");
             return loaded;

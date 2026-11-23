@@ -197,7 +197,6 @@ public static class TelemetryOverlay
         parts.Add(upscaler.Index switch
         {
             0 => upscaler.Name(),
-            1 => $"NIS {Strings.Num(model.Renderer.Nis?.Sharpness ?? 0, "0.00")}",
             // With the variant that is really running, when the technique reports one.
             _ => upscaler.Running() is { } running ? $"{upscaler.Short()} {running.Text}" : upscaler.Short()
         });
@@ -208,9 +207,6 @@ public static class TelemetryOverlay
         if (model.Audio.Running && model.Audio.Format is { } format) parts.Add(format.Split('·')[0].Trim());
 
         Widgets.Text(Widgets.F.Caption, Theme.TextSecondary, string.Join(" · ", parts));
-
-        if (model.ScalerIndex == 2 && model.ScalerInert)
-            Widgets.Text(Widgets.F.Caption, Theme.Caution, string.Format(Strings.T("scaleInert"), upscaler.Short()));
     }
 
     /// <summary>

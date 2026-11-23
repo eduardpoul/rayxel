@@ -24,7 +24,7 @@ public enum WindowKind
 /// <para>
 /// This is the one control that can change the composition mode. A windowed swapchain is
 /// composited by the desktop manager, which costs a whole frame — 8.3 ms at 120 fps, more
-/// than RTX VSR and HDR put together. Covering the monitor with a plain popup window is
+/// than any upscaler here costs. Covering the monitor with a plain popup window is
 /// what lets DXGI hand the swapchain to a hardware overlay plane instead; measured on a
 /// 3440×1440 display, that is the difference between <c>present: Composed</c> and
 /// <c>present: Overlay</c>.

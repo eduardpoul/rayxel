@@ -7,9 +7,8 @@ namespace Rayxel.Native;
 /// The product mark as Win32 icon handles, for the window, the taskbar button and Alt-Tab.
 /// <para>
 /// The <c>.ico</c> is an embedded assembly resource rather than a file beside the
-/// executable, for the same reason the NIS sources are: a single-file build has nowhere to
-/// put loose files, and an executable that loses its icon when moved on its own is not one
-/// file. <c>&lt;ApplicationIcon&gt;</c> in the project file covers what Explorer shows for
+/// executable: a single-file build has nowhere to put loose files, and an executable that
+/// loses its icon when moved on its own is not one file. <c>&lt;ApplicationIcon&gt;</c> in the project file covers what Explorer shows for
 /// the executable; it does not reach a window the app creates itself.
 /// </para>
 /// <para>

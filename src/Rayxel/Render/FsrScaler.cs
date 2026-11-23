@@ -293,8 +293,17 @@ public sealed unsafe class FsrScaler : IDisposable
     private long _lastFrame;
     private string? _builtFor;
 
-    // What a built upscaler was built for: the two things that, changed, mean building again.
-    private string Asked => $"{Model}|{Version}";
+    // What an upscaler is to be built for: the network and the version that, changed,
+    // mean building again.
+    private string Wanted
+    {
+        get { var (model, version) = Effective(); return $"{model}|{version}"; }
+    }
+
+    // Networks that were pressed on the library and would not build or run here. They
+    // are not offered again while the program runs.
+    private readonly HashSet<FsrModel> _refused = [];
+    private string _fourName = "4";
 
     // The upscaler being built on another thread. While this is set and not finished,
     // that thread has the library, the command list and the fence to itself.
@@ -326,9 +335,9 @@ public sealed unsafe class FsrScaler : IDisposable
 
     /// <summary>
     /// The upscaler asked for, by the name it is offered under ("3.1.6"), or by the start
-    /// of one ("3", "4.1"). Null leaves the choice to the library, which takes the newest
-    /// it can run here. Changing it takes effect with the next frame, as the first of a
-    /// new history.
+    /// of one ("3", "4.1"). With neither this nor a <see cref="Model"/> asked for, what
+    /// runs is the first of <see cref="Choices"/>: the newest there is for this card.
+    /// Changing it takes effect with the next frame, as the first of a new history.
     /// </summary>
     public string? Version { get; set; }
 
@@ -337,7 +346,7 @@ public sealed unsafe class FsrScaler : IDisposable
 
     /// <summary>
     /// The network of FSR 4 asked for in the library's place, or <see cref="FsrModel.Library"/>
-    /// to leave it to the library. With a network asked for, <see cref="Version"/> is not
+    /// for none in particular. With a network asked for, <see cref="Version"/> is not
     /// looked at: it is FSR 4 that runs. Takes effect with the next frame.
     /// </summary>
     public FsrModel Model { get; set; }
@@ -361,18 +370,36 @@ public sealed unsafe class FsrScaler : IDisposable
     /// </summary>
     public IReadOnlyList<FsrChoice> Choices => _choices;
 
-    /// <summary>Whether this one of <see cref="Choices"/> is what is asked for now.</summary>
-    public bool Asks(FsrChoice choice) => choice.Model != FsrModel.Library
+    /// <summary>
+    /// The one of <see cref="Choices"/> that is asked for. With nothing asked for - or
+    /// something that is not there any more - it is the first of them, which is the
+    /// newest this card runs. Null until it is started.
+    /// </summary>
+    public FsrChoice? Chosen
+    {
+        get
+        {
+            foreach (var choice in _choices) if (Names(choice)) return choice;
+            return _choices.Count > 0 ? _choices[0] : null;
+        }
+    }
+
+    private bool Names(FsrChoice choice) => choice.Model != FsrModel.Library
         ? Model == choice.Model
         : Model == FsrModel.Library && choice.Version is { } version
           && Resolve(_versions, Version) is { } asked && Plain(asked.Name) == Plain(version);
 
-    /// <summary>True when nothing is asked for and the library chooses.</summary>
-    public bool AsksNothing => Model == FsrModel.Library && Resolve(_versions, Version) is null;
-
     public void Ask(FsrChoice choice) { Model = choice.Model; Version = choice.Version; }
 
-    public void AskNothing() { Model = FsrModel.Library; Version = null; }
+    /// <summary>
+    /// What is to be built: a network named outright - there is one that is on no button -
+    /// or what <see cref="Chosen"/> comes to.
+    /// </summary>
+    private (FsrModel Model, string? Version) Effective()
+    {
+        if (Model != FsrModel.Library && Has(Model) && !_refused.Contains(Model)) return (Model, null);
+        return Chosen is { } chosen ? (chosen.Model, chosen.Version) : (FsrModel.Library, Version);
+    }
 
     /// <summary>
     /// How much of FSR's own sharpening goes on last, from 0 for none to 1. It is part of
@@ -457,7 +484,8 @@ public sealed unsafe class FsrScaler : IDisposable
             StartDirect3D12();
             Load(folder);
             ReadVersions(_versions);
-            ListChoices(folder);
+            _fourName = FourName(folder);
+            ListChoices();
 
             _started = true;
             Log.Info($"FSR: ready in {System.Diagnostics.Stopwatch.GetElapsedTime(began).TotalMilliseconds:0} ms " +
@@ -564,19 +592,23 @@ public sealed unsafe class FsrScaler : IDisposable
     private static byte NotSupported(void* provider, void* device) => 0;
 
     /// <summary>
-    /// What goes on the buttons. FSR 4's full network is only listed apart when the
-    /// library does not offer FSR 4 here by itself; the lighter one always, since the
-    /// library never offers a choice between the two.
+    /// What there is to choose from, newest first, so that the first is what runs when
+    /// nothing is asked for. FSR 4's full network is only listed apart when the library
+    /// does not offer FSR 4 here by itself; the lighter one always, since the library
+    /// never offers a choice between the two. One that has been tried here and would not
+    /// run is left out.
     /// </summary>
-    private void ListChoices(string folder)
+    private void ListChoices()
     {
         _choices.Clear();
         var four = _versions.Where(v => Plain(v.Name).StartsWith("4.", StringComparison.Ordinal)).ToList();
-        string name = four.Count > 0 ? Plain(four[0].Name) : FourName(folder);
+        string name = four.Count > 0 ? Plain(four[0].Name) : _fourName;
 
-        if (four.Count == 0 && Has(FsrModel.Full)) _choices.Add(new FsrChoice(name, FsrModel.Full, null));
+        if (four.Count == 0 && Has(FsrModel.Full) && !_refused.Contains(FsrModel.Full))
+            _choices.Add(new FsrChoice(name, FsrModel.Full, null));
         foreach (var v in four) _choices.Add(new FsrChoice(v.Name, FsrModel.Library, v.Name));
-        if (Has(FsrModel.Lite)) _choices.Add(new FsrChoice(name + " Lite", FsrModel.Lite, null));
+        if (Has(FsrModel.Lite) && !_refused.Contains(FsrModel.Lite))
+            _choices.Add(new FsrChoice(name + " Lite", FsrModel.Lite, null));
         foreach (var v in _versions.Except(four)) _choices.Add(new FsrChoice(v.Name, FsrModel.Library, v.Name));
     }
 
@@ -816,16 +848,20 @@ public sealed unsafe class FsrScaler : IDisposable
     }
 
     /// <summary>
-    /// When a network pressed on the library has not worked, hands the choice back to the
-    /// library and says so; the next frame is then built with what it offers by itself.
-    /// False when the library had chosen already, and the failure is FSR's own.
+    /// When a network pressed on the library has not worked, takes it out of what there
+    /// is to choose from and says so; the next frame is then built with the newest of
+    /// what is left. False when the library had chosen for itself, and the failure is
+    /// FSR's own.
     /// </summary>
     private bool GiveBack(string why)
     {
-        if (_pressed == FsrModel.Library && Model == FsrModel.Library) return false;
-        Log.Warn($"FSR: the {NetworkName(_pressed == FsrModel.Library ? Model : _pressed)} {why}; left to the library from here on");
-        Model = FsrModel.Library;
+        if (_pressed == FsrModel.Library) return false;
+        FsrModel refused = _pressed;
+        Log.Warn($"FSR: the {NetworkName(refused)} {why}; not tried again in this run");
+        _refused.Add(refused);
+        if (Model == refused) Model = FsrModel.Library;
         Press(FsrModel.Library);
+        ListChoices();
         return true;
     }
 
@@ -866,7 +902,7 @@ public sealed unsafe class FsrScaler : IDisposable
     /// </summary>
     private bool Fit(ID3D11DeviceContext context, int inWidth, int inHeight, int outWidth, int outHeight)
     {
-        if (_upscaler != IntPtr.Zero && !string.Equals(_builtFor, Asked, StringComparison.OrdinalIgnoreCase))
+        if (_upscaler != IntPtr.Zero && !string.Equals(_builtFor, Wanted, StringComparison.OrdinalIgnoreCase))
             return Begin(context, inWidth, inHeight, outWidth, outHeight);
 
         bool sameSource = _upscaler != IntPtr.Zero && inWidth == _inWidth && inHeight == _inHeight;
@@ -912,19 +948,12 @@ public sealed unsafe class FsrScaler : IDisposable
         Release();
         _askedFor = 0;
 
-        FsrModel model = Model;
-        if (model != FsrModel.Library && !Has(model))
-        {
-            Log.Warn($"FSR: this copy of the library has no {NetworkName(model)}; left to the library");
-            model = Model = FsrModel.Library;
-        }
-
         try { _context4 ??= context.QueryInterface<ID3D11DeviceContext4>(); }
         catch (Exception ex) { return Fail($"{ex.GetType().Name}: {ex.Message}"); }
 
-        // What was asked is fixed here: the other thread builds that, whatever is asked meanwhile.
-        string? version = Version;
-        string builtFor = Asked;
+        // What is wanted is fixed here: the other thread builds that, whatever is asked meanwhile.
+        var (model, version) = Effective();
+        string builtFor = $"{model}|{version}";
         float sharpness = Sharpness;
         Log.Debug($"FSR: building for {inWidth}x{inHeight} -> {outWidth}x{outHeight} on its own thread");
         _building = Task.Run(() => Build(context, model, version, builtFor, sharpness, inWidth, inHeight, outWidth, outHeight));

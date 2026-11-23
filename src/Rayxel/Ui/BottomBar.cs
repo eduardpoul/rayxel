@@ -23,8 +23,8 @@ namespace Rayxel.Ui;
 /// </summary>
 public static class BottomBar
 {
-    // RTX Video HDR on top of RTX VSR, measured on this machine with --bench. What the
-    // upscalers cost is with their descriptions, in AppModel.
+    // RTX Video HDR, measured on this machine with --bench. What the upscalers cost is
+    // with their descriptions, in AppModel.
     private const double HdrCostMs = 0.66;
 
     // This frame's layout, for anchoring what opens above the bar. The bar is always
@@ -178,14 +178,10 @@ public static class BottomBar
             : upscaler.Running() is { } running ? $"{upscaler.Short()} {running.Text}"
             : upscaler.Short();
 
-        // Paying for an upscaler that has nothing to enlarge is worth a colour: the cost
-        // is real and the picture is unchanged. The cost itself is not on the bar — it is
-        // in the flyout, beside the others it can be compared with.
-        bool wasted = upscaler.Index == 2 && model.ScalerInert;
-
-        _scalerMin = TechniqueChip("##scalerchip", Icon.Scale, wasted ? Theme.Caution : Theme.TextPrimary, label, "",
-            Theme.TextSecondary, model.Flyout == Flyout.Scaler, line,
-            wasted ? string.Format(Strings.T("scaleInert"), label) : Strings.T("ttScaler"),
+        // The cost is not on the bar — it is in the flyout, beside the others it can be
+        // compared with.
+        _scalerMin = TechniqueChip("##scalerchip", Icon.Scale, Theme.TextPrimary, label, "",
+            Theme.TextSecondary, model.Flyout == Flyout.Scaler, line, Strings.T("ttScaler"),
             () => model.ToggleFlyout(Flyout.Scaler));
     }
 
@@ -507,8 +503,8 @@ public static class BottomBar
 
     /// <summary>
     /// Which upscaler, then what goes with it: DLSS's network and the one really running,
-    /// FSR's variant, NIS's sharpness. Each one's cost is in the list it is chosen from,
-    /// and the chosen one's is in the header — the only places it is shown.
+    /// FSR's variant. Each one's cost is in the list it is chosen from, and the chosen
+    /// one's is in the header — the only places it is shown.
     /// </summary>
     private static bool ScalerFlyout(AppModel model)
     {
@@ -525,32 +521,6 @@ public static class BottomBar
             ? string.Format(Strings.T("scaleUp"), model.ScaleLabel, mode.Height, (int)Math.Round(mode.Height * model.ScaleFactor))
             : "";
         TechniqueRows(model, "##up", model.Upscalers, current, scale, t => model.SelectScaler(t.Index));
-
-        if (current.Index == 1 && model.Renderer.Nis is { } nis)
-        {
-            float width = BeginRow(Strings.T("sharpness"));
-            float sharp = nis.Sharpness;
-            var value = Strings.Num(sharp, "0.00");
-            float valueWidth = Layout.S(40);
-            var at = ImGui.GetCursorScreenPos();
-
-            // The slider is a thumb tall, the row a control tall: centred in it by hand.
-            ImGui.SetCursorScreenPos(at + new Vector2(0, (Layout.S(RowHeight) - Layout.S(20)) / 2f));
-            if (Widgets.Slider("##sharp", ref sharp, 0f, 1f, true, width - valueWidth))
-            {
-                nis.Sharpness = MathF.Round(sharp * 20f) / 20f;
-                model.Touch();
-            }
-
-            // Above 0.5 the value turns amber: at the small scale factors this app usually
-            // runs at, that reads as oversharpening rather than as detail.
-            var size = Widgets.Measure(f.Body, value);
-            Widgets.DrawText(ImGui.GetWindowDrawList(), f.Body,
-                new Vector2(at.X + width - size.X, at.Y + (Layout.S(RowHeight) - size.Y) / 2f),
-                sharp > 0.5f ? Theme.Caution : Theme.TextSecondary, value);
-            ImGui.SetCursorScreenPos(at);
-            ImGui.Dummy(new Vector2(width, Layout.S(RowHeight)));
-        }
 
         // The one thing said out loud: at ×1 or below nothing is enlarged, and an upscaler
         // that is on is being paid for and doing nothing.

@@ -58,8 +58,8 @@ foreach (var arg in args)
     // Diagnostic: run for a few seconds, write what was rendered to a PNG, exit. Captures
     // the back buffer rather than the screen, so it works when the window is not visible.
     else if (arg.StartsWith("--shot=", StringComparison.OrdinalIgnoreCase)) shotPath = arg[7..];
-    // With --shot: the same frame written several ways (-none, -vsr, -dlss, -fsr in the name,
-    // and -dlss-K-still and so on for each DLSS network on that frame held still) instead of
+    // With --shot: the same frame written several ways (-none, -dlss, -fsr in the name, and
+    // -dlss-K-still and so on for each DLSS network on that frame held still) instead of
     // the one picture. Wants --scaler=dlss or --scaler=fsr, so that one of the two is
     // already running - the other is then run beside it - and --no-auto-hdr, so that they
     // are all the same kind of picture.
@@ -93,23 +93,22 @@ foreach (var arg in args)
     // Pins the starting mode, as --mode=1280x720@60. A comparison needs a control, and
     // "whatever was remembered from last time" is not one.
     else if (arg.StartsWith("--mode=", StringComparison.OrdinalIgnoreCase)) forcedMode = arg[7..];
-    // Pins the scaler for the same reason: --scaler=none|nis|vsr|dlss|fsr.
+    // Pins the scaler for the same reason: --scaler=none|dlss|fsr.
     else if (arg.StartsWith("--scaler=", StringComparison.OrdinalIgnoreCase))
         forcedScaler = arg[9..].ToLowerInvariant() switch
         {
             "none" or "off" or "0" => 0,
-            "nis" or "1" => 1,
-            "vsr" or "rtx" or "2" => 2,
-            "dlss" or "3" => 3,
-            "fsr" or "4" => 4,
+            "dlss" or "1" => 1,
+            "fsr" or "2" => 2,
             _ => -1
         };
-    // And the network DLSS is asked for: --dlss-model=auto|k|l|m.
+    // And the network DLSS is asked for: --dlss-model=k|l|m.
     else if (arg.StartsWith("--dlss-model=", StringComparison.OrdinalIgnoreCase))
         forcedDlssModel = Enum.TryParse<DlssModel>(arg[13..], true, out var asked) && Enum.IsDefined(asked)
             ? asked : null;
     // And the upscaler FSR is asked for, by the name AMD's library offers it under or the
-    // start of one: --fsr-version=auto|4|3.1. What it offers depends on the card.
+    // start of one: --fsr-version=4|3.1. What it offers depends on the card; with nothing
+    // asked for it is the newest that runs there.
     else if (arg.StartsWith("--fsr-version=", StringComparison.OrdinalIgnoreCase))
     {
         fsrVersionForced = true;
@@ -117,7 +116,7 @@ foreach (var arg in args)
             ? named : null;
     }
     // And the network of FSR 4 pressed on the library where it offers none, or another
-    // than it would take: --fsr-model=auto|full|lite|rdna2.
+    // than it would take: --fsr-model=full|lite|rdna2.
     else if (arg.StartsWith("--fsr-model=", StringComparison.OrdinalIgnoreCase))
         forcedFsrModel = arg[12..].ToLowerInvariant() switch
         {
@@ -168,10 +167,9 @@ DeviceProbe? active = null;
 List<MenuEntry> menuEntries = [];
 IntPtr hwnd = IntPtr.Zero;
 bool quit = false;
-bool pendingVsrToggle = false, pendingHdrToggle = false, pendingNisToggle = false, autoHdrPending = false;
+bool pendingHdrToggle = false, autoHdrPending = false;
 bool deferredStatePending = true;
 int pendingScaler = -1;
-float pendingSharpness = 0f;
 CaptureDeviceInfo? pendingDeviceSwitch = null;
 WindowKind? pendingWindowKind = null;
 bool pendingAudioRestart = false;
@@ -322,7 +320,6 @@ try
     model.VideoNits = settings.VideoNits;
     model.AudioEnabled = settings.AudioEnabled;
     model.AudioOutputId = settings.AudioOutputId;
-    if (renderer.Nis is { } nisScaler) nisScaler.Sharpness = settings.NisSharpness;
     if (renderer.Dlss is { } dlssScaler)
         dlssScaler.Model = forcedDlssModel
             ?? (Enum.IsDefined((DlssModel)settings.DlssModel) ? (DlssModel)settings.DlssModel : DlssModel.L);
@@ -398,12 +395,6 @@ try
 
     // Follow Windows: if the desktop is already in HDR, start in HDR too. If it is not,
     // the toggle stays unavailable rather than producing a washed-out picture.
-    // Compile NIS up front rather than on first use: shader compilation and parsing the
-    // coefficient tables are the two things most likely to be wrong, and finding out at
-    // startup beats finding out when the user presses a key mid-game.
-    if (renderer.Nis?.Initialize(NisHdrMode.None) != true)
-        Log.Warn($"NIS unavailable: {renderer.Nis?.LastError ?? "unknown"}");
-
     // Deferred: the video processor is only built once the first frame arrives, and the
     // HDR extension cannot be set before it exists.
     autoHdrPending = renderer.DisplaySupportsHdr && (!noAutoHdr || forceHdr);
@@ -411,7 +402,7 @@ try
         ? "Windows has this display in HDR - will enable HDR output once the first frame lands"
         : "Windows has this display in SDR - HDR toggle disabled");
 
-    Log.Info("Tab settings · T telemetry · M modes · H HDR · 1/2/3/4/5 scaler · Esc quit");
+    Log.Info("Tab settings · T telemetry · M modes · H HDR · 1/2/3 scaler · G frames · Esc quit");
     RunLoop();
     return 0;
 }
@@ -1164,15 +1155,7 @@ void RunLoop()
             else
                 try { SelectScaler(want); } catch (Exception ex) { Log.Error("scaler switch failed", ex); }
         }
-        if (pendingVsrToggle) { pendingVsrToggle = false; try { ToggleVsr(); } catch (Exception ex) { Log.Error("VSR toggle failed", ex); } }
         if (pendingHdrToggle) { pendingHdrToggle = false; try { ToggleHdr(); } catch (Exception ex) { Log.Error("HDR toggle failed", ex); } }
-        if (pendingNisToggle) { pendingNisToggle = false; try { ToggleNis(); } catch (Exception ex) { Log.Error("NIS toggle failed", ex); } }
-        if (pendingSharpness != 0f && renderer!.Nis is { } nis)
-        {
-            nis.Sharpness = Math.Clamp(nis.Sharpness + pendingSharpness, 0f, 1f);
-            pendingSharpness = 0f;
-            Log.Info($"NIS sharpness {nis.Sharpness:0.0}");
-        }
 
         // Wait for the swapchain first so we never queue ahead of the display, then for a
         // frame from the card.
@@ -1259,14 +1242,14 @@ void RunLoop()
             deferredStatePending = false;
             // --scaler wins over what was remembered: a measurement needs the scaler it
             // asked for, not the one left over from the last session.
-            int wantScaler = forcedScaler >= 0 ? forcedScaler : settings.Scaler;
+            int wantScaler = forcedScaler >= 0 ? forcedScaler : settings.Upscaler;
             if (wantScaler != 0 || forcedScaler == 0)
             {
                 try { SelectScaler(wantScaler); }
                 catch (Exception ex) { Log.Error("restoring the scaler failed", ex); }
             }
-            // Only the driver path can produce HDR, so a remembered NIS choice takes it away.
-            if (autoHdrPending && (settings.Hdr || forceHdr) && !renderer.UseNis && !renderer.UseDlss && !renderer.UseFsr)
+            // Only the driver path can produce HDR, so a remembered upscaler takes it away.
+            if (autoHdrPending && (settings.Hdr || forceHdr) && !renderer.UseDlss && !renderer.UseFsr)
             {
                 try { ToggleHdr(); } catch (Exception ex) { Log.Error("auto HDR failed", ex); }
             }
@@ -1362,8 +1345,6 @@ void RunLoop()
             {
                 string path = renderer.UseFsr ? $"FSR ({renderer.Fsr!.Description})"
                     : renderer.UseDlss ? $"DLSS ({renderer.Dlss!.Description})"
-                    : renderer.NisEnabled ? "NIS"
-                    : renderer.Processor?.SuperResolutionEnabled == true ? "RTX VSR"
                     : "no scaler";
                 if (renderer.Processor?.HdrEnabled == true) path += " + RTX HDR";
 
@@ -1846,17 +1827,9 @@ void HandleKey(int vk, IntPtr h)
         case '1': pendingScaler = 0; break;
         case '2': pendingScaler = 1; break;
         case '3': pendingScaler = 2; break;
-        case '4': pendingScaler = 3; break;
-        case '5': pendingScaler = 4; break;
         case 'G': model?.ToggleFlyout(Flyout.FrameGen); break;
 
-        // The original keys, kept because they are in muscle memory by now.
-        case 'V': pendingVsrToggle = true; break;
-        case 'N': pendingNisToggle = true; break;
         case Win32.VK_F1: OpenMenuAt(h, 24, 24); break;
-        // Sharpness at 0 isolates what the scaler itself does, with no USM on top.
-        case 0xDB: pendingSharpness = -0.1f; break; // [
-        case 0xDD: pendingSharpness = +0.1f; break; // ]
     }
 }
 
@@ -1877,29 +1850,23 @@ bool PointerOverClient()
         && pt.X < origin.X + client.Right && pt.Y < origin.Y + client.Bottom;
 }
 
-/// <summary>Applies a radio choice through the toggles, which enforce the mutual exclusion.</summary>
+/// <summary>
+/// Applies a choice of upscaler through the toggles, which see to it that only one has
+/// the picture: 0 none, 1 DLSS, 2 FSR.
+/// </summary>
 void SelectScaler(int want)
 {
-    var p = renderer!.Processor;
     switch (want)
     {
         case 0:
-            if (renderer.NisEnabled) ToggleNis();
-            if (p?.SuperResolutionEnabled == true) ToggleVsr();
-            if (renderer.DlssEnabled) ToggleDlss();
+            if (renderer!.DlssEnabled) ToggleDlss();
             if (renderer.FsrEnabled) ToggleFsr();
             break;
         case 1:
-            if (!renderer.NisEnabled) ToggleNis();
-            break;
-        case 3:
-            if (!renderer.DlssEnabled) ToggleDlss();
-            break;
-        case 4:
-            if (!renderer.FsrEnabled) ToggleFsr();
+            if (!renderer!.DlssEnabled) ToggleDlss();
             break;
         case 2:
-            if (p?.SuperResolutionEnabled != true) ToggleVsr();
+            if (!renderer!.FsrEnabled) ToggleFsr();
             break;
         // An index with no backend behind it changes nothing, rather than falling through
         // to some other scaler as an unknown number used to.
@@ -1909,66 +1876,9 @@ void SelectScaler(int want)
     }
 }
 
-void ToggleVsr()
-{
-    var p = renderer?.Processor;
-    if (p is null || !p.Available) { Log.Warn("VSR unavailable: no D3D11 video device"); return; }
-    // Only one upscaler owns the frame; enabling the driver one stands the others down.
-    if (!p.SuperResolutionEnabled && renderer!.NisEnabled)
-    {
-        renderer.NisEnabled = false;
-        Log.Info("NIS off: RTX VSR takes the scaling path");
-    }
-    if (!p.SuperResolutionEnabled && renderer!.DlssEnabled)
-    {
-        renderer.DlssEnabled = false;
-        Log.Info("DLSS off: RTX VSR takes the scaling path");
-    }
-    if (!p.SuperResolutionEnabled && renderer!.FsrEnabled)
-    {
-        renderer.FsrEnabled = false;
-        Log.Info("FSR off: RTX VSR takes the scaling path");
-    }
-    p.ToggleSuperResolution();
-    Log.Info($"VSR now {(p.SuperResolutionEnabled ? "ON" : "OFF")}" +
-             (p.LastError is null ? "" : $" ({p.LastError})"));
-}
-
 /// <summary>
-/// NIS and the driver filters both want to own the scale, and only one path can run.
-/// Turning NIS on therefore switches the driver path off rather than leaving a toggle
-/// that silently does nothing - the previous behaviour, which was simply a bug.
-/// </summary>
-void ToggleNis()
-{
-    if (renderer is null) return;
-    bool want = !renderer.NisEnabled;
-
-    if (want && renderer.UseProcessor)
-    {
-        var p = renderer.Processor!;
-        if (p.SuperResolutionEnabled) { p.ToggleSuperResolution(); Log.Info("RTX VSR off: NIS takes the scaling path"); }
-        if (p.HdrEnabled) { renderer.SetHdrOutput(false); p.ToggleHdr(); Log.Info("RTX Video HDR off: it requires the driver path"); }
-    }
-
-    if (want && renderer.DlssEnabled)
-    {
-        renderer.DlssEnabled = false;
-        Log.Info("DLSS off: NIS takes the scaling path");
-    }
-    if (want && renderer.FsrEnabled)
-    {
-        renderer.FsrEnabled = false;
-        Log.Info("FSR off: NIS takes the scaling path");
-    }
-
-    renderer.NisEnabled = want;
-    Log.Info($"NIS now {(want ? "ON" : "OFF")}");
-}
-
-/// <summary>
-/// DLSS is a third owner of the scale, with the same rule: turning it on stands the other
-/// two down, and RTX Video HDR with them, which only exists on the driver's path.
+/// DLSS and FSR both want the picture, and only one can have it: turning one on stands
+/// the other down, and RTX Video HDR with it, which only exists on the driver's path.
 /// <para>
 /// It is started here rather than on the first frame, so that a card or driver that
 /// cannot run it leaves the choice where it was instead of selecting something that
@@ -1987,13 +1897,12 @@ void ToggleDlss()
             Log.Warn($"DLSS stays off: {renderer.Dlss?.LastError ?? "unavailable"}");
             return;
         }
-        if (renderer.NisEnabled) { renderer.NisEnabled = false; Log.Info("NIS off: DLSS takes the scaling path"); }
         if (renderer.FsrEnabled) { renderer.FsrEnabled = false; Log.Info("FSR off: DLSS takes the scaling path"); }
-        if (renderer.UseProcessor)
+        if (renderer.Processor is { HdrEnabled: true } p)
         {
-            var p = renderer.Processor!;
-            if (p.SuperResolutionEnabled) { p.ToggleSuperResolution(); Log.Info("RTX VSR off: DLSS takes the scaling path"); }
-            if (p.HdrEnabled) { renderer.SetHdrOutput(false); p.ToggleHdr(); Log.Info("RTX Video HDR off: it requires the driver path"); }
+            renderer.SetHdrOutput(false);
+            p.ToggleHdr();
+            Log.Info("RTX Video HDR off: it requires the driver path");
         }
     }
 
@@ -2002,9 +1911,9 @@ void ToggleDlss()
 }
 
 /// <summary>
-/// FSR is a fourth owner of the scale, under the same rule as DLSS and started ahead of
-/// its first frame for the same reason: without AMD's library, or with one that will not
-/// start here, the choice stays where it was.
+/// FSR, under the same rule as DLSS and started ahead of its first frame for the same
+/// reason: without AMD's library, or with one that will not start here, the choice stays
+/// where it was.
 /// </summary>
 void ToggleFsr()
 {
@@ -2018,13 +1927,12 @@ void ToggleFsr()
             Log.Warn($"FSR stays off: {renderer.Fsr?.LastError ?? "unavailable"}");
             return;
         }
-        if (renderer.NisEnabled) { renderer.NisEnabled = false; Log.Info("NIS off: FSR takes the scaling path"); }
         if (renderer.DlssEnabled) { renderer.DlssEnabled = false; Log.Info("DLSS off: FSR takes the scaling path"); }
-        if (renderer.UseProcessor)
+        if (renderer.Processor is { HdrEnabled: true } p)
         {
-            var p = renderer.Processor!;
-            if (p.SuperResolutionEnabled) { p.ToggleSuperResolution(); Log.Info("RTX VSR off: FSR takes the scaling path"); }
-            if (p.HdrEnabled) { renderer.SetHdrOutput(false); p.ToggleHdr(); Log.Info("RTX Video HDR off: it requires the driver path"); }
+            renderer.SetHdrOutput(false);
+            p.ToggleHdr();
+            Log.Info("RTX Video HDR off: it requires the driver path");
         }
     }
 

@@ -7,34 +7,26 @@ using Vortice.DXGI;
 namespace Rayxel.Render;
 
 /// <summary>
-/// The D3D11 video processor path. RTX VSR and RTX Video HDR are driver features
-/// exposed only here — they cannot be applied to an arbitrary texture, they have to be
-/// switched on for a video stream inside a VideoProcessorBlt. This is the same call
-/// browsers make; nothing about it is private to NVIDIA's own software.
+/// The D3D11 video processor path. RTX Video HDR is a driver feature exposed only here —
+/// it cannot be applied to an arbitrary texture, it has to be switched on for a video
+/// stream inside a VideoProcessorBlt. This is the same call browsers make; nothing about
+/// it is private to NVIDIA's own software.
 /// <para>
-/// GUIDs and payload layouts are taken from mpv's vf_d3d11vpp, which is where these
-/// interfaces are documented in practice.
+/// The GUID and the payload's layout are taken from mpv's vf_d3d11vpp, which is where
+/// this interface is documented in practice.
+/// </para>
+/// <para>
+/// The same path carries the drivers' own upscalers, RTX Video Super Resolution among
+/// them. That used to be offered here; with DLSS and FSR it no longer is.
 /// </para>
 /// </summary>
 public sealed class VideoProcessor : IDisposable
 {
-    /// <summary>NVIDIA_PPE_INTERFACE_GUID — RTX Video Super Resolution.</summary>
-    private static readonly Guid NvidiaSuperResolution =
-        new(0xd43ce1b3, 0x1f4b, 0x48ac, 0xba, 0xee, 0xc3, 0xc2, 0x53, 0x75, 0xe6, 0xf7);
-
     /// <summary>NVIDIA_TRUE_HDR_INTERFACE_GUID — RTX Video HDR (SDR to HDR inverse tone map).</summary>
     private static readonly Guid NvidiaTrueHdr =
         new(0xfdd62bb4, 0x620b, 0x4fd7, 0x9a, 0xb3, 0x1e, 0x59, 0xd0, 0xd5, 0x44, 0xb3);
 
-    /// <summary>INTEL_VPE_INTERFACE_GUID — Intel's video processing extension entry point.</summary>
-    private static readonly Guid IntelVpe =
-        new(0xedd1d4b9, 0x8659, 0x4cbc, 0xa4, 0xd6, 0x98, 0x31, 0xa2, 0x16, 0x3a, 0xc3);
-
-    private const uint IntelVpeFunctionScaling = 0x37;
-    private const uint IntelVpeScalingDefault = 0x0;
-    private const uint IntelVpeScalingSuperResolution = 0x2;
-
-    /// <summary>Payload both NVIDIA extensions take: a version, a method selector and an enable flag.</summary>
+    /// <summary>The payload NVIDIA's extension takes: a version, a method selector and an enable flag.</summary>
     [StructLayout(LayoutKind.Sequential)]
     private struct NvidiaExtension
     {
@@ -43,23 +35,9 @@ public sealed class VideoProcessor : IDisposable
         public uint Enable;
     }
 
-    /// <summary>
-    /// Intel's payload is a function selector plus a pointer to that function's argument,
-    /// rather than a flat struct like NVIDIA's.
-    /// </summary>
-    [StructLayout(LayoutKind.Sequential)]
-    private struct IntelExtension
-    {
-        public uint Function;
-        public IntPtr Param;
-    }
-
     public enum GpuVendor { Unknown, Nvidia, Intel, Amd }
 
     public GpuVendor Vendor { get; private set; } = GpuVendor.Unknown;
-
-    /// <summary>True when this GPU exposes a driver super-resolution filter we know how to drive.</summary>
-    public bool SuperResolutionSupported => Vendor is GpuVendor.Nvidia or GpuVendor.Intel;
 
     /// <summary>RTX Video HDR has no Intel or AMD equivalent — nothing to offer there.</summary>
     public bool HdrFilterSupported => Vendor == GpuVendor.Nvidia;
@@ -82,7 +60,6 @@ public sealed class VideoProcessor : IDisposable
     public int OutputWidth => _outWidth;
     public int OutputHeight => _outHeight;
 
-    public bool SuperResolutionEnabled { get; private set; }
     public bool HdrEnabled { get; private set; }
 
     /// <summary>Set when the driver rejected an extension, so the UI can stop claiming it is on.</summary>
@@ -94,12 +71,11 @@ public sealed class VideoProcessor : IDisposable
         _videoDevice = device.QueryInterfaceOrNull<ID3D11VideoDevice>();
         _videoContext = device.ImmediateContext.QueryInterfaceOrNull<ID3D11VideoContext>();
 
-        if (!Available) { Log.Warn("ID3D11VideoDevice/VideoContext unavailable - VSR and RTX HDR cannot be used"); return; }
+        if (!Available) { Log.Warn("ID3D11VideoDevice/VideoContext unavailable - RTX Video HDR cannot be used"); return; }
 
         Vendor = DetectVendor(device);
         Log.Info($"D3D11 video processor available, GPU vendor: {Vendor} " +
-                 $"(super resolution: {(SuperResolutionSupported ? "supported" : "no driver filter")}, " +
-                 $"HDR filter: {(HdrFilterSupported ? "supported" : "NVIDIA only")})");
+                 $"(HDR filter: {(HdrFilterSupported ? "supported" : "NVIDIA only")})");
     }
 
     private static GpuVendor DetectVendor(ID3D11Device device)
@@ -121,15 +97,15 @@ public sealed class VideoProcessor : IDisposable
     }
 
     /// <summary>
-    /// (Re)builds the processor for a given input/output size. Output is the upscale
-    /// target: VSR only engages when the output is larger than the input.
+    /// (Re)builds the processor for a given input/output size. The output is the size the
+    /// picture is shown at: the driver's own scaler takes it there.
     /// </summary>
     public void Configure(int inWidth, int inHeight, Format inFormat, int outWidth, int outHeight)
     {
         if (!Available) return;
         if (_processor is not null && _inWidth == inWidth && _inHeight == inHeight
             && _outWidth == outWidth && _outHeight == outHeight && _inFormat == inFormat
-            && _builtForHdr == _outputHdr && _builtForHdrSource == SourceHdr)
+            && _builtForHdr == _outputHdr)
             return;
 
         ReleaseProcessor();
@@ -172,7 +148,6 @@ public sealed class VideoProcessor : IDisposable
         _inWidth = inWidth; _inHeight = inHeight; _inFormat = inFormat;
         _outWidth = outWidth; _outHeight = outHeight;
         _builtForHdr = _outputHdr;
-        _builtForHdrSource = SourceHdr;
 
         Log.Info($"video processor: {inWidth}x{inHeight} {inFormat} -> {outWidth}x{outHeight} " +
                  $"(scale {outWidth / (double)inWidth:0.00}x), {(_outputHdr ? "HDR" : "SDR")} out");
@@ -190,19 +165,16 @@ public sealed class VideoProcessor : IDisposable
                 YCbCr_xvYCC = 0,
                 Nominal_Range = 1    // 1 = 16-235 studio range
             };
-            // An HDR10 source cannot be said in this older form at all.
-            if (!SourceHdr) _videoContext!.VideoProcessorSetStreamColorSpace(_processor, 0, input);
+            _videoContext!.VideoProcessorSetStreamColorSpace(_processor, 0, input);
             // The same again in the newer form. The output is described in that form
             // (ApplyOutputColorSpace), and the two halves of a conversion are better
             // stated in one vocabulary than in two.
             using (var vc1 = _videoContext!.QueryInterfaceOrNull<ID3D11VideoContext1>())
-                vc1?.VideoProcessorSetStreamColorSpace1(_processor, 0,
-                    SourceHdr ? ColorSpaceType.YcbcrStudioG2084LeftP2020 : ColorSpaceType.YcbcrStudioG22LeftP709);
+                vc1?.VideoProcessorSetStreamColorSpace1(_processor, 0, ColorSpaceType.YcbcrStudioG22LeftP709);
 
             ApplyOutputColorSpace();
 
-            // Let the driver pick its best scaler rather than a fixed one; VSR replaces it
-            // when the extension is enabled.
+            // Let the driver pick its best scaler rather than a fixed one.
             _videoContext.VideoProcessorSetStreamAutoProcessingMode(_processor, 0, true);
             Log.Debug("video processor colour space set: BT.709 limited in, full-range RGB out");
         }
@@ -211,18 +183,11 @@ public sealed class VideoProcessor : IDisposable
             Log.Warn($"colour space setup failed: {e.ResultCode}");
         }
 
-        // Extensions live on the processor, so re-apply whatever the user had toggled on.
-        if (SuperResolutionEnabled) ApplySuperResolution(true);
+        // The extension lives on the processor, so it is applied again to a new one.
         if (HdrEnabled) ApplyHdr(true);
     }
 
-    private bool _outputHdr, _builtForHdr, _builtForHdrSource;
-
-    /// <summary>
-    /// True when the frames given to <see cref="Process"/> are HDR10 (PQ, BT.2020) rather
-    /// than SDR. Read by the next <see cref="Configure"/>, which rebuilds when it has changed.
-    /// </summary>
-    public bool SourceHdr { get; set; }
+    private bool _outputHdr, _builtForHdr;
 
     /// <summary>
     /// Whether the processor is to produce an HDR picture (PQ / BT.2020), which is what
@@ -264,43 +229,7 @@ public sealed class VideoProcessor : IDisposable
         catch (Exception ex) { Log.Warn($"output colour space failed: {ex.Message}"); }
     }
 
-    public bool ToggleSuperResolution() => ApplySuperResolution(!SuperResolutionEnabled);
     public bool ToggleHdr() => ApplyHdr(!HdrEnabled);
-
-    private bool ApplySuperResolution(bool enable)
-    {
-        switch (Vendor)
-        {
-            case GpuVendor.Nvidia:
-            {
-                var ext = new NvidiaExtension { Version = 1, Method = 2, Enable = enable ? 1u : 0u };
-                if (!SetExtension(NvidiaSuperResolution, ext, "RTX VSR")) return false;
-                break;
-            }
-            case GpuVendor.Intel:
-                if (!ApplyIntelSuperResolution(enable)) return false;
-                break;
-            default:
-                LastError = $"no driver super resolution on {Vendor} hardware";
-                Log.Warn(LastError);
-                return false;
-        }
-
-        SuperResolutionEnabled = enable;
-        return true;
-    }
-
-    /// <summary>
-    /// Intel's scaling mode is selected by pointing the extension at a mode value rather
-    /// than setting an enable bit, so switching off means selecting the default scaler.
-    /// Written from the documented layout but never run on Intel hardware - unverified.
-    /// </summary>
-    private unsafe bool ApplyIntelSuperResolution(bool enable)
-    {
-        uint mode = enable ? IntelVpeScalingSuperResolution : IntelVpeScalingDefault;
-        var ext = new IntelExtension { Function = IntelVpeFunctionScaling, Param = new IntPtr(&mode) };
-        return SetExtension(IntelVpe, ext, "Intel VSR");
-    }
 
     private bool ApplyHdr(bool enable)
     {
