@@ -446,6 +446,10 @@ public sealed class OpticalFlow : IDisposable
         // moving away from the prediction costs a little.
         static const float Reluctance = 0.012;
 
+        // How much better, per pixel of the patch, a movement has to match than no movement
+        // at all before it is believed: about one grey level of an 8-bit picture.
+        static const float Stillness = 0.004;
+
         // Matching whole pixels cannot see a movement smaller than one, and in the small
         // copies of the picture nearly every movement is. This finds the remainder from
         // the slopes instead (Lucas-Kanade): where brightness changes by so much per
@@ -497,6 +501,18 @@ public sealed class OpticalFlow : IDisposable
                 float2 delta = float2(x, y);
                 float cost = PatchCost(at, start + delta) + Reluctance * 25.0 * length(delta);
                 if (cost < best) { best = cost; bestD = start + delta; }
+            }
+
+            // Whatever the level above said, the patch may simply not have moved: the
+            // background behind something that crossed it, a game's HUD over the world it
+            // is drawn on. The coarser level saw those together with their moving
+            // surroundings and handed that movement down, and on a flat patch nothing here
+            // contradicts it. So standing still is always tried as well, and wins unless
+            // moving matches better by more than noise would explain.
+            if (HasParent > 0.5)
+            {
+                float still = PatchCost(at, float2(0.0, 0.0));
+                if (still <= best + Stillness * 25.0) { best = still; bestD = float2(0.0, 0.0); }
             }
 
             float strength;
