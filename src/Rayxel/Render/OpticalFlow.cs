@@ -901,6 +901,12 @@ public sealed class OpticalFlow : IDisposable
             return float4(v4, own.zw);
         }
 
+        // BT.709 primaries to the swapchain's BT.2020; see the renderer's SdrToPQ.
+        static const float3x3 Rec709To2020 = {
+            0.6274, 0.3293, 0.0433,
+            0.0691, 0.9195, 0.0114,
+            0.0164, 0.0880, 0.8956 };
+
         float3 LinearToPQ(float3 L)
         {
             const float m1 = 0.1593017578125, m2 = 78.84375;
@@ -958,7 +964,7 @@ public sealed class OpticalFlow : IDisposable
                 alpha = max(strength * 0.5, mark * 0.9);
             }
 
-            if (IsPq > 0.5) rgb = LinearToPQ(pow(rgb, 2.2) * (Nits / 10000.0));
+            if (IsPq > 0.5) rgb = LinearToPQ(mul(Rec709To2020, pow(rgb, 2.2)) * (Nits / 10000.0));
             return float4(rgb, alpha);
         }
         """;

@@ -569,6 +569,167 @@ public sealed class Renderer : IDisposable
 
         _videoWidth = width; _videoHeight = height; _videoFormat = format;
         Log.Info($"video surface configured: {width}x{height} {format} ({(isTenBit ? "10" : "8")}-bit)");
+
+        if (TestPattern) FillTestPattern();
+    }
+
+    /// <summary>
+    /// Diagnostic: a picture of known colours shown in place of the video, so that what
+    /// each path does to colour can be measured instead of judged by eye. Set before the
+    /// source starts. Frames from the source are then ignored.
+    /// <para>
+    /// The picture is what an SDR source would send: 8-bit NV12, BT.709, 16-235. Three
+    /// rows of eight flat patches: the colour bars at full strength, a grey ramp from
+    /// black to white, and the bars again at three quarters. <see cref="SavePatternReadings"/>
+    /// writes out what reached the back buffer for each.
+    /// </para>
+    /// </summary>
+    public bool TestPattern { get; set; }
+
+    // The rows, as a share of the picture's height, and the patches of each as sRGB values.
+    private static readonly (float Top, float Bottom, string Name, (byte R, byte G, byte B)[] Patches)[] PatternRows =
+    [
+        (0f, 0.375f, "bars 100%", Bars(255)),
+        (0.375f, 0.6875f, "grey", [.. Enumerable.Range(0, 8).Select(i => { byte v = (byte)Math.Round(i * 255 / 7.0); return (v, v, v); })]),
+        (0.6875f, 0.875f, "bars 75%", Bars(191)),
+    ];
+
+    private static (byte, byte, byte)[] Bars(byte on) =>
+    [
+        (on, on, on), (on, on, 0), (0, on, on), (0, on, 0), (on, 0, on), (on, 0, 0), (0, 0, on), (0, 0, 0)
+    ];
+
+    private unsafe void FillTestPattern()
+    {
+        if (_videoTexture is null || _videoFormat != Format.NV12) return;
+        int width = _videoWidth, height = _videoHeight;
+
+        using var staging = _device.CreateTexture2D(new Texture2DDescription
+        {
+            Width = (uint)width,
+            Height = (uint)height,
+            MipLevels = 1,
+            ArraySize = 1,
+            Format = Format.NV12,
+            SampleDescription = new SampleDescription(1, 0),
+            Usage = ResourceUsage.Staging,
+            CPUAccessFlags = CpuAccessFlags.Write
+        });
+
+        (byte R, byte G, byte B) At(int x, int y)
+        {
+            float v = y / (float)height;
+            foreach (var row in PatternRows)
+                if (v >= row.Top && v < row.Bottom)
+                    return row.Patches[Math.Min(row.Patches.Length - 1, x * row.Patches.Length / width)];
+            return (0, 0, 0);
+        }
+
+        // R'G'B' to Y'CbCr, BT.709, 16-235 and 16-240.
+        static (byte Y, byte Cb, byte Cr) ToYuv((byte R, byte G, byte B) c)
+        {
+            double r = c.R / 255.0, g = c.G / 255.0, b = c.B / 255.0;
+            double y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+            return ((byte)Math.Round(16 + 219 * y),
+                    (byte)Math.Round(128 + 224 * (b - y) / 1.8556),
+                    (byte)Math.Round(128 + 224 * (r - y) / 1.5748));
+        }
+
+        var map = _context.Map(staging, 0, MapMode.Write);
+        try
+        {
+            byte* luma = (byte*)map.DataPointer;
+            // The chroma plane follows the luma plane, at the same pitch.
+            byte* chroma = luma + (long)map.RowPitch * height;
+            for (int y = 0; y < height; y++)
+                for (int x = 0; x < width; x++)
+                    luma[y * (long)map.RowPitch + x] = ToYuv(At(x, y)).Y;
+            for (int y = 0; y < height / 2; y++)
+                for (int x = 0; x < width / 2; x++)
+                {
+                    var c = ToYuv(At(x * 2, y * 2));
+                    chroma[y * (long)map.RowPitch + x * 2] = c.Cb;
+                    chroma[y * (long)map.RowPitch + x * 2 + 1] = c.Cr;
+                }
+        }
+        finally { _context.Unmap(staging, 0); }
+
+        _context.CopyResource(_videoTexture, staging);
+        if (_vpTexture is not null) _context.CopyResource(_vpTexture, staging);
+        _uploadSerial++;
+        Log.Info($"test pattern {width}x{height} in place of the video");
+    }
+
+    /// <summary>
+    /// For each patch of the test pattern, what it was meant to be and what is in the
+    /// back buffer where it was drawn: the swapchain's own 10-bit values, averaged over
+    /// the middle of the patch. One line a patch: row, column, the sRGB it stands for,
+    /// then red, green and blue out of 1023. Whether those are PQ or sRGB is in the first
+    /// line, with the level SDR video is being encoded at.
+    /// </summary>
+    public bool SavePatternReadings(string path)
+    {
+        if (!TestPattern || _videoWidth <= 0) return false;
+        try
+        {
+            using var back = _swapChain.GetBuffer<ID3D11Texture2D>(0);
+            var desc = back.Description;
+            desc.Usage = ResourceUsage.Staging;
+            desc.BindFlags = BindFlags.None;
+            desc.CPUAccessFlags = CpuAccessFlags.Read;
+            desc.MiscFlags = ResourceOptionFlags.None;
+            using var staging = _device.CreateTexture2D(desc);
+
+            var (left, top, shownWidth, shownHeight) = FitPixels(_videoWidth, _videoHeight, Width, Height);
+            using var file = new StreamWriter(path);
+            file.WriteLine(FormattableString.Invariant(
+                $"# swapchain {(SwapChainIsPq ? "PQ BT.2020" : "sRGB")}, video at {VideoNits:0} nits, {Width}x{Height}, picture {shownWidth}x{shownHeight}"));
+            file.WriteLine("row,column,name,r8,g8,b8,r10,g10,b10");
+
+            lock (_context)
+            {
+                _context.CopyResource(staging, back);
+                var map = _context.Map(staging, 0, MapMode.Read);
+                try
+                {
+                    unsafe
+                    {
+                        for (int r = 0; r < PatternRows.Length; r++)
+                        {
+                            var row = PatternRows[r];
+                            int cy = top + (int)((row.Top + row.Bottom) / 2 * shownHeight);
+                            for (int c = 0; c < row.Patches.Length; c++)
+                            {
+                                int cx = left + (int)((c + 0.5f) / row.Patches.Length * shownWidth);
+                                double red = 0, green = 0, blue = 0;
+                                const int Half = 6;
+                                for (int y = cy - Half; y <= cy + Half; y++)
+                                {
+                                    var line = (uint*)((byte*)map.DataPointer + y * (long)map.RowPitch);
+                                    for (int x = cx - Half; x <= cx + Half; x++)
+                                    {
+                                        uint v = line[x];
+                                        red += v & 0x3FF; green += (v >> 10) & 0x3FF; blue += (v >> 20) & 0x3FF;
+                                    }
+                                }
+                                double n = (2 * Half + 1) * (2 * Half + 1);
+                                var p = row.Patches[c];
+                                file.WriteLine(FormattableString.Invariant(
+                                    $"{r},{c},{row.Name},{p.R},{p.G},{p.B},{red / n:0.0},{green / n:0.0},{blue / n:0.0}"));
+                            }
+                        }
+                    }
+                }
+                finally { _context.Unmap(staging, 0); }
+            }
+            Log.Info($"pattern readings written to {path}");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"pattern readings not written: {ex.Message}");
+            return false;
+        }
     }
 
     /// <summary>
@@ -578,7 +739,7 @@ public sealed class Renderer : IDisposable
     /// </summary>
     public void UploadFrame(ID3D11Texture2D source, int subresource)
     {
-        if (_videoTexture is null) return;
+        if (_videoTexture is null || TestPattern) return;
         // Copy only. The video processor blt deliberately does NOT run here: it shares the
         // immediate context with the render thread, and issuing it from the capture thread
         // put both threads in contention on the same lock for tens of milliseconds a frame.
@@ -607,6 +768,7 @@ public sealed class Renderer : IDisposable
         lock (_context)
         {
             if (_videoTexture is null || width != _videoWidth || height != _videoHeight) return false;
+            if (TestPattern) return false;
             _uploadSerial++;
             _context.CopySubresourceRegion(_videoTexture, 0, 0, 0, 0, source, (uint)subresource, picture);
             if (UseProcessor && _vpTexture is not null)
@@ -904,7 +1066,7 @@ public sealed class Renderer : IDisposable
             {
                 _context.CopyResource(staging, back);
                 var map = _context.Map(staging, 0, MapMode.Read);
-                try { WritePng(map, (int)desc.Width, (int)desc.Height, SwapChainIsPq, path); }
+                try { WritePng(map, (int)desc.Width, (int)desc.Height, SwapChainIsPq, VideoNits, path); }
                 finally { _context.Unmap(staging, 0); }
             }
             Log.Info($"back buffer written to {path}");
@@ -1025,7 +1187,7 @@ public sealed class Renderer : IDisposable
         }
     }
 
-    private static unsafe void WritePng(MappedSubresource map, int width, int height, bool pq, string path)
+    private static unsafe void WritePng(MappedSubresource map, int width, int height, bool pq, float nits, string path)
     {
         using var bmp = new Bitmap(width, height, PixelFormat.Format32bppArgb);
         var rect = new Rectangle(0, 0, width, height);
@@ -1047,9 +1209,15 @@ public sealed class Renderer : IDisposable
 
                     if (pq)
                     {
-                        // Undo what the shaders did: PQ back to luminance, back off the
-                        // 200-nit level the UI was encoded at, then re-apply sRGB gamma.
-                        r = PqToSrgb(r); g = PqToSrgb(g); b = PqToSrgb(b);
+                        // Undo what the shaders did, in their order backwards: PQ to
+                        // light, BT.2020 primaries to BT.709, the level SDR video is shown
+                        // at back to 1, and the gamma on again. An SDR picture comes back
+                        // as it went in; whatever is brighter than that level, or outside
+                        // BT.709, clips, a PNG having no way to hold it.
+                        float lr = PqToLight(r) / nits, lg = PqToLight(g) / nits, lb = PqToLight(b) / nits;
+                        r = Gamma(1.6605f * lr - 0.5876f * lg - 0.0728f * lb);
+                        g = Gamma(-0.1246f * lr + 1.1329f * lg - 0.0083f * lb);
+                        b = Gamma(-0.0182f * lr - 0.1006f * lg + 1.1187f * lb);
                     }
 
                     row[x * 4 + 0] = ToByte(b);
@@ -1065,16 +1233,17 @@ public sealed class Renderer : IDisposable
 
         static byte ToByte(float f) => (byte)Math.Clamp(f * 255f + 0.5f, 0, 255);
 
-        static float PqToSrgb(float e)
+        // SMPTE ST 2084 backwards: the encoded value to nits.
+        static float PqToLight(float e)
         {
             const float m1 = 0.1593017578125f, m2 = 78.84375f;
             const float c1 = 0.8359375f, c2 = 18.8515625f, c3 = 18.6875f;
             float p = MathF.Pow(MathF.Max(e, 0f), 1f / m2);
             float num = MathF.Max(p - c1, 0f);
-            float lum = MathF.Pow(num / (c2 - c3 * p), 1f / m1);   // 0..1 of 10000 nits
-            // The reference level everything SDR was encoded at, so it comes back as 1.0.
-            return MathF.Pow(Math.Clamp(lum * 10000f / 200f, 0f, 1f), 1f / 2.2f);
+            return 10000f * MathF.Pow(num / (c2 - c3 * p), 1f / m1);
         }
+
+        static float Gamma(float linear) => MathF.Pow(Math.Clamp(linear, 0f, 1f), 1f / 2.2f);
     }
 
     /// <summary>Uploads a freshly drawn HUD bitmap. Called only when the text changes.</summary>
@@ -1125,10 +1294,11 @@ public sealed class Renderer : IDisposable
 
     /// <summary>
     /// Whether this draw's source pixels are SDR and therefore need PQ encoding. Only the
-    /// video-processor output arrives already in PQ, and only while its HDR filter is on.
+    /// video-processor output arrives already in PQ, and only while it was built to make
+    /// an HDR picture.
     /// </summary>
     private uint NeedsPqEncode(uint mode) =>
-        SwapChainIsPq && !(mode == 2 && Processor?.HdrEnabled == true) ? 1u : 0u;
+        SwapChainIsPq && !(mode == 2 && Processor?.OutputIsHdr == true) ? 1u : 0u;
 
     private void SetConstants(float x, float y, float w, float h, uint mode, bool forceNoPq = false)
     {
@@ -1263,9 +1433,18 @@ public sealed class Renderer : IDisposable
 
         // The HUD is authored in sRGB. Dropping those values straight into a PQ swapchain
         // would read as several thousand nits, so it is re-encoded at a readable level.
+        // BT.709 primaries, which SDR video and the interface are in, to the BT.2020 ones
+        // the swapchain declares. Left out, the same numbers are read as BT.2020 colours
+        // and every colour comes out stronger than it was meant: a plain red as a red no
+        // SDR picture can hold.
+        static const float3x3 Rec709To2020 = {
+            0.6274, 0.3293, 0.0433,
+            0.0691, 0.9195, 0.0114,
+            0.0164, 0.0880, 0.8956 };
+
         float3 SdrToPQ(float3 srgb, float nits)
         {
-            return LinearToPQ(pow(srgb, 2.2) * (nits / 10000.0));
+            return LinearToPQ(mul(Rec709To2020, pow(srgb, 2.2)) * (nits / 10000.0));
         }
 
         Texture2D<float>  LumaTex   : register(t0);

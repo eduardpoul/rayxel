@@ -442,6 +442,11 @@ public sealed class ImGuiLayer : IDisposable
             return o;
         }
 
+        static const float3x3 Rec709To2020 = {
+            0.6274, 0.3293, 0.0433,
+            0.0691, 0.9195, 0.0114,
+            0.0164, 0.0880, 0.8956 };
+
         // SMPTE ST 2084. Input is absolute luminance normalised to 10000 nits.
         float3 LinearToPQ(float3 L)
         {
@@ -458,7 +463,9 @@ public sealed class ImGuiLayer : IDisposable
             // The UI is authored in sRGB. Written straight into a PQ swapchain those
             // values read as thousands of nits, which on an OLED is both unreadable and
             // a genuinely bad idea, so they are re-encoded at a comfortable level.
-            if (EncodePq != 0) c.rgb = LinearToPQ(pow(c.rgb, 2.2) * (Nits / 10000.0));
+            // With the primaries taken from BT.709 to the swapchain's BT.2020; see the
+            // renderer's SdrToPQ.
+            if (EncodePq != 0) c.rgb = LinearToPQ(mul(Rec709To2020, pow(c.rgb, 2.2)) * (Nits / 10000.0));
 
             return c;
         }

@@ -27,6 +27,7 @@ string? netAddress = null;
 FlowView startFlow = FlowView.Off;
 string? shotPath = null;
 bool shotCompares = false;
+bool testPattern = false;
 string? forcedScreen = null;
 string? forcedMode = null;
 int forcedScaler = -1;
@@ -36,6 +37,7 @@ bool usbCheck = false;
 double benchSeconds = 0;
 bool startWithTelemetry = false;
 bool noAutoHdr = false;
+bool forceHdr = false;
 bool startBorderless = false;
 // Present once per captured frame (the default), or on every swapchain slot as before.
 // Kept switchable because "is it smoother?" is a comparison, and a comparison needs both.
@@ -56,6 +58,10 @@ foreach (var arg in args)
     // instead of the one picture. Wants --scaler=dlss, so that DLSS is already running, and
     // --no-auto-hdr, so that the three are the same kind of picture.
     else if (arg is "--compare") shotCompares = true;
+    // A picture of known colours in place of the video; with --shot, what came out of it
+    // is written beside the screenshot as numbers (.csv). For measuring what a path does
+    // to colour.
+    else if (arg is "--pattern") testPattern = true;
     else if (arg is "--tele") startWithTelemetry = true;
     // Runs a fixed measurement and exits: warm up, record every frame for N seconds,
     // print percentiles. For comparing one pipeline configuration against another, which
@@ -67,6 +73,8 @@ foreach (var arg in args)
     // Starts on our own shader instead of following the Windows HDR state, so the driver
     // path can be taken out of the picture when comparing what is actually on screen.
     else if (arg is "--no-auto-hdr") noAutoHdr = true;
+    // The opposite: RTX Video HDR on from the start whatever was remembered, for measuring it.
+    else if (arg is "--hdr") forceHdr = true;
     else if (arg is "--borderless") startBorderless = true;
     // Pins the starting mode, as --mode=1280x720@60. A comparison needs a control, and
     // "whatever was remembered from last time" is not one.
@@ -248,6 +256,7 @@ try
 
     renderer = new Renderer();
     renderer.Initialize(hwnd, WindowWidth, WindowHeight);
+    renderer.TestPattern = testPattern;
     if (renderer.Flow is { } startingFlow) startingFlow.View = startFlow;
 
     pump = new FramePump(active.Device, renderer);
@@ -335,7 +344,7 @@ try
 
     // Deferred: the video processor is only built once the first frame arrives, and the
     // HDR extension cannot be set before it exists.
-    autoHdrPending = renderer.DisplaySupportsHdr && !noAutoHdr;
+    autoHdrPending = renderer.DisplaySupportsHdr && (!noAutoHdr || forceHdr);
     Log.Info(autoHdrPending
         ? "Windows has this display in HDR - will enable HDR output once the first frame lands"
         : "Windows has this display in SDR - HDR toggle disabled");
@@ -1173,7 +1182,7 @@ void RunLoop()
                 catch (Exception ex) { Log.Error("restoring the scaler failed", ex); }
             }
             // Only the driver path can produce HDR, so a remembered NIS choice takes it away.
-            if (autoHdrPending && settings.Hdr && !renderer.UseNis && !renderer.UseDlss)
+            if (autoHdrPending && (settings.Hdr || forceHdr) && !renderer.UseNis && !renderer.UseDlss)
             {
                 try { ToggleHdr(); } catch (Exception ex) { Log.Error("auto HDR failed", ex); }
             }
@@ -1245,6 +1254,7 @@ void RunLoop()
         {
             if (shotCompares) renderer.SaveComparison(shotPath);
             else renderer.SaveBackBuffer(shotPath);
+            if (testPattern) renderer.SavePatternReadings(Path.ChangeExtension(shotPath, ".csv"));
             // With the motion drawn in the picture, the vectors themselves go beside it.
             renderer.SaveFlow(Path.ChangeExtension(shotPath, ".flow"));
             shotPath = null;

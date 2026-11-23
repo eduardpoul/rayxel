@@ -128,7 +128,8 @@ public sealed class VideoProcessor : IDisposable
     {
         if (!Available) return;
         if (_processor is not null && _inWidth == inWidth && _inHeight == inHeight
-            && _outWidth == outWidth && _outHeight == outHeight && _inFormat == inFormat)
+            && _outWidth == outWidth && _outHeight == outHeight && _inFormat == inFormat
+            && _builtForHdr == _outputHdr)
             return;
 
         ReleaseProcessor();
@@ -152,8 +153,14 @@ public sealed class VideoProcessor : IDisposable
             Height = (uint)outHeight,
             MipLevels = 1,
             ArraySize = 1,
-            // 10-bit so RTX Video HDR has somewhere to put the range it generates.
-            Format = Format.R10G10B10A2_UNorm,
+            // The format is what tells the driver what kind of picture to write, more
+            // than the colour space set below does. Into a 10-bit surface, on a desktop
+            // that is in HDR, NVIDIA's driver writes PQ / BT.2020 whatever it was asked
+            // for; it writes plain sRGB only into an 8-bit one. So 10 bits when RTX Video
+            // HDR is to produce the picture - it needs the room - and 8 otherwise. Getting
+            // this wrong is not subtle: an SDR picture that is already PQ gets encoded to
+            // PQ a second time, and comes out at a third of its brightness and grey.
+            Format = _outputHdr ? Format.R10G10B10A2_UNorm : Format.B8G8R8A8_UNorm,
             SampleDescription = new SampleDescription(1, 0),
             Usage = ResourceUsage.Default,
             BindFlags = BindFlags.ShaderResource | BindFlags.RenderTarget
@@ -164,9 +171,10 @@ public sealed class VideoProcessor : IDisposable
 
         _inWidth = inWidth; _inHeight = inHeight; _inFormat = inFormat;
         _outWidth = outWidth; _outHeight = outHeight;
+        _builtForHdr = _outputHdr;
 
         Log.Info($"video processor: {inWidth}x{inHeight} {inFormat} -> {outWidth}x{outHeight} " +
-                 $"(scale {outWidth / (double)inWidth:0.00}x)");
+                 $"(scale {outWidth / (double)inWidth:0.00}x), {(_outputHdr ? "HDR" : "SDR")} out");
 
         // Without an explicit colour space the driver has to guess how to interpret the
         // YUV planes, and guesses wrong — the symptom is a completely black output.
@@ -182,6 +190,11 @@ public sealed class VideoProcessor : IDisposable
                 Nominal_Range = 1    // 1 = 16-235 studio range
             };
             _videoContext!.VideoProcessorSetStreamColorSpace(_processor, 0, input);
+            // The same again in the newer form. The output is described in that form
+            // (ApplyOutputColorSpace), and the two halves of a conversion are better
+            // stated in one vocabulary than in two.
+            using (var vc1 = _videoContext.QueryInterfaceOrNull<ID3D11VideoContext1>())
+                vc1?.VideoProcessorSetStreamColorSpace1(_processor, 0, ColorSpaceType.YcbcrStudioG22LeftP709);
 
             ApplyOutputColorSpace();
 
@@ -200,17 +213,22 @@ public sealed class VideoProcessor : IDisposable
         if (HdrEnabled) ApplyHdr(true);
     }
 
-    private bool _outputHdr;
+    private bool _outputHdr, _builtForHdr;
 
     /// <summary>
-    /// Tells the processor whether its output goes to a PQ / BT.2020 swapchain. Without
-    /// this the driver keeps converting to BT.709 and RTX Video HDR has no visible effect.
+    /// Whether the processor is to produce an HDR picture (PQ / BT.2020), which is what
+    /// RTX Video HDR makes, or an SDR one. It is rebuilt on the spot when this changes,
+    /// because the surface it writes to has to change with it: see <see cref="Configure"/>.
     /// </summary>
     public void SetOutputHdr(bool hdr)
     {
+        if (_outputHdr == hdr) return;
         _outputHdr = hdr;
-        ApplyOutputColorSpace();
+        if (_processor is not null) Configure(_inWidth, _inHeight, _inFormat, _outWidth, _outHeight);
     }
+
+    /// <summary>True when what <see cref="OutputView"/> holds is PQ / BT.2020 rather than sRGB.</summary>
+    public bool OutputIsHdr => _builtForHdr;
 
     private void ApplyOutputColorSpace()
     {
