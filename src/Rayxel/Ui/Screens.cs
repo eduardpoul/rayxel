@@ -106,6 +106,13 @@ public static class Screens
             ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, new Vector2(0, Layout.S(2)));
             foreach (var device in model.Devices) DeviceRow(model, device);
             ImGui.PopStyleVar();
+
+            ImGui.Dummy(new Vector2(0, Layout.S(8)));
+            ImGui.Indent(Layout.S(8));
+            var pairLabel = Strings.T("pairDevice");
+            if (Widgets.Button(pairLabel, new Vector2(Widgets.Measure(f.Body, pairLabel).X + Layout.S(32), Layout.S(32))))
+                model.Pairing ??= new PairFlow();
+            ImGui.Unindent(Layout.S(8));
         }
         EndCentred();
     }

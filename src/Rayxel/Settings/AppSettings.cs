@@ -68,18 +68,18 @@ public sealed class AppSettings
     public int NetPyroWaveKbps { get; set; } = 140_000;
 
     /// <summary>A codec by the name <see cref="NetCodec"/> and the command line use, or null.</summary>
-    internal static Capture.NetWire.Codec? ParseCodec(string? name) => name?.Trim().ToLowerInvariant() switch
+    internal static Rayxel.Link.Wire.Codec? ParseCodec(string? name) => name?.Trim().ToLowerInvariant() switch
     {
-        "hevc" or "h265" => Capture.NetWire.Codec.Hevc,
-        "av1" => Capture.NetWire.Codec.Av1,
-        "pyrowave" => Capture.NetWire.Codec.PyroWave,
+        "hevc" or "h265" => Rayxel.Link.Wire.Codec.Hevc,
+        "av1" => Rayxel.Link.Wire.Codec.Av1,
+        "pyrowave" => Rayxel.Link.Wire.Codec.PyroWave,
         _ => null
     };
 
-    internal static string CodecKey(Capture.NetWire.Codec codec) => codec switch
+    internal static string CodecKey(Rayxel.Link.Wire.Codec codec) => codec switch
     {
-        Capture.NetWire.Codec.Av1 => "av1",
-        Capture.NetWire.Codec.PyroWave => "pyrowave",
+        Rayxel.Link.Wire.Codec.Av1 => "av1",
+        Rayxel.Link.Wire.Codec.PyroWave => "pyrowave",
         _ => "hevc"
     };
 

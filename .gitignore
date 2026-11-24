@@ -8,6 +8,11 @@ src/rayxel-send/build/
 src/rayxel-send/out/
 # The PyroWave codec's library for Windows, built the same way
 src/pyrowave-windows/out/
+# The C# sender's Linux build, and the Decky plugin's build and its packages
+src/Rayxel.Send/out/
+src/rayxel-decky/out/
+src/rayxel-decky/dist/
+node_modules/
 
 # Rolling logs. The app writes these next to the settings now, but older builds
 # dropped them beside the executable.

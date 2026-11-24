@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using Rayxel.Diagnostics;
+using Rayxel.Link.Security;
 using Vortice.Direct3D11;
 using Vortice.MediaFoundation;
 
@@ -66,6 +67,12 @@ internal sealed class NetFeed : IDisposable, IPictureSink
     private readonly IPEndPoint _sender;
     private readonly int _width, _height, _fps;
 
+    // A paired sender, whose sessions are begun with a handshake and sealed; null for one
+    // named by address, the old kind, spoken to in the clear.
+    private readonly Peer? _peer;
+    private NetLink? _link;
+    private long _lastHeardNs;
+
     // What the Deck is asked for: a codec, and what to spend - fixed, or followed by the
     // governor. The HELLO says it twice a second, and at once when it changes.
     private readonly BitrateGovernor _governor = new(NetDevice.AdaptiveCeilingKbps);
@@ -122,11 +129,12 @@ internal sealed class NetFeed : IDisposable, IPictureSink
     /// <summary>This machine's clock in nanoseconds. Media Foundation's is the same one in 100 ns units.</summary>
     private static long NowNs() => (long)(Stopwatch.GetTimestamp() * NsPerTick);
 
-    public NetFeed(IPEndPoint sender, int width, int height, int fps,
+    public NetFeed(IPEndPoint sender, Peer? peer, int width, int height, int fps,
                    IMFDXGIDeviceManager deviceManager, ID3D11Device device, INetSink sink, Func<bool> focused)
     {
         _focused = focused;
         _sender = sender;
+        _peer = peer;
         _width = width;
         _height = height;
         _fps = fps;
@@ -184,15 +192,22 @@ internal sealed class NetFeed : IDisposable, IPictureSink
             // whatever arrives in that time has to wait here rather than be dropped.
             socket.ReceiveBufferSize = 8 << 20;
             socket.Connect(_sender);
+            var link = new NetLink(socket, secure: _peer is not null);
+            _link = link;
+
+            // A paired sender first proves who it is, and the session's keys are agreed;
+            // until then nothing else is sent. One that does not answer may be starting up,
+            // so it is asked again until this feed is stopped.
+            if (_peer is not null && !Handshake(link)) return;
 
             // The controller goes the other way down the same connection, on a thread of
             // its own: it has to be looked at a thousand times a second, and this one
             // spends its time waiting for packets.
-            using var pad = new PadForwarder(socket, _session, _focused);
+            using var pad = new PadForwarder(link, _session, _focused);
             pad.Start();
 
             // And the keyboard and mouse, once the user hands them over.
-            using var desk = new DeskForwarder(socket, _session, _focused);
+            using var desk = new DeskForwarder(link, _session, _focused);
             desk.Start();
             _desk = desk;
 
@@ -202,8 +217,10 @@ internal sealed class NetFeed : IDisposable, IPictureSink
             if (_askedCodec == NetWire.Codec.PyroWave) OpenPyroWave(_width, _height);
 
             Volatile.Write(ref _askedCodecAtNs, NowNs());
-            byte[] packet = new byte[2048];
-            byte[] outgoing = new byte[32];
+            byte[] packet = new byte[NetWire.DatagramMax + 64];
+            byte[] opened = new byte[NetWire.DatagramMax + 64];
+            byte[] outgoing = new byte[64];
+            _lastHeardNs = NowNs();
             long nextHello = 0, nextPing = 0;
             int pingsSent = 0;
             _windowStartNs = NowNs();
@@ -239,15 +256,27 @@ internal sealed class NetFeed : IDisposable, IPictureSink
                     nextHello = now;
                 }
 
+                // A paired sender that has gone silent - restarted, or switched off and on - has
+                // forgotten this session; it is begun again with fresh keys.
+                if (_peer is not null && now - _lastHeardNs > 3_000_000_000)
+                {
+                    Log.Info($"nothing from {_peer.Name} for 3 s; beginning the session again");
+                    if (!Handshake(link)) break;
+                    _lastHeardNs = NowNs();
+                    nextHello = nextPing = 0;
+                    _waitingForKeyframe = true;
+                    continue;
+                }
+
                 if (now >= nextHello)
                 {
-                    socket.Send(outgoing, NetWire.WriteHello(outgoing, _session, _width, _height, _fps, _askedCodec, _askedKbps),
-                                SocketFlags.None);
+                    link.Send(outgoing.AsSpan(0, NetWire.WriteHello(outgoing, _session, _width, _height, _fps, _askedCodec, _askedKbps,
+                                                                    link.Version)));
                     nextHello = now + 500_000_000;
                 }
                 if (now >= nextPing)
                 {
-                    socket.Send(outgoing, NetWire.WritePing(outgoing, now), SocketFlags.None);
+                    link.Send(outgoing.AsSpan(0, NetWire.WritePing(outgoing, _session, now, link.Version)));
                     // Often at first, so there is a good comparison of the clocks before the
                     // first frames are judged by it; then just enough to follow their drift.
                     nextPing = now + (++pingsSent < 20 ? 50_000_000 : 250_000_000);
@@ -260,7 +289,17 @@ internal sealed class NetFeed : IDisposable, IPictureSink
                 // here as a failed receive. It may simply not have started yet; keep asking.
                 if (error != SocketError.Success || n <= 0) continue;
 
-                var data = packet.AsSpan(0, n);
+                var data = link.Open(packet.AsSpan(0, n), opened);
+                if (data.IsEmpty) continue;
+                if (NetWire.TypeOf(data) == NetWire.Refuse)
+                {
+                    // The sender has turned this session away while it ran: switched off, or
+                    // given to another computer. Said once; the session is begun again later.
+                    if (NetWire.TryReadRefuse(data, out uint refused, out var reason) && refused == _session)
+                        Log.Info($"{_peer?.Name ?? "the sender"}: {ViewerHandshake.Describe(reason)}");
+                    continue;
+                }
+                _lastHeardNs = arrived;
                 switch (NetWire.TypeOf(data))
                 {
                     case NetWire.Pong:
@@ -272,7 +311,7 @@ internal sealed class NetFeed : IDisposable, IPictureSink
                         break;
                     case NetWire.Video:
                         if (NetWire.TryReadVideo(data, out var header) && header.Session == _session)
-                            OnPacket(socket, header, data[NetWire.VideoHeaderSize..], arrived);
+                            OnPacket(header, data[NetWire.VideoHeaderSize..], arrived);
                         break;
                 }
             }
@@ -280,8 +319,7 @@ internal sealed class NetFeed : IDisposable, IPictureSink
             pad.Dispose();
             _desk = null;
             desk.Dispose();
-            try { socket.Send(outgoing, NetWire.WriteSession(outgoing, NetWire.Bye, _session), SocketFlags.None); }
-            catch (SocketException) { }
+            link.Send(outgoing.AsSpan(0, NetWire.WriteSession(outgoing, NetWire.Bye, _session, link.Version)));
         }
         catch (Exception ex)
         {
@@ -299,6 +337,40 @@ internal sealed class NetFeed : IDisposable, IPictureSink
             _pyroWave = null;
             socket?.Dispose();
         }
+    }
+
+    /// <summary>
+    /// Begins a session with the paired sender: proves both sides and agrees its keys, asking
+    /// again every couple of seconds while the sender does not answer. False when this feed
+    /// is stopped meanwhile, or the sender refuses in a way asking again will not change.
+    /// </summary>
+    private bool Handshake(NetLink link)
+    {
+        string? said = null;
+        while (_running)
+        {
+            try
+            {
+                link.Channel = ViewerHandshake.Connect(link.Socket, NetLinks.Identity, _peer!, _session);
+                NetLinks.Store.Seen(_peer!.Id, _sender.ToString());
+                Log.Info($"session with {_peer.Name} begun: sealed, keys of its own");
+                return true;
+            }
+            catch (LinkRefusedException ex) when (ex.Reason is Link.Wire.RefuseReason.NotPaired or Link.Wire.RefuseReason.BadProof)
+            {
+                // The sender has forgotten this computer, or holds another key: only pairing again helps.
+                Log.Error($"{_peer!.Name}: {ex.Message}");
+                _sink.NetFailed(ex.Message);
+                return false;
+            }
+            catch (LinkRefusedException ex)
+            {
+                if (said != ex.Message) Log.Info($"{_peer!.Name}: {ex.Message}; asking again");
+                said = ex.Message;
+                for (int i = 0; i < 20 && _running; i++) Thread.Sleep(100);
+            }
+        }
+        return false;
     }
 
     private void NoteClock(long roundTripNs, long offsetNs)
@@ -320,7 +392,7 @@ internal sealed class NetFeed : IDisposable, IPictureSink
         }
     }
 
-    private void OnPacket(Socket socket, in NetWire.VideoHeader h, ReadOnlySpan<byte> payload, long arrived)
+    private void OnPacket(in NetWire.VideoHeader h, ReadOnlySpan<byte> payload, long arrived)
     {
         if ((int)h.Codec >= NetWire.CodecCount) return; // from a sender newer than this viewer
         bool pyroWave = h.Codec == NetWire.Codec.PyroWave;
@@ -399,10 +471,10 @@ internal sealed class NetFeed : IDisposable, IPictureSink
         if (_head.Keyframe) _waitingForKeyframe = false;
         if (_waitingForKeyframe)
         {
-            AskForKeyframe(socket, arrived);
+            AskForKeyframe(arrived);
             return;
         }
-        DecodeFrame(socket, arrived);
+        DecodeFrame(arrived);
     }
 
     /// <summary>
@@ -491,18 +563,18 @@ internal sealed class NetFeed : IDisposable, IPictureSink
     }
 
     /// <summary>At most a few times a second: the answer takes a frame or two to arrive, and asking again in the meantime changes nothing.</summary>
-    private void AskForKeyframe(Socket socket, long now)
+    private void AskForKeyframe(long now)
     {
         if (now - _keyframeAskedNs < 250_000_000) return;
         _keyframeAskedNs = now;
         Interlocked.Increment(ref _keyframesRequested);
 
+        if (_link is not { } link) return;
         Span<byte> request = stackalloc byte[8];
-        try { socket.Send(request[..NetWire.WriteSession(request, NetWire.Keyframe, _session)]); }
-        catch (SocketException) { }
+        link.Send(request[..NetWire.WriteSession(request, NetWire.Keyframe, _session, link.Version)]);
     }
 
-    private void DecodeFrame(Socket socket, long arrived)
+    private void DecodeFrame(long arrived)
     {
         try
         {
@@ -535,7 +607,7 @@ internal sealed class NetFeed : IDisposable, IPictureSink
             _decoder?.Dispose();
             _decoder = null;
             _waitingForKeyframe = true;
-            AskForKeyframe(socket, arrived);
+            AskForKeyframe(arrived);
         }
     }
 

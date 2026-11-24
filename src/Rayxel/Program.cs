@@ -333,6 +333,20 @@ try
     model.ToggleHdr = () => pendingHdrToggle = true;
     model.SelectMode = (m, fps) => { try { pump!.Select(m, fps); } catch (Exception ex) { Log.Error("mode switch failed", ex); } };
     model.SwitchDevice = d => pendingDeviceSwitch = d;
+    model.RefreshDevices = () =>
+    {
+        try { allDevices = EnumerateDevices(); model.Devices = allDevices; }
+        catch (Exception ex) { Log.Warn($"device re-enumeration failed: {ex.Message}"); }
+    };
+    model.Paired = peer =>
+    {
+        model.RefreshDevices();
+        if (allDevices.FirstOrDefault(d => d.SymbolicLink == NetDevice.LinkScheme + peer.Id) is { } paired)
+        {
+            pendingDeviceSwitch = paired;
+            model.Screen = Screen.App;
+        }
+    };
     model.SetWindowKind = k => pendingWindowKind = k;
     model.Quit = () => quit = true;
     windowMode = new WindowMode(hwnd);
@@ -484,6 +498,9 @@ List<CaptureDeviceInfo> EnumerateDevices()
 {
     var devices = CaptureDevice.Enumerate();
     if (netAddress is not null) devices.Add(NetDevice.Create(netAddress, devices.Count));
+    // And every sender this computer is paired with, found by its id when it is chosen.
+    foreach (var peer in NetLinks.Store.All.OrderBy(p => p.Name, StringComparer.CurrentCultureIgnoreCase))
+        devices.Add(NetDevice.CreateLinked(peer, devices.Count));
     return devices;
 }
 

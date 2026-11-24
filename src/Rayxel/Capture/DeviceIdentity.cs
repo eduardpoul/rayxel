@@ -77,6 +77,9 @@ public readonly record struct DeviceHardwareId(
 
         if (symbolicLink.StartsWith(NetDevice.Scheme, StringComparison.OrdinalIgnoreCase))
             return new DeviceHardwareId(DeviceBus.Network, "net", -1, -1, -1, symbolicLink[NetDevice.Scheme.Length..]);
+        if (symbolicLink.StartsWith(NetDevice.LinkScheme, StringComparison.OrdinalIgnoreCase))
+            return new DeviceHardwareId(DeviceBus.Network, "net", -1, -1, -1,
+                                        NetDevice.LinkInstance + symbolicLink[NetDevice.LinkScheme.Length..]);
 
         const string prefix = @"\\?\";
         var body = symbolicLink.StartsWith(prefix, StringComparison.Ordinal)

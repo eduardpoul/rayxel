@@ -1,0 +1,67 @@
+<Application xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="Rayxel.Send.App.App"
+             RequestedThemeVariant="Dark">
+
+  <Application.Resources>
+    <SolidColorBrush x:Key="CardBrush" Color="#262626" />
+    <SolidColorBrush x:Key="CardEdgeBrush" Color="#363636" />
+    <SolidColorBrush x:Key="DimBrush" Color="#A8A8A8" />
+    <SolidColorBrush x:Key="WarnBrush" Color="#FFB86C" />
+    <SolidColorBrush x:Key="NoticeBrush" Color="#3A2E22" />
+    <SolidColorBrush x:Key="ScrimBrush" Color="#B0000000" />
+  </Application.Resources>
+
+  <Application.Styles>
+    <FluentTheme />
+
+    <Style Selector="Border.card">
+      <Setter Property="Background" Value="{StaticResource CardBrush}" />
+      <Setter Property="BorderBrush" Value="{StaticResource CardEdgeBrush}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="8" />
+      <Setter Property="Padding" Value="16" />
+    </Style>
+
+    <!-- The pairing card stands out from the rest: it is the one thing waiting on the user. -->
+    <Style Selector="Border.card.pairing">
+      <Setter Property="BorderBrush" Value="{DynamicResource AccentButtonBackground}" />
+      <Setter Property="BorderThickness" Value="2" />
+    </Style>
+
+    <Style Selector="TextBlock.title">
+      <Setter Property="FontSize" Value="15" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+
+    <Style Selector="TextBlock.dim">
+      <Setter Property="Foreground" Value="{StaticResource DimBrush}" />
+    </Style>
+
+    <Style Selector="TextBlock.hint">
+      <Setter Property="Foreground" Value="{StaticResource DimBrush}" />
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+
+    <Style Selector="TextBlock.warn">
+      <Setter Property="Foreground" Value="{StaticResource WarnBrush}" />
+      <Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+
+    <!-- A red button for the two actions that cannot be taken back from here: forgetting a
+         computer and ending the sender while it holds the game's picture. -->
+    <Style Selector="Button.danger">
+      <Setter Property="Background" Value="#C42B1C" />
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+    <Style Selector="Button.danger:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#D3402F" />
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+    <Style Selector="Button.danger:pressed /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#A52418" />
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+  </Application.Styles>
+</Application>

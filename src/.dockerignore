@@ -1,0 +1,9 @@
+# For builds whose context is src/ (Rayxel.Send/Dockerfile): what Windows builds and package
+# managers leave behind is no use inside a Linux container, and obj/ would mislead its restore.
+**/bin
+**/obj
+**/out
+**/node_modules
+Rayxel
+rayxel-send
+pyrowave-windows

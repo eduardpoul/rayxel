@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The sender's Linux half: gamescope's picture through PipeWire, HEVC and AV1 on the
+       GPU through VA-API, the pointer from gamescope's X servers, and a virtual gamepad,
+       keyboard and mouse through uinput. All of it by P/Invoke into the system's own
+       libraries - libpipewire-0.3, libva, libX11, libXfixes - which every SteamOS has, so
+       nothing is shipped beside the program but PyroWave's library. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <IsAotCompatible>true</IsAotCompatible>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>Rayxel.Send.Linux</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Rayxel.Link\Rayxel.Link.csproj" />
+  </ItemGroup>
+
+</Project>

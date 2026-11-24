@@ -183,7 +183,7 @@ internal sealed class DeskForwarder : IDisposable
     /// <summary>The combination that switches capture on and off. Set once, at start-up.</summary>
     public static CaptureKey Key { get; set; } = CaptureKey.Default;
 
-    private readonly Socket _socket;
+    private readonly NetLink _link;
     private readonly uint _session;
     private readonly Func<bool> _focused;
     private readonly string _className;
@@ -203,9 +203,9 @@ internal sealed class DeskForwarder : IDisposable
     private int _releaseRepeats;
     private bool _warnedAbsolute;
 
-    public DeskForwarder(Socket socket, uint session, Func<bool> focused)
+    public DeskForwarder(NetLink link, uint session, Func<bool> focused)
     {
-        _socket = socket;
+        _link = link;
         _session = session;
         _focused = focused;
         _className = $"RayxelInput{session:x8}";
@@ -450,15 +450,15 @@ internal sealed class DeskForwarder : IDisposable
         SendMouse();
     }
 
-    private void SendKeys() => Send(NetWire.WriteKeys(_packet, _session, ++_keysSequence, _down));
+    private void SendKeys() => Send(NetWire.WriteKeys(_packet, _session, ++_keysSequence, _down, _link.Version));
 
     private void SendMouse() =>
-        Send(NetWire.WriteMouse(_packet, _session, ++_mouseSequence, _buttons, _x, _y, _wheel, _hwheel));
+        Send(NetWire.WriteMouse(_packet, _session, ++_mouseSequence, _buttons, _x, _y, _wheel, _hwheel, _link.Version));
 
     private void Send(int length)
     {
-        try { _socket.Send(_packet, length, SocketFlags.None); }
-        catch (Exception ex) when (ex is SocketException or ObjectDisposedException)
+        try { _link.Send(_packet.AsSpan(0, length)); }
+        catch (ObjectDisposedException)
         {
             // The connection is going away; whoever owns it is dealing with that.
         }

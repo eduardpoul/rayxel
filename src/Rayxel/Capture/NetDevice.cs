@@ -2,6 +2,8 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using Rayxel.Diagnostics;
+using Rayxel.Link.Discovery;
+using Rayxel.Link.Security;
 using Vortice.MediaFoundation;
 
 namespace Rayxel.Capture;
@@ -15,10 +17,22 @@ namespace Rayxel.Capture;
 /// said out loud the same way a card's is. The interface path that identifies a card is,
 /// for one of these, <c>net://host:port</c>.
 /// </para>
+/// <para>
+/// That is the old kind, named by address and spoken to in the clear. A sender paired with
+/// this computer is <c>rxl://id</c> instead: found on the network by its id wherever its
+/// address has moved to, and every session with it proven and sealed (see
+/// <see cref="NetLinks"/>, <see cref="NetLink"/>).
+/// </para>
 /// </summary>
 public static class NetDevice
 {
     public const string Scheme = "net://";
+
+    /// <summary>A paired sender's device path: rxl:// and its id.</summary>
+    public const string LinkScheme = "rxl://";
+
+    /// <summary>How <see cref="DeviceHardwareId.Instance"/> marks a paired sender: link: and its id.</summary>
+    internal const string LinkInstance = "link:";
 
     /// <summary>
     /// What the sender is asked to spend when the bitrate is fixed, in kbit/s. One figure
@@ -84,6 +98,47 @@ public static class NetDevice
         return new CaptureDeviceInfo(ordinal, $"Steam Deck at {host}", $"{Scheme}{host}:{port}");
     }
 
+    /// <summary>The device record for a sender this computer is paired with.</summary>
+    internal static CaptureDeviceInfo CreateLinked(Peer peer, int ordinal) =>
+        new(ordinal, peer.Name, $"{LinkScheme}{peer.Id}");
+
+    /// <summary>The paired sender a device stands for, or null for any other device.</summary>
+    internal static Peer? PeerOf(CaptureDeviceInfo device) =>
+        device.Bus == DeviceBus.Network && device.Hardware.Instance.StartsWith(LinkInstance, StringComparison.Ordinal)
+            ? NetLinks.Store.Find(device.Hardware.Instance[LinkInstance.Length..])
+            : null;
+
+    // Where each paired sender was last found, for a few seconds: a probe and the stream that
+    // follows it would otherwise both wait for the network to answer the same question.
+    private static readonly Dictionary<string, (FoundSender? Found, long AtMs)> Located = [];
+
+    /// <summary>
+    /// Finds a paired sender on the network: a broadcast for its id, and its last address asked
+    /// directly as well, since some routers keep broadcasts from crossing between Wi-Fi clients.
+    /// Null when it does not answer.
+    /// </summary>
+    internal static FoundSender? Locate(Peer peer, bool fresh = false)
+    {
+        lock (Located)
+        {
+            if (!fresh && Located.TryGetValue(peer.Id, out var cached) && Environment.TickCount64 - cached.AtMs < 5000)
+                return cached.Found;
+        }
+
+        var alsoAsk = IPEndPoint.TryParse(peer.LastAddress, out var last) ? new[] { last } : [];
+        FoundSender? found;
+        using (var discovery = new DiscoveryClient(NetLinks.Identity.Id))
+            found = discovery.FindAsync(peer.Id, TimeSpan.FromMilliseconds(1500), alsoAsk).GetAwaiter().GetResult();
+
+        if (found is not null)
+        {
+            NetLinks.Store.Seen(peer.Id, found.EndPoint.ToString());
+            if (found.Name.Length > 0 && found.Name != peer.Name) NetLinks.Store.Rename(peer.Id, found.Name);
+        }
+        lock (Located) Located[peer.Id] = (found, Environment.TickCount64);
+        return found;
+    }
+
     /// <summary>
     /// Where a network device lives. False, with the reason, when the name will not resolve —
     /// a state to show, like a card that will not open, rather than an exception.
@@ -92,6 +147,23 @@ public static class NetDevice
     {
         endPoint = new IPEndPoint(IPAddress.None, 0);
         problem = "";
+
+        if (device.Bus == DeviceBus.Network && device.Hardware.Instance.StartsWith(LinkInstance, StringComparison.Ordinal))
+        {
+            if (PeerOf(device) is not { } peer)
+            {
+                problem = $"'{device.FriendlyName}' is no longer paired with this computer";
+                return false;
+            }
+            if (Locate(peer) is { } found)
+            {
+                endPoint = found.EndPoint;
+                return true;
+            }
+            problem = $"{peer.Name} was not found on the network" +
+                      (peer.LastAddress.Length > 0 ? $" (last seen at {peer.LastAddress})" : "");
+            return false;
+        }
 
         string address = device.Hardware.Instance;
         int colon = address.LastIndexOf(':');
@@ -128,6 +200,23 @@ public static class NetDevice
     /// </summary>
     public static DeviceProbe Probe(CaptureDeviceInfo device)
     {
+        // A paired sender answers a broadcast for it, and says whether it is switched on.
+        if (PeerOf(device) is { } peer)
+        {
+            if (Locate(peer, fresh: true) is not { } found)
+                return new DeviceProbe(device, DeviceAvailability.Unreadable, [], LinkBudget.Unknown,
+                    $"{peer.Name} was not found on the network - is it on, and is the Rayxel sender running there?");
+            if (!found.Flags.HasFlag(Link.Wire.AnnounceFlags.Enabled))
+                return new DeviceProbe(device, DeviceAvailability.Unreadable, [], LinkBudget.Unknown,
+                    $"{peer.Name} is switched off - switch the sender on there");
+            Log.Info($"{peer.Name} found at {found.EndPoint}" + (found.Streaming ? ", streaming to another computer" : ""));
+            return new DeviceProbe(device, DeviceAvailability.Ready, Modes(), LinkBudget.Unknown, null);
+        }
+
+        if (PeerOf(device) is null && device.Hardware.Instance.StartsWith(LinkInstance, StringComparison.Ordinal))
+            return new DeviceProbe(device, DeviceAvailability.Unreadable, [], LinkBudget.Unknown,
+                                   $"'{device.FriendlyName}' is no longer paired with this computer");
+
         if (!TryGetEndPoint(device, out var endPoint, out string problem))
             return new DeviceProbe(device, DeviceAvailability.Unreadable, [], LinkBudget.Unknown, problem);
 
@@ -181,7 +270,7 @@ public static class NetDevice
             for (int attempt = 0; attempt < 4; attempt++)
             {
                 long sent = Stopwatch.GetTimestamp();
-                socket.Send(ping[..NetWire.WritePing(ping, sent)]);
+                socket.Send(ping[..NetWire.WritePing(ping, 0, sent, NetWire.Version1)]);
 
                 // A port nobody listens on answers with an ICMP error, which Windows turns
                 // into a failed receive; that is a "no" as well, just a faster one.

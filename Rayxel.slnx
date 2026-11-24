@@ -1,5 +1,10 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/Rayxel/Rayxel.csproj" />
+    <Project Path="src/Rayxel.Link/Rayxel.Link.csproj" />
+    <Project Path="src/Rayxel.Send/Rayxel.Send.csproj" />
+    <Project Path="src/Rayxel.Send.Linux/Rayxel.Send.Linux.csproj" />
+    <Project Path="src/Rayxel.Send.Windows/Rayxel.Send.Windows.csproj" />
+    <Project Path="src/Rayxel.Send.App/Rayxel.Send.App.csproj" />
   </Folder>
 </Solution>

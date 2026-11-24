@@ -42,6 +42,7 @@ public static class AppShell
         }
 
         QuitDialog(model);
+        PairDialog.Draw(model);
     }
 
     /// <summary>
@@ -129,7 +130,7 @@ public static class AppShell
         {
             // Nothing hides while something is open or being asked: whoever opened it is
             // in the middle of using it, even if the mouse is still.
-            if (model.Flyout != Flyout.None || model.ConfirmQuit) model.PanelIdleMs = 0;
+            if (model.Flyout != Flyout.None || model.ConfirmQuit || model.Pairing is not null) model.PanelIdleMs = 0;
             else if (model.ShowBar)
             {
                 model.PanelIdleMs += deltaMs;

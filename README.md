@@ -62,6 +62,11 @@ number it shows is one it can actually measure.
   mouse moves and hides itself, with the pointer, five seconds after it stops. A gamepad
   never brings it up.
 - **HDMI audio passthrough** from the card to any output, with drift correction.
+- **A Steam Deck or a PC over the network, without a card.** The sender (`rayxel-send`)
+  captures and encodes there - HEVC by default, AV1 or PyroWave by choice - and plays your
+  gamepad, keyboard and mouse back. Paired once with a PIN, every session proven and sealed;
+  run from a Decky plugin on the Deck or its own window on a desktop. See
+  [docs/sender.md](docs/sender.md).
 - **Five languages:** English, Russian, Ukrainian, German, Spanish.
 
 ## Requirements

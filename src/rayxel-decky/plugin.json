@@ -1,0 +1,11 @@
+{
+  "name": "Rayxel",
+  "author": "Eduard Poul",
+  "flags": [],
+  "api_version": 1,
+  "publish": {
+    "tags": ["streaming"],
+    "description": "Stream this Steam Deck to Rayxel on a PC, with pairing, a PIN and the PC's controller.",
+    "image": ""
+  }
+}

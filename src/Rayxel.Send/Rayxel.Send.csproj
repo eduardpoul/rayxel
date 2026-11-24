@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- rayxel-send: the sender itself, a program without a window that runs in the
+       background - a systemd user service on a Steam Deck, started by the Avalonia window
+       on a desktop - and answers its user interfaces on the control socket.
+
+       One project, two builds: net10.0 for Linux with the Linux half, net10.0-windows for
+       Windows with the Windows half. On Linux it is published with NativeAOT as one native
+       file that needs no .NET on the machine (see the Dockerfile beside this file): SteamOS
+       has none, and a single file is what the Decky plugin carries in its bin folder. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFrameworks>net10.0;net10.0-windows</TargetFrameworks>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <AssemblyName>rayxel-send</AssemblyName>
+    <RootNamespace>Rayxel.Send</RootNamespace>
+    <Version>2.0.0</Version>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net10.0'">
+    <PublishAot>true</PublishAot>
+    <IsAotCompatible>true</IsAotCompatible>
+    <StripSymbols>true</StripSymbols>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net10.0-windows'">
+    <DefineConstants>$(DefineConstants);WINDOWS_SENDER</DefineConstants>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Rayxel.Link\Rayxel.Link.csproj" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'net10.0'">
+    <ProjectReference Include="..\Rayxel.Send.Linux\Rayxel.Send.Linux.csproj" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'net10.0-windows'">
+    <ProjectReference Include="..\Rayxel.Send.Windows\Rayxel.Send.Windows.csproj" />
+  </ItemGroup>
+
+</Project>

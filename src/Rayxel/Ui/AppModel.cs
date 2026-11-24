@@ -217,6 +217,15 @@ public sealed class AppModel
     /// </summary>
     public bool ConfirmQuit;
 
+    /// <summary>Pairing with a Steam Deck under way: its dialog is up while this is set.</summary>
+    internal PairFlow? Pairing;
+
+    /// <summary>A sender was just paired: it joins the device list and is switched to.</summary>
+    internal Action<Rayxel.Link.Security.Peer> Paired = _ => { };
+
+    /// <summary>Lists the devices again, after a pairing was made or forgotten.</summary>
+    public Action RefreshDevices = () => { };
+
     public void PanelActivity() => PanelIdleMs = 0;
 
     /// <summary>The pointer moved over the window: bring the bar up and start its five seconds over.</summary>

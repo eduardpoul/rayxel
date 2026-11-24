@@ -1,0 +1,47 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The sender's window, for Windows and Linux desktops alike. It is only a face: the
+       sender itself (rayxel-send) runs as a program of its own, and this talks to it over
+       its control socket. Closing the window leaves the sender as it was, so a stream in
+       progress carries on. One build serves both systems; Avalonia picks the windowing
+       backend at run time. -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>rayxel-send-ui</AssemblyName>
+    <RootNamespace>Rayxel.Send.App</RootNamespace>
+    <Product>Rayxel Send</Product>
+    <Version>1.0.0</Version>
+    <NeutralLanguage>en</NeutralLanguage>
+
+    <!-- Bindings are checked when the XAML is compiled, so a renamed property is a build
+         error rather than a blank label. -->
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+
+    <!-- One number for the four Avalonia packages, which must always move together. -->
+    <AvaloniaVersion>12.2.0</AvaloniaVersion>
+
+    <ApplicationIcon>..\Rayxel\Assets\Brand\rayxel.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="$(AvaloniaVersion)" />
+    <PackageReference Include="Avalonia.Desktop" Version="$(AvaloniaVersion)" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="$(AvaloniaVersion)" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="$(AvaloniaVersion)" />
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The viewer's own icon, so both halves of Rayxel look like one product. Linked rather
+         than copied: the brand has one master. -->
+    <AvaloniaResource Include="..\Rayxel\Assets\Brand\rayxel.ico" Link="Assets\rayxel.ico" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Rayxel.Link\Rayxel.Link.csproj" />
+  </ItemGroup>
+
+</Project>

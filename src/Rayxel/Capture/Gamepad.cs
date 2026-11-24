@@ -6,15 +6,6 @@ using Rayxel.Diagnostics;
 namespace Rayxel.Capture;
 
 /// <summary>
-/// A controller at one instant, in the units Windows reports and the wire carries: the
-/// button bits are XInput's own, triggers run 0 to 255, sticks -32768 to 32767 with right
-/// and up positive.
-/// </summary>
-internal readonly record struct PadState(
-    ushort Buttons, byte LeftTrigger, byte RightTrigger,
-    short LeftX, short LeftY, short RightX, short RightY);
-
-/// <summary>
 /// Reads the first controller Windows offers through XInput: an Xbox pad, or anything
 /// that presents itself as one. XInput is part of Windows, so this adds nothing to ship.
 /// </summary>
@@ -117,15 +108,15 @@ internal sealed class Gamepad
 /// </summary>
 internal sealed class PadForwarder : IDisposable
 {
-    private readonly Socket _socket;
+    private readonly NetLink _link;
     private readonly uint _session;
     private readonly Func<bool> _focused;
     private Thread? _thread;
     private volatile bool _running;
 
-    public PadForwarder(Socket socket, uint session, Func<bool> focused)
+    public PadForwarder(NetLink link, uint session, Func<bool> focused)
     {
-        _socket = socket;
+        _link = link;
         _session = session;
         _focused = focused;
     }
@@ -173,7 +164,7 @@ internal sealed class PadForwarder : IDisposable
                 long now = Stopwatch.GetTimestamp();
                 if (everSent && state == sent && now - lastSendTicks < repeatTicks) continue;
 
-                _socket.Send(packet, NetWire.WritePad(packet, _session, ++sequence, state), SocketFlags.None);
+                _link.Send(packet.AsSpan(0, NetWire.WritePad(packet, _session, ++sequence, state, _link.Version)));
                 sent = state;
                 everSent = true;
                 lastSendTicks = now;

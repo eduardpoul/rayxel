@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- What every side of a Rayxel link shares: the wire protocol, pairing and the keys it
+       leaves behind, finding senders on the network, the sender's own logic, and the
+       control socket its user interfaces talk to. No user interface and nothing tied to
+       one operating system: the viewer (Windows), the sender (Linux and Windows), its
+       Avalonia window and the Decky plugin's backend all stand on this. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <IsAotCompatible>true</IsAotCompatible>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>Rayxel.Link</RootNamespace>
+  </PropertyGroup>
+
+</Project>

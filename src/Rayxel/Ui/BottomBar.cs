@@ -780,6 +780,26 @@ public static class BottomBar
         if (names.Count > 0 && Widgets.Combo("##device", model.Pump.Device.FriendlyName, names, current, out int chosen))
             model.SwitchDevice(devices[chosen]);
 
+        // Pairing a Deck, and for a paired one, forgetting it. Forgetting here is this
+        // computer's half; the Deck keeps its own list until it is forgotten there too.
+        var pairLabel = Strings.T("pairDevice");
+        var pairSize = new Vector2(Widgets.Measure(f.Body, pairLabel).X + Layout.S(32), Layout.S(32));
+        if (Widgets.Button(pairLabel, pairSize))
+        {
+            model.Pairing ??= new PairFlow();
+            model.Flyout = Flyout.None;
+        }
+        if (NetDevice.PeerOf(model.Pump.Device) is { } peer)
+        {
+            ImGui.SameLine(0, Layout.S(8));
+            var forgetLabel = Strings.T("pairForget");
+            if (Widgets.Button(forgetLabel, new Vector2(Widgets.Measure(f.Body, forgetLabel).X + Layout.S(32), Layout.S(32))))
+            {
+                NetLinks.Store.Remove(peer.Id);
+                model.RefreshDevices();
+            }
+        }
+
         // What the hardware actually is: the adapter doing the work and the wire the
         // picture comes over, with the throughput this card measured on it.
         var parts = new List<string> { model.Renderer.AdapterName };
