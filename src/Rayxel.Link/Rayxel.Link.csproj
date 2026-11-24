@@ -13,6 +13,8 @@
     <IsAotCompatible>true</IsAotCompatible>
     <InvariantGlobalization>true</InvariantGlobalization>
     <RootNamespace>Rayxel.Link</RootNamespace>
+    <!-- Symbols inside the assembly, as Rayxel's own are: its single-file build stays one file. -->
+    <DebugType>embedded</DebugType>
   </PropertyGroup>
 
 </Project>

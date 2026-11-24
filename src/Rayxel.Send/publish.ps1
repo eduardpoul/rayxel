@@ -8,7 +8,7 @@
 # Steam Deck use the Decky plugin instead (src/rayxel-decky/build.sh): Game Mode shows no
 # desktop windows.
 #
-# Windows: both self-contained single files, no .NET needed on the machine. PyroWave's DLL
+# Windows: both self-contained, compressed single files, no .NET needed on the machine. PyroWave's DLL
 # comes from src/pyrowave-windows/out when it has been built there.
 # Linux: the sender is NativeAOT, built in a Linux container (src/Rayxel.Send/Dockerfile),
 # the window self-contained; both need Docker and nothing else here.
@@ -27,7 +27,7 @@ New-Item -ItemType Directory -Force $out | Out-Null
 
 if ($Target -eq 'win-x64') {
     dotnet publish (Join-Path $src 'Rayxel.Send\Rayxel.Send.csproj') -c Release -f net10.0-windows -r win-x64 `
-        --self-contained -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o $out
+        --self-contained -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -o $out
     if ($LASTEXITCODE -ne 0) { throw "rayxel-send did not build" }
 }
 else {
@@ -40,7 +40,7 @@ else {
 }
 
 dotnet publish (Join-Path $src 'Rayxel.Send.App\Rayxel.Send.App.csproj') -c Release -r $Target `
-    --self-contained -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o $out
+    --self-contained -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -o $out
 if ($LASTEXITCODE -ne 0) { throw "rayxel-send-ui did not build" }
 
 # Debug symbols are embedded or not wanted in a folder meant for copying.
