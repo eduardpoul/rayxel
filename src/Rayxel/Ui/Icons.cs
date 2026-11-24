@@ -132,13 +132,11 @@ public static class Icons
                 p.Line3(10, 3, 5, 8, 10, 13);
                 break;
 
-            // A ring with eight short spokes: the gear Fluent draws for settings, in strokes.
+            // A cog: eight square teeth round a body, a hole in the middle. A ring with
+            // spokes, which this used to be, is the sun Windows draws for brightness.
             case Icon.Gear:
-                p.Arc(8, 8, 2.4f, 0f, MathF.PI * 2f);
-                p.Line(8, 1.5f, 8, 3.5f); p.Line(8, 12.5f, 8, 14.5f);
-                p.Line(1.5f, 8, 3.5f, 8); p.Line(12.5f, 8, 14.5f, 8);
-                p.Line(3.4f, 3.4f, 4.8f, 4.8f); p.Line(11.2f, 11.2f, 12.6f, 12.6f);
-                p.Line(3.4f, 12.6f, 4.8f, 11.2f); p.Line(11.2f, 4.8f, 12.6f, 3.4f);
+                p.Gear(8, 8, 4.9f, 6.9f, 8);
+                p.Arc(8, 8, 2.1f, 0f, MathF.PI * 2f);
                 break;
 
             // A point with waves going out on both sides: this computer sending.
@@ -265,6 +263,26 @@ public static class Icons
 
         public void ArcTo(float cx, float cy, float r, float from, float to) =>
             draw.PathArcTo(P(cx, cy), r * unit, from, to);
+
+        /// <summary>
+        /// A cog's outline as one closed stroke: <paramref name="teeth"/> teeth reaching out to
+        /// <paramref name="outer"/>, the body between them at <paramref name="inner"/>. Each
+        /// tooth narrows a little towards its tip, as drawn cogs do.
+        /// </summary>
+        public void Gear(float cx, float cy, float inner, float outer, int teeth)
+        {
+            float step = MathF.PI * 2f / teeth;
+            float root = step * 0.25f, tip = step * 0.17f;
+            for (int i = 0; i < teeth; i++)
+            {
+                float a = i * step - MathF.PI / 2f;
+                To(cx + MathF.Cos(a - root) * inner, cy + MathF.Sin(a - root) * inner);
+                To(cx + MathF.Cos(a - tip) * outer, cy + MathF.Sin(a - tip) * outer);
+                To(cx + MathF.Cos(a + tip) * outer, cy + MathF.Sin(a + tip) * outer);
+                To(cx + MathF.Cos(a + root) * inner, cy + MathF.Sin(a + root) * inner);
+            }
+            Stroke(closed: true);
+        }
 
         public void Speaker()
         {
