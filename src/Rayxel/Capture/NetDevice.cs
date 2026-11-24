@@ -20,8 +20,28 @@ public static class NetDevice
 {
     public const string Scheme = "net://";
 
-    /// <summary>What the sender is asked to spend, in kbit/s. One figure for every size.</summary>
+    /// <summary>
+    /// What the sender is asked to spend when the bitrate is fixed, in kbit/s. One figure
+    /// for every size.
+    /// </summary>
     public static int BitrateKbps { get; set; } = 20_000;
+
+    /// <summary>
+    /// True when the bitrate follows the link instead: see <see cref="BitrateGovernor"/>.
+    /// It goes no higher than <see cref="AdaptiveCeilingKbps"/>. Read by the stream while
+    /// it runs, so a change takes effect at once.
+    /// </summary>
+    public static bool Adaptive { get; set; } = true;
+
+    /// <summary>
+    /// The most an adaptive bitrate asks for, and what it starts at. A picture of the Deck's
+    /// size is as good as it gets well below this; more only makes each frame a longer
+    /// burst on the air.
+    /// </summary>
+    public const int AdaptiveCeilingKbps = 20_000;
+
+    /// <summary>The fixed rates offered beside the adaptive one, in kbit/s.</summary>
+    public static readonly int[] FixedKbps = [30_000, 20_000, 15_000, 10_000, 5_000];
 
     /// <summary>Makes the device record for a sender at <c>host</c> or <c>host:port</c>.</summary>
     public static CaptureDeviceInfo Create(string address, int ordinal)

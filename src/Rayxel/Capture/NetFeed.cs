@@ -16,9 +16,10 @@ namespace Rayxel.Capture;
 /// False while the decode is not being timed. Timing it means waiting for the GPU, which is
 /// only done while somebody is looking at the figure.
 /// </param>
+/// <param name="AskedKbps">What the Deck is being asked to spend now.</param>
 public sealed record NetStats(
     double EncodeMs, double NetworkMs, double DecodeMs, double RoundTripMs, bool ClockKnown, bool DecodeKnown,
-    long FramesLost, long PacketsLate, long KeyframesRequested, double Mbps, string Decoder);
+    long FramesLost, long PacketsLate, long KeyframesRequested, double Mbps, string Decoder, int AskedKbps);
 
 /// <summary>Every frame's figures over a measurement window, for percentiles.</summary>
 public sealed record NetRecording(double[] EncodeMs, double[] NetworkMs, double[] DecodeMs, double[] FrameKb);
@@ -56,7 +57,12 @@ internal interface INetSink
 internal sealed class NetFeed : IDisposable, HevcDecoder.ISink
 {
     private readonly IPEndPoint _sender;
-    private readonly int _width, _height, _fps, _bitrateKbps;
+    private readonly int _width, _height, _fps;
+
+    // What the Deck is asked to spend: fixed, or followed by the governor. The HELLO says
+    // it twice a second, and at once when it changes.
+    private readonly BitrateGovernor _governor = new(NetDevice.AdaptiveCeilingKbps);
+    private volatile int _askedKbps;
     private readonly IMFDXGIDeviceManager _deviceManager;
     private readonly INetSink _sink;
     private readonly Func<bool> _focused;
@@ -98,7 +104,7 @@ internal sealed class NetFeed : IDisposable, HevcDecoder.ISink
     /// <summary>This machine's clock in nanoseconds. Media Foundation's is the same one in 100 ns units.</summary>
     private static long NowNs() => (long)(Stopwatch.GetTimestamp() * NsPerTick);
 
-    public NetFeed(IPEndPoint sender, int width, int height, int fps, int bitrateKbps,
+    public NetFeed(IPEndPoint sender, int width, int height, int fps,
                    IMFDXGIDeviceManager deviceManager, INetSink sink, Func<bool> focused)
     {
         _focused = focused;
@@ -106,10 +112,13 @@ internal sealed class NetFeed : IDisposable, HevcDecoder.ISink
         _width = width;
         _height = height;
         _fps = fps;
-        _bitrateKbps = bitrateKbps;
+        _askedKbps = Wanted();
         _deviceManager = deviceManager;
         _sink = sink;
     }
+
+    /// <summary>The bitrate to ask for now: the fixed one, or whatever the governor has come to.</summary>
+    private int Wanted() => NetDevice.Adaptive ? _governor.Current : NetDevice.BitrateKbps;
 
     /// <summary>True while the keyboard and mouse are being sent to the Deck instead of used here.</summary>
     public bool InputCaptured => _desk?.Captured == true;
@@ -149,14 +158,27 @@ internal sealed class NetFeed : IDisposable, HevcDecoder.ISink
             int pingsSent = 0;
             _windowStartNs = NowNs();
 
-            Log.Info($"asking {_sender} for {_width}x{_height}, {_bitrateKbps / 1000.0:0.#} Mbit/s at {_fps} fps");
+            Log.Info($"asking {_sender} for {_width}x{_height}, {_askedKbps / 1000.0:0.#} Mbit/s at {_fps} fps" +
+                     (NetDevice.Adaptive ? $", following the link up to {NetDevice.AdaptiveCeilingKbps / 1000.0:0.#}" : ""));
 
             while (_running)
             {
                 long now = NowNs();
+
+                // The bitrate, which the HELLO carries. A sender since this version takes a
+                // new figure up while the stream runs; an older one keeps the first it heard.
+                if (NetDevice.Adaptive) _governor.Judge(now, NetDevice.AdaptiveCeilingKbps);
+                int wanted = Wanted();
+                if (wanted != _askedKbps)
+                {
+                    if (!NetDevice.Adaptive) Log.Info($"bitrate: {wanted / 1000.0:0.#} Mbit/s, fixed");
+                    _askedKbps = wanted;
+                    nextHello = now;
+                }
+
                 if (now >= nextHello)
                 {
-                    socket.Send(outgoing, NetWire.WriteHello(outgoing, _session, _width, _height, _fps, _bitrateKbps), SocketFlags.None);
+                    socket.Send(outgoing, NetWire.WriteHello(outgoing, _session, _width, _height, _fps, _askedKbps), SocketFlags.None);
                     nextHello = now + 500_000_000;
                 }
                 if (now >= nextPing)
@@ -262,6 +284,7 @@ internal sealed class NetFeed : IDisposable, HevcDecoder.ISink
                 if (missing > 0)
                 {
                     Interlocked.Add(ref _framesLost, missing);
+                    _governor.Lost(arrived, missing);
                     _sink.NetLost(missing);
                     _waitingForKeyframe = true;
                 }
@@ -287,8 +310,11 @@ internal sealed class NetFeed : IDisposable, HevcDecoder.ISink
         _have[h.Index] = true;
         if (++_got < _head.Count) return;
 
-        // The frame is whole.
+        // The frame is whole: what the governor judges the link by, with how long it took.
         _completedNs = arrived;
+        _governor.Frame(arrived, _clockKnown
+            ? (arrived - (_head.CaptureTimeNs - _offsetNs)) / 1e6 - _head.EncodeUs / 1000.0
+            : double.NaN);
         if (_head.Keyframe) _waitingForKeyframe = false;
         if (_waitingForKeyframe)
         {
@@ -396,7 +422,7 @@ internal sealed class NetFeed : IDisposable, HevcDecoder.ISink
         {
             return new NetStats(_encodeMs, _networkMs, _decodeMs, _bestRoundTripNs / 1e6, _clockKnown, _decodeKnown,
                 Interlocked.Read(ref _framesLost), Interlocked.Read(ref _packetsLate),
-                Interlocked.Read(ref _keyframesRequested), _mbps, _decoder?.Name ?? "-");
+                Interlocked.Read(ref _keyframesRequested), _mbps, _decoder?.Name ?? "-", _askedKbps);
         }
     }
 

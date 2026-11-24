@@ -21,6 +21,8 @@ Log.Info($"Rayxel {System.Reflection.Assembly.GetExecutingAssembly().GetName().V
 
 var settings = AppSettings.Load();
 Strings.Use(settings.Language);
+NetDevice.Adaptive = settings.NetAdaptive;
+NetDevice.BitrateKbps = Math.Clamp(settings.NetBitrateKbps, 500, 500_000);
 
 string? deviceSelector = null;
 string? netAddress = null;
@@ -136,15 +138,20 @@ foreach (var arg in args)
     // A Steam Deck running rayxel-send, as --net=host[:port]. It joins the device list and is
     // chosen, exactly as a card named on the command line would be.
     else if (arg.StartsWith("--net=", StringComparison.OrdinalIgnoreCase)) netAddress = arg[6..];
-    // What that sender is asked to spend, in Mbit/s.
+    // What that sender is asked to spend: a fixed figure in Mbit/s, or "auto" to follow the link.
     else if (arg.StartsWith("--net-bitrate=", StringComparison.OrdinalIgnoreCase))
     {
-        if (double.TryParse(arg[14..], System.Globalization.NumberStyles.Float,
-                            System.Globalization.CultureInfo.InvariantCulture, out double mbit)
-            && mbit is >= 0.5 and <= 500)
+        if (arg[14..].Equals("auto", StringComparison.OrdinalIgnoreCase))
+            NetDevice.Adaptive = true;
+        else if (double.TryParse(arg[14..], System.Globalization.NumberStyles.Float,
+                                 System.Globalization.CultureInfo.InvariantCulture, out double mbit)
+                 && mbit is >= 0.5 and <= 500)
+        {
             NetDevice.BitrateKbps = (int)Math.Round(mbit * 1000);
+            NetDevice.Adaptive = false;
+        }
         else
-            Log.Warn($"{arg}: expected a bitrate in Mbit/s between 0.5 and 500");
+            Log.Warn($"{arg}: expected auto, or a bitrate in Mbit/s between 0.5 and 500");
     }
     // The combination that hands the keyboard and mouse to a network sender and takes them
     // back, as --capture-key=ctrl+alt+k.
@@ -994,7 +1001,9 @@ void Report(DeviceProbe p)
     if (d.Bus == DeviceBus.Network)
     {
         if (!p.IsReady) { Log.Warn($"  state  {p.Problem}"); return; }
-        Log.Info($"  state  ready - {p.Modes.Count} sizes, {NetDevice.BitrateKbps / 1000.0:0.#} Mbit/s asked for");
+        Log.Info($"  state  ready - {p.Modes.Count} sizes, " + (NetDevice.Adaptive
+            ? $"a bitrate that follows the link, up to {NetDevice.AdaptiveCeilingKbps / 1000.0:0.#} Mbit/s"
+            : $"{NetDevice.BitrateKbps / 1000.0:0.#} Mbit/s asked for"));
         Log.Info("  wire   HEVC, always: the Deck encodes and this machine decodes");
         return;
     }
@@ -1418,7 +1427,7 @@ void RunLoop()
                 Log.Info($"net  deck {net.EncodeMs,5:0.00}ms  network " +
                          (net.ClockKnown ? $"{net.NetworkMs,5:0.00}ms" : "  n/a  ") +
                          "  decode " + (net.DecodeKnown ? $"{net.DecodeMs,5:0.00}ms" : "  n/a  ") +
-                         $"  {net.Mbps,5:0.0} Mbit/s  rtt {net.RoundTripMs:0.00}ms  " +
+                         $"  {net.Mbps,5:0.0} of {net.AskedKbps / 1000.0:0.#} Mbit/s  rtt {net.RoundTripMs:0.00}ms  " +
                          $"lost {net.FramesLost}  late packets {net.PacketsLate}  keyframes asked {net.KeyframesRequested}");
 
             // What estimating the motion costs. It is inside the gpu figure above, not beside it.

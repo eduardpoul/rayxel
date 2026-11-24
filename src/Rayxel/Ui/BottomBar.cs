@@ -731,6 +731,11 @@ public static class BottomBar
         ImGui.Dummy(new Vector2(0, Layout.S(2)));
 
         DeviceSection(model);
+        if (model.Pump.Device.Bus == DeviceBus.Network)
+        {
+            Widgets.Divider(12f);
+            BitrateSection(model);
+        }
         Widgets.Divider(12f);
         AudioSection(model);
 
@@ -782,6 +787,33 @@ public static class BottomBar
             if (a.WireMiBs > 0) parts.Add(string.Format(Strings.T("capNote"), a.WireMiBs.ToString("0")));
         }
         Widgets.Wrapped(f.Caption, Theme.TextTertiary, string.Join(" · ", parts));
+    }
+
+    /// <summary>
+    /// What a Steam Deck is asked to spend: following the link, which is what to leave it
+    /// at, or a fixed figure. Under it, while it follows the link, what it has come to.
+    /// </summary>
+    private static void BitrateSection(AppModel model)
+    {
+        var f = Widgets.F;
+        Widgets.Text(f.Caption, Theme.TextSecondary, Strings.T("netBitrate"));
+
+        var names = new List<string> { string.Format(Strings.T("netAdaptive"), Strings.Num(NetDevice.AdaptiveCeilingKbps / 1000.0, "0")) };
+        foreach (int kbps in NetDevice.FixedKbps) names.Add(string.Format(Strings.T("mbitps"), Strings.Num(kbps / 1000.0, "0")));
+
+        int current = NetDevice.Adaptive ? 0 : Array.IndexOf(NetDevice.FixedKbps, NetDevice.BitrateKbps) + 1;
+        string shown = current > 0 || NetDevice.Adaptive ? names[Math.Max(0, current)]
+            : string.Format(Strings.T("mbitps"), Strings.Num(NetDevice.BitrateKbps / 1000.0, "0.#"));
+        if (Widgets.Combo("##netbitrate", shown, names, Math.Max(0, current), out int chosen))
+        {
+            NetDevice.Adaptive = chosen == 0;
+            if (chosen > 0) NetDevice.BitrateKbps = NetDevice.FixedKbps[chosen - 1];
+            model.Touch();
+        }
+
+        if (NetDevice.Adaptive && model.ShownNet is { AskedKbps: > 0 } net)
+            Widgets.Wrapped(f.Caption, net.AskedKbps < NetDevice.AdaptiveCeilingKbps ? Theme.Caution : Theme.TextTertiary,
+                            string.Format(Strings.T("netNow"), Strings.Num(net.AskedKbps / 1000.0, "0.#")));
     }
 
     private static void AudioSection(AppModel model)

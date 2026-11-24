@@ -55,6 +55,12 @@ public sealed class AppSettings
     public int FsrModel { get; set; }
     public float OverlayNits { get; set; } = 230f;
 
+    /// <summary>A Steam Deck's bitrate follows the link (true), or is <see cref="NetBitrateKbps"/>.</summary>
+    public bool NetAdaptive { get; set; } = true;
+
+    /// <summary>The fixed bitrate a Steam Deck is asked for, in kbit/s, when it does not follow the link.</summary>
+    public int NetBitrateKbps { get; set; } = 20_000;
+
     /// <summary>
     /// Level the video is encoded at when our own shader converts it into a PQ swapchain.
     /// Separate from the overlay: the interface must stay dim enough not to burn an OLED,

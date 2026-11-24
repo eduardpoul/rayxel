@@ -324,6 +324,8 @@ public sealed class AppModel
         s.DlssModel = (int)(Renderer.Dlss?.Model ?? (DlssModel)s.DlssModel);
         if (Renderer.Fsr is { } fsr) { s.FsrVersion = fsr.Version; s.FsrModel = (int)fsr.Model; }
         s.OverlayNits = OverlayNits;
+        s.NetAdaptive = NetDevice.Adaptive;
+        s.NetBitrateKbps = NetDevice.BitrateKbps;
         s.VideoNits = VideoNits;
         s.ShowTelemetry = ShowTelemetry;
         s.TelemetryDetailed = TelemetryDetailed;

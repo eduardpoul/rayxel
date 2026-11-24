@@ -51,7 +51,7 @@ struct wire_hello {
 	uint16_t width, height; /* size wanted; 0x0 is the Deck's own. Only ever scaled down. */
 	uint16_t fps;           /* the rate the bitrate is budgeted for */
 	uint16_t reserved;
-	uint32_t bitrate_kbps;
+	uint32_t bitrate_kbps;  /* may change while the stream runs; the encoder follows */
 };
 
 /* The two clocks are unrelated, so the viewer measures the difference: it stamps a PING,

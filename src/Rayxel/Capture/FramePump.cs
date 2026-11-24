@@ -331,7 +331,7 @@ public sealed class FramePump : IDisposable, INetSink
         _state = CaptureState.Starting;
 
         _running = true;
-        _net = new NetFeed(endPoint, mode.Width, mode.Height, (int)Math.Round(fps), NetDevice.BitrateKbps, _dxgiManager, this,
+        _net = new NetFeed(endPoint, mode.Width, mode.Height, (int)Math.Round(fps), _dxgiManager, this,
                            () => _hasFocus);
         _net.Start();
     }

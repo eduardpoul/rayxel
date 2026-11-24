@@ -361,6 +361,20 @@ static void on_frame(void *user, const struct capture_frame *f)
 	send_picture(s, f->data, stride, f->arrival_ns);
 }
 
+/* The viewer asks for another bitrate while the stream runs: it lowers it when the link
+ * cannot carry what is sent, and raises it again when it can. The encoder is opened anew
+ * for the next frame, which is then a keyframe with the new rate control; the capture, the
+ * controls and everything else stay as they are. A viewer that never changes its figure
+ * never gets here. */
+static void on_bitrate(struct server *s, uint32_t kbps)
+{
+	if (!s->watching || kbps == 0 || kbps == s->wanted.bitrate_kbps) return;
+	printf("bitrate  : %.1f -> %.1f Mbit/s, as the viewer asks\n",
+	       (s->wanted.bitrate_kbps ? s->wanted.bitrate_kbps : 20000) / 1000.0, kbps / 1000.0);
+	s->wanted.bitrate_kbps = kbps;
+	if (s->have_format) s->format_changed = true;
+}
+
 static void start_stream(struct server *s, const struct sockaddr_in *from, const struct wire_hello *hello)
 {
 	char name[64];
@@ -566,6 +580,7 @@ static void on_socket(void *data, int fd, uint32_t mask)
 			uint64_t now = now_ns();
 			if (from_viewer && hello->session == s->session) {
 				s->last_hello_ns = now;
+				on_bitrate(s, hello->bitrate_kbps);
 			} else if (s->watching && now - s->last_hello_ns < VIEWER_BUSY_NS) {
 				/* Someone is watching and was heard from a moment ago. A second
 				 * request does not take the picture - or the controls - away from
