@@ -20,6 +20,12 @@ public sealed class AppSettings
     /// <summary>The upscaler: 0 = none, 1 = DLSS, 2 = FSR.</summary>
     public int Upscaler { get; set; }
 
+    /// <summary>Frame generation: 0 none, 1 DLSS Frame Generation.</summary>
+    public int FrameGen { get; set; }
+
+    /// <summary>Frames shown for each real one: "auto", "2", "3" or "4".</summary>
+    public string FrameMultiplier { get; set; } = "2";
+
     /// <summary>
     /// What versions before this one kept instead, when there were five to choose from:
     /// 1 NIS, 2 RTX VSR, 3 DLSS, 4 FSR. Read once, turned into <see cref="Upscaler"/>, and

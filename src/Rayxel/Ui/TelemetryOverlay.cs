@@ -200,7 +200,10 @@ public static class TelemetryOverlay
             // With the variant that is really running, when the technique reports one.
             _ => upscaler.Running() is { } running ? $"{upscaler.Short()} {running.Text}" : upscaler.Short()
         });
-        if (model.FrameGenIndex != 0) parts.Add(model.FrameGenerator.Short());
+        if (model.FrameGenIndex != 0)
+            parts.Add(model.Renderer.UseFrameGen
+                ? $"{model.FrameGenerator.Short()} ×{model.Renderer.FrameGenFactor}"
+                : model.FrameGenerator.Short());
         if (model.HdrOn) parts.Add($"HDR {model.OverlayNits:0} {Strings.T("nits")}");
         if (mode?.HasCodecInPath == true) parts.Add($"{(mode.WireCodec ?? "codec").ToLowerInvariant()} decode");
         // Only while sound is actually flowing: this line says what is on, not what is configured.

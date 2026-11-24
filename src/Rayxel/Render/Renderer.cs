@@ -214,6 +214,185 @@ public sealed class Renderer : IDisposable
     /// </summary>
     public OpticalFlow? Flow { get; private set; }
 
+    /// <summary>
+    /// <c>--fg-probe</c>: frame generation tried on the real frames as they arrive; see
+    /// <see cref="FrameGenProbe"/>. Null otherwise.
+    /// </summary>
+    public FrameGenProbe? FrameGenProbe { get; set; }
+    private long _probeSerial;
+
+    // ── frame generation ────────────────────────────────────────────────────────
+
+    /// <summary>DLSS Frame Generation; see <see cref="DlssFrameGen"/>.</summary>
+    public DlssFrameGen? FrameGen { get; private set; }
+
+    /// <summary>Asked for by the user; see <see cref="UseFrameGen"/> for whether it runs.</summary>
+    public bool FrameGenEnabled { get; set; }
+
+    /// <summary>Frames shown for each real one: 2 to 4. Set by whoever knows the display's rate.</summary>
+    public int FrameGenFactor { get; set; } = 2;
+
+    /// <summary>When the newest real frame reached this process (QPC), set before each <see cref="Render"/>.</summary>
+    public long FrameArrivalQpc { get; set; }
+
+    /// <summary>The source's own frame interval in milliseconds, set before each <see cref="Render"/>.</summary>
+    public double FrameIntervalMs { get; set; } = 1000.0 / 60;
+
+    /// <summary>
+    /// Why frame generation is asked for and does not run: a key of the interface's strings
+    /// ("fgNoHdrAsIs", "fgNoRtxHdr") or a sentence of the generator's own. Null when it
+    /// runs, or is not asked for.
+    /// </summary>
+    public string? FrameGenBlocked => !FrameGenEnabled ? null
+        : FrameGen is not { Possible: true } ? FrameGen?.LastError ?? FrameGen?.Unsupported ?? "unavailable"
+        // Generated frames are 8-bit SDR. A picture going out as HDR, or being made HDR by the
+        // driver, would lose what it is being shown for.
+        : PassingHdrThrough ? "fgNoHdrAsIs"
+        : UseProcessor ? "fgNoRtxHdr"
+        : null;
+
+    public bool UseFrameGen => FrameGenEnabled && FrameGenBlocked is null && FrameGenFactor > 1;
+
+    // The frames to show for the newest real one: the generated ones in order, then the
+    // real one. While the real one has not been shown, a new frame waits - it was copied in
+    // already, but is only put through once the one before it is on the screen.
+    private readonly ID3D11ShaderResourceView?[] _fgQueue = new ID3D11ShaderResourceView?[DlssFrameGen.MaxGenerated + 1];
+    private int _fgCount, _fgShown;
+    private bool _fgRealShown = true;
+    private long _fgSerial, _fgLastArrival, _fgFirstPresent;
+    private long _fgSpacingTicks;
+    private bool _fgWasOn;
+    private readonly ID3D11Query[] _tsFgStart = new ID3D11Query[QueryDepth];
+    private readonly ID3D11Query[] _tsFgEnd = new ID3D11Query[QueryDepth];
+    private readonly bool[] _fgTimed = new bool[QueryDepth];
+    private long _renderedSerial;
+
+    /// <summary>GPU milliseconds the last generating took, measured as the time the picture waited for it.</summary>
+    public double LastFrameGenMs { get; private set; }
+
+    /// <summary>
+    /// What generation adds to the delay, in milliseconds: from the first frame shown for a
+    /// real one to the real one itself. Measured from the presents, averaged.
+    /// </summary>
+    public double FrameGenDelayMs { get; private set; }
+
+    /// <summary>When set, every frame's added delay is put here too: for --bench.</summary>
+    public List<double>? FrameGenDelaySamples { get; set; }
+
+    /// <summary>When set, every generating's GPU time is put here too: for --bench.</summary>
+    public List<double>? FrameGenGpuSamples { get; set; }
+
+    /// <summary>True when a frame has arrived that has not been put through yet.</summary>
+    public bool HasUnrenderedFrame => _uploadSerial != _renderedSerial;
+
+    /// <summary>
+    /// When the next frame of the queue is due (QPC), or null when there is nothing left to
+    /// show before the next real frame. The frames are spaced evenly across the time the
+    /// source took between the two real frames they lie between.
+    /// </summary>
+    public long? FrameGenDue => UseFrameGen && _fgCount > 1 && _fgShown < _fgCount - 1 && _fgFirstPresent != 0
+        ? _fgFirstPresent + (_fgShown + 1) * _fgSpacingTicks
+        : null;
+
+    /// <summary>Shows the next frame of the queue at the next <see cref="Render"/>.</summary>
+    public void FrameGenAdvance()
+    {
+        if (_fgShown < _fgCount - 1) _fgShown++;
+    }
+
+    /// <summary>
+    /// A new real frame came before the queue was through: the generated frames still to come
+    /// are dropped and the real one is shown at once, so the new one does not wait behind them.
+    /// </summary>
+    public void FrameGenCatchUp()
+    {
+        if (_fgCount > 0) _fgShown = _fgCount - 1;
+    }
+
+    /// <summary>
+    /// Says when the frame just rendered was presented. The first of a queue sets the
+    /// schedule for the rest; the real one, last, says what the generated ones cost in delay.
+    /// </summary>
+    public void FrameGenPresented(long qpc)
+    {
+        if (!UseFrameGen || _fgCount < 2) return;
+        if (_fgShown == 0) _fgFirstPresent = qpc;
+        else if (_fgShown == _fgCount - 1 && _fgFirstPresent != 0)
+        {
+            double ms = (qpc - _fgFirstPresent) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            FrameGenDelayMs = FrameGenDelayMs == 0 ? ms : FrameGenDelayMs * 0.9 + ms * 0.1;
+            FrameGenDelaySamples?.Add(ms);
+            _fgFirstPresent = 0;
+        }
+    }
+
+    /// <summary>Starts NGX for frame generation, on a thread of its own. Says why not when it cannot be had.</summary>
+    public string? StartFrameGen()
+    {
+        if (FrameGen is not { } fg) return "unavailable";
+        if (fg.Unsupported is { } why) return why;
+        fg.StartInBackground();
+        return null;
+    }
+
+    /// <summary>
+    /// Puts the newest real frame through frame generation, and lines up what is to be shown
+    /// for it: the generated frames first, then the frame itself. The picture is what would
+    /// otherwise be drawn - an upscaler's output, or the frame converted to colour.
+    /// </summary>
+    private void BuildFrameGenQueue(int slot, ID3D11ShaderResourceView? upscaled)
+    {
+        _fgSerial = _uploadSerial;
+        _fgCount = 0;
+        _fgShown = 0;
+        _fgRealShown = false;
+        _fgFirstPresent = 0;
+
+        ID3D11ShaderResourceView? picture = upscaled;
+        if (picture is null)
+        {
+            if (!EnsureIntermediate(_videoWidth, _videoHeight)) return;
+            BindPipeline();
+            if (!ConvertYuvToIntermediate()) return;
+            _context.OMSetRenderTargets((ID3D11RenderTargetView?)null);
+            picture = _rgbIntermediateSrv;
+        }
+        if (picture is null) return;
+
+        // Between two real frames lies the time the source took between them. Much more
+        // than its own interval is a stall - a paused game, a lost packet, a mode change -
+        // and nothing is generated across one: the frames on either side are not neighbours.
+        long arrival = FrameArrivalQpc;
+        double gapMs = _fgLastArrival != 0 ? (arrival - _fgLastArrival) * 1000.0 / System.Diagnostics.Stopwatch.Frequency : 0;
+        _fgLastArrival = arrival;
+        bool neighbours = gapMs > 0 && gapMs < FrameIntervalMs * 2.5;
+        if (!neighbours) FrameGen!.Reset();
+
+        int count = FrameGenFactor - 1;
+        bool generated = false;
+        var motion = neighbours && Flow is { Ready: true } flow ? flow.PerPixel(_context, _sampler) : null;
+        if (motion is not null)
+        {
+            using var resource = picture.Resource;
+            using var color = resource.QueryInterface<ID3D11Texture2D>();
+            _context.End(_tsFgStart[slot]);
+            generated = FrameGen!.Generate(_context, color, motion, _videoWidth, _videoHeight, count, reset: false);
+            _context.End(_tsFgEnd[slot]);
+            _fgTimed[slot] = generated;
+        }
+
+        if (generated)
+        {
+            for (int i = 0; i < count; i++) _fgQueue[_fgCount++] = FrameGen!.Output(i);
+            // The spacing follows the gap this pair really had, within reason: a source's
+            // frames come unevenly, and the motion between them took the time it took.
+            double spacing = Math.Clamp(gapMs, FrameIntervalMs * 0.5, FrameIntervalMs * 1.5) / FrameGenFactor;
+            _fgSpacingTicks = (long)(spacing * System.Diagnostics.Stopwatch.Frequency / 1000.0);
+        }
+        _fgQueue[_fgCount++] = picture;
+        BindPipeline();
+    }
+
     /// <summary>GPU milliseconds the last motion estimate took. Part of <see cref="LastGpuMs"/>, not on top of it.</summary>
     public double LastFlowMs { get; private set; }
 
@@ -321,6 +500,7 @@ public sealed class Renderer : IDisposable
         Processor = new VideoProcessor(_device);
         Flow = new OpticalFlow(_device);
         Dlss = new DlssScaler(_device);
+        FrameGen = new DlssFrameGen(_device);
         Fsr = new FsrScaler(_device);
 
         ReadAdapterInfo();
@@ -524,6 +704,8 @@ public sealed class Renderer : IDisposable
             _tsStart[i] = _device.CreateQuery(new QueryDescription(QueryType.Timestamp));
             _tsEnd[i] = _device.CreateQuery(new QueryDescription(QueryType.Timestamp));
             _tsFlowStart[i] = _device.CreateQuery(new QueryDescription(QueryType.Timestamp));
+            _tsFgStart[i] = _device.CreateQuery(new QueryDescription(QueryType.Timestamp));
+            _tsFgEnd[i] = _device.CreateQuery(new QueryDescription(QueryType.Timestamp));
             _tsFlowEnd[i] = _device.CreateQuery(new QueryDescription(QueryType.Timestamp));
             _tsDlssStart[i] = _device.CreateQuery(new QueryDescription(QueryType.Timestamp));
             _tsDlssEnd[i] = _device.CreateQuery(new QueryDescription(QueryType.Timestamp));
@@ -553,6 +735,15 @@ public sealed class Renderer : IDisposable
             && _context.GetData(_tsFlowEnd[slot], out ulong flowEnd)
             && flowEnd > flowStart)
             LastFlowMs = (flowEnd - flowStart) * 1000.0 / dj.Frequency;
+
+        if (_fgTimed[slot]
+            && _context.GetData(_tsFgStart[slot], out ulong fgStart)
+            && _context.GetData(_tsFgEnd[slot], out ulong fgEnd)
+            && fgEnd > fgStart)
+        {
+            LastFrameGenMs = (fgEnd - fgStart) * 1000.0 / dj.Frequency;
+            FrameGenGpuSamples?.Add(LastFrameGenMs);
+        }
 
         if (_dlssTimed[slot]
             && _context.GetData(_tsDlssStart[slot], out ulong dlssStart)
@@ -945,11 +1136,27 @@ public sealed class Renderer : IDisposable
             bool fsr = UseFsr && _lumaView is not null && _chromaView is not null && _videoWidth > 0;
             bool dlss = !fsr && UseDlss && _lumaView is not null && _chromaView is not null && _videoWidth > 0;
 
+            // Frame generation shows a queue of frames for each real one. Until the last of
+            // them, the real one, is on the screen, a frame that has arrived meanwhile waits:
+            // nothing below touches it, and what is drawn comes from the queue.
+            bool fg = UseFrameGen && _lumaView is not null && _videoWidth > 0;
+            if (fg != _fgWasOn)
+            {
+                _fgWasOn = fg;
+                _fgCount = 0;
+                _fgRealShown = true;
+                _fgLastArrival = 0;
+                FrameGen?.Reset();
+            }
+            bool holding = fg && _fgCount > 0 && !_fgRealShown;
+            _fgTimed[slot] = false;
+
             // Motion since the previous frame: once per new frame, and only while something
-            // is using it - the view of it, DLSS or FSR. Done first because it leaves its
-            // own targets and shaders set, and everything below sets its own again.
+            // is using it - the view of it, DLSS, FSR or frame generation. Done first because
+            // it leaves its own targets and shaders set, and everything below sets its own again.
             _flowTimed[slot] = false;
-            if (Flow is { } flow && (flow.View != FlowView.Off || dlss || fsr)
+            bool probing = FrameGenProbe is { Done: false };
+            if (!holding && Flow is { } flow && (flow.View != FlowView.Off || dlss || fsr || fg || probing)
                 && _lumaView is not null && _uploadSerial != _flowSerial)
             {
                 _flowSerial = _uploadSerial;
@@ -957,6 +1164,20 @@ public sealed class Renderer : IDisposable
                 flow.Estimate(_context, _lumaView, _videoWidth, _videoHeight, _sampler);
                 _context.End(_tsFlowEnd[slot]);
                 _flowTimed[slot] = true;
+            }
+
+            // The probe takes each new frame as the upscalers do: in colour, with its motion.
+            if (probing && Flow is { Ready: true } probeFlow && _uploadSerial != _probeSerial
+                && _lumaView is not null && EnsureIntermediate(_videoWidth, _videoHeight))
+            {
+                _probeSerial = _uploadSerial;
+                var motion = probeFlow.PerPixel(_context, _sampler);
+                BindPipeline();
+                if (ConvertYuvToIntermediate())
+                {
+                    _context.OMSetRenderTargets((ID3D11RenderTargetView?)null);
+                    FrameGenProbe!.Feed(_context, _rgbIntermediate!, motion, _videoWidth, _videoHeight);
+                }
             }
 
             _context.OMSetRenderTargets(_backBufferView);
@@ -971,7 +1192,7 @@ public sealed class Renderer : IDisposable
             // besides. Both passes that prepare those leave their own state set.
             ID3D11ShaderResourceView? dlssResult = null;
             _dlssTimed[slot] = false;
-            if (dlss || fsr)
+            if ((dlss || fsr) && !holding)
             {
                 var (_, _, fitW, fitH) = FitPixels(_videoWidth, _videoHeight, Width, Height);
                 _context.End(_tsDlssStart[slot]);
@@ -996,7 +1217,24 @@ public sealed class Renderer : IDisposable
                 if (UseProcessor) proc.Process(_vpTexture);
             }
 
-            if (dlssResult is not null)
+            if (fg && !holding && _uploadSerial != _fgSerial)
+            {
+                BuildFrameGenQueue(slot, dlssResult);
+                _context.OMSetRenderTargets(_backBufferView);
+                _context.RSSetViewport(0, 0, Width, Height);
+            }
+            if (!holding) _renderedSerial = _uploadSerial;
+
+            if (fg && _fgCount > 0)
+            {
+                // A generated frame, or the real one after them: SDR RGB, like an upscaler's.
+                SetConstants(fx, fy, fw, fh, mode: 1);
+                _context.PSSetShaderResource(2, _fgQueue[Math.Min(_fgShown, _fgCount - 1)]);
+                _context.OMSetBlendState(null);
+                _context.Draw(4, 0);
+                if (_fgShown >= _fgCount - 1) _fgRealShown = true;
+            }
+            else if (dlssResult is not null)
             {
                 // SDR RGB at the size it was built for, so it takes the encoding path too.
                 SetConstants(fx, fy, fw, fh, mode: 1);
@@ -1589,6 +1827,7 @@ public sealed class Renderer : IDisposable
         Ui?.Dispose();
         Processor?.Dispose();
         Dlss?.Dispose();
+        FrameGen?.Dispose();
         Fsr?.Dispose();
         Flow?.Dispose();
         _rgbIntermediateSrv?.Dispose(); _rgbIntermediateRtv?.Dispose(); _rgbIntermediate?.Dispose();

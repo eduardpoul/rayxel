@@ -32,6 +32,11 @@ string? netAddress = null;
 FlowView startFlow = FlowView.Off;
 string? shotPath = null;
 bool shotCompares = false;
+string? frameGenProbe = null;
+int frameGenProbeFactor = 2;
+// Frame generation as asked for on the command line: null leaves what was remembered.
+bool? forcedFrameGen = null;
+string? forcedMultiplier = null;
 bool testPattern = false, testPatternHdr = false;
 bool? forcedHdrAsIs = null;
 int forcedSourceRange = -1;
@@ -69,6 +74,18 @@ foreach (var arg in args)
     // already running - the other is then run beside it - and --no-auto-hdr, so that they
     // are all the same kind of picture.
     else if (arg is "--compare") shotCompares = true;
+    // Puts real frames through DLSS Frame Generation and writes one generated frame out
+    // between the two it came from: --fg-probe=FILE.png. See FrameGenProbe.
+    else if (arg.StartsWith("--fg-probe=", StringComparison.OrdinalIgnoreCase)) frameGenProbe = arg[11..];
+    // Frame generation on or off at start: --framegen=dlss|off. Wins over what was
+    // remembered, for the same reason --scaler does: a measurement needs a control.
+    else if (arg.StartsWith("--framegen=", StringComparison.OrdinalIgnoreCase))
+        forcedFrameGen = arg[11..].ToLowerInvariant() switch { "dlss" or "on" or "1" => true, "off" or "0" or "none" => false, _ => null };
+    // Frames shown for each real one: --fg=2|3|4|auto.
+    else if (arg.StartsWith("--fg=", StringComparison.OrdinalIgnoreCase)) forcedMultiplier = arg[5..].ToLowerInvariant();
+    // How many frames to show for each real one, in the probe: 2, 3 or 4.
+    else if (arg.StartsWith("--fg-probe-x=", StringComparison.OrdinalIgnoreCase))
+        frameGenProbeFactor = int.TryParse(arg[13..], out int factor) ? factor : 2;
     // A picture of known colours in place of the video; with --shot, what came out of it
     // is written beside the screenshot as numbers (.csv). For measuring what a path does
     // to colour.
@@ -194,6 +211,9 @@ bool quit = false;
 bool pendingHdrToggle = false, autoHdrPending = false;
 bool deferredStatePending = true;
 int pendingScaler = -1;
+int pendingFrameGen = -1;
+// Presents made during a --bench window: with frame generation, more than one per real frame.
+long presentedInBench = 0;
 CaptureDeviceInfo? pendingDeviceSwitch = null;
 // The stand-in device of a window opened with nothing usable: never opened, never remembered.
 const string NoDeviceLink = "none://";
@@ -323,6 +343,7 @@ try
     renderer = new Renderer();
     renderer.Initialize(hwnd, WindowWidth, WindowHeight);
     renderer.TestPattern = testPattern;
+    if (frameGenProbe is not null) renderer.FrameGenProbe = new FrameGenProbe(renderer.Device, frameGenProbe, frameGenProbeFactor);
     renderer.TestPatternHdr = testPatternHdr;
     renderer.SourceRange = forcedSourceRange >= 0 ? forcedSourceRange : Math.Clamp(settings.SourceRange, 0, 2);
     renderer.HdrAsIs = forcedHdrAsIs ?? settings.HdrSourceAsIs;
@@ -339,6 +360,8 @@ try
     model.NoDevice = noDevice;
     model.DisplayHz = Win32.MonitorRefreshHz(hwnd);
     model.SelectScaler = want => { pendingScaler = want; model!.Touch(); };
+    model.SelectFrameGen = want => { pendingFrameGen = want; model!.Touch(); };
+    model.FrameMultiplierId = forcedMultiplier ?? settings.FrameMultiplier;
     model.ToggleHdr = () => pendingHdrToggle = true;
     model.SelectMode = (m, fps) => { try { pump!.Select(m, fps); } catch (Exception ex) { Log.Error("mode switch failed", ex); } };
     model.SwitchDevice = d => pendingDeviceSwitch = d;
@@ -468,6 +491,7 @@ finally
     if (model is not null) { model.CaptureInto(settings); settings.Save(); }
     model?.Audio.Dispose();
     pump?.Dispose();
+    renderer?.FrameGenProbe?.Dispose();
     renderer?.Dispose();
     if (hwnd != IntPtr.Zero) Win32.DestroyWindow(hwnd);
     AppIcon.Release();
@@ -955,6 +979,20 @@ void ReportBench(FramePump pump, TimeSpan window, TimeSpan cpu,
     }
 
     var s = pump.Snapshot();
+    // Frame generation: what generating cost the GPU, and what showing the generated frames
+    // first added to the delay - measured from the presents, not worked out.
+    if (renderer?.FrameGenGpuSamples is { Count: > 0 } fgGpu)
+    {
+        var fg = fgGpu.OrderBy(x => x).ToArray();
+        var fgDelay = (renderer.FrameGenDelaySamples ?? []).OrderBy(x => x).ToArray();
+        Log.Info($"  frame generation  min {P(fg, 0):0.00}   p50 {P(fg, 50):0.00}   p95 {P(fg, 95):0.00}   " +
+                 $"p99 {P(fg, 99):0.00}   max {P(fg, 100):0.00} ms   (GPU, the generated frames of one real one)");
+        if (fgDelay.Length > 0)
+            Log.Info($"  added delay       min {P(fgDelay, 0):0.00}   p50 {P(fgDelay, 50):0.00}   p95 {P(fgDelay, 95):0.00}   " +
+                     $"p99 {P(fgDelay, 99):0.00}   max {P(fgDelay, 100):0.00} ms   (first frame shown to the real one, n={fgDelay.Length})");
+        Log.Info($"  presents          {presentedInBench} in the window, {presentedInBench / Math.Max(1.0, intervals.Length):0.00} per real frame");
+    }
+
     Log.Info($"  dropped {s.FramesDropped}, late {s.FramesLate}");
 }
 
@@ -1144,6 +1182,10 @@ void RunLoop()
     // The card's own late frames are counted by the pump; these are ours, and the two
     // have to be told apart before anyone can say whose stutter it is.
     long slowFrames = 0;
+    // Generated frames dropped because the next real frame came before their moment.
+    long frameGenCaughtUp = 0;
+    using var frameTimer = new Kernel.PreciseTimer();
+    long benchPresentStart = 0;
     // What the display actually did between two heartbeats, from DXGI's own counters.
     uint lastSyncRefresh = 0;
     long lastSyncQpc = 0;
@@ -1216,6 +1258,11 @@ void RunLoop()
                 try { SelectScaler(want); } catch (Exception ex) { Log.Error("scaler switch failed", ex); }
         }
         if (pendingHdrToggle) { pendingHdrToggle = false; try { ToggleHdr(); } catch (Exception ex) { Log.Error("HDR toggle failed", ex); } }
+        if (pendingFrameGen >= 0)
+        {
+            int want = pendingFrameGen; pendingFrameGen = -1;
+            try { SelectFrameGen(want); } catch (Exception ex) { Log.Error("frame generation switch failed", ex); }
+        }
 
         // Wait for the swapchain first so we never queue ahead of the display, then for a
         // frame from the card.
@@ -1232,10 +1279,37 @@ void RunLoop()
         // Input does not need a present of its own: it waits at most a frame for the next
         // picture, which carries the redrawn overlay with it.
         renderer!.WaitForNextFrame(8);
-        if (presentOnArrival)
-            pump!.FrameReady.WaitOne(pump.State == CaptureState.Streaming ? 50 : 16);
+
+        // With frame generation on, each real frame brings a queue: the generated frames,
+        // then the real one, each to be shown at its moment. The wait is then for that
+        // moment - unless the next real frame comes first, in which case what is left of the
+        // generated frames is dropped and the real one shown at once, so that the new one
+        // does not wait behind them.
+        renderer.FrameArrivalQpc = System.Threading.Volatile.Read(ref pump!.LastArrivalQpc);
+        renderer.FrameIntervalMs = pump.CurrentFps > 0 ? 1000.0 / pump.CurrentFps : 1000.0 / 60;
+        renderer.FrameGenFactor = model!.FrameGenOutput(model.FrameMultiplierId).Factor;
+        if (renderer.FrameGenDue is { } due)
+        {
+            // Woken a little early by a timer good to a fraction of a millisecond, and the
+            // rest spun: a few hundred microseconds, against a millisecond and more a plain
+            // sleep would be off by.
+            long early = (long)(System.Diagnostics.Stopwatch.Frequency * (frameTimer.HighResolutionTimer ? 0.0003 : 0.0012));
+            if (frameTimer.WaitUntil(due - early, pump.FrameReady))
+            {
+                renderer.FrameGenCatchUp();
+                frameGenCaughtUp++;
+            }
+            else
+            {
+                while (System.Diagnostics.Stopwatch.GetTimestamp() < due) Thread.SpinWait(32);
+                renderer.FrameGenAdvance();
+            }
+        }
+        else if (renderer.HasUnrenderedFrame) { }
+        else if (presentOnArrival)
+            pump.FrameReady.WaitOne(pump.State == CaptureState.Streaming ? 50 : 16);
         else
-            pump!.FrameReady.WaitOne(8);
+            pump.FrameReady.WaitOne(8);
 
         // Time our own segment: from the frame landing in our process to Present returning.
         // Only frames we have not presented before count — we present faster than the
@@ -1292,6 +1366,7 @@ void RunLoop()
 
         renderer.Render();
         renderer.Present();
+        renderer.FrameGenPresented(System.Diagnostics.Stopwatch.GetTimestamp());
         presented++;
 
         // Deferred until the video processor exists, which only happens once a frame has
@@ -1307,6 +1382,12 @@ void RunLoop()
             {
                 try { SelectScaler(wantScaler); }
                 catch (Exception ex) { Log.Error("restoring the scaler failed", ex); }
+            }
+            // Frame generation after the scaler: it is fed what the scaler puts out.
+            bool wantFrameGen = forcedFrameGen ?? settings.FrameGen == 1;
+            if (wantFrameGen)
+            {
+                try { SelectFrameGen(1); } catch (Exception ex) { Log.Error("restoring frame generation failed", ex); }
             }
             // Only the driver path can produce HDR, so a remembered upscaler takes it away.
             if (autoHdrPending && (settings.Hdr || forceHdr) && !renderer.UseDlss && !renderer.UseFsr)
@@ -1377,6 +1458,9 @@ void RunLoop()
 
         // Diagnostic capture: give the pipeline a few seconds to settle into a steady
         // state, grab one frame, and stop.
+        // The probe ends the run once it has written its frames, or found it cannot.
+        if (renderer.FrameGenProbe is { Done: true } && shotPath is null) quit = true;
+
         if (shotPath is not null && presented > 400)
         {
             if (shotCompares) renderer.SaveComparison(shotPath);
@@ -1397,6 +1481,8 @@ void RunLoop()
             {
                 benchRecording = true;
                 pump.StartRecording(500_000);
+                if (renderer.UseFrameGen) { renderer.FrameGenDelaySamples = []; renderer.FrameGenGpuSamples = []; }
+                benchPresentStart = presented;
                 benchCpuStart = System.Diagnostics.Process.GetCurrentProcess().TotalProcessorTime;
                 benchClock.Restart();
                 Log.Info($"bench: warm, recording for {benchSeconds:0.#} s");
@@ -1407,7 +1493,10 @@ void RunLoop()
                     : renderer.UseDlss ? $"DLSS ({renderer.Dlss!.Description})"
                     : "no scaler";
                 if (renderer.Processor?.HdrEnabled == true) path += " + RTX HDR";
+                if (renderer.UseFrameGen)
+                    path += $" + DLSS FG x{renderer.FrameGenFactor} at {renderer.FrameGen!.Width}x{renderer.FrameGen.Height}";
 
+                presentedInBench = presented - benchPresentStart;
                 ReportBench(pump, benchClock.Elapsed,
                             System.Diagnostics.Process.GetCurrentProcess().TotalProcessorTime - benchCpuStart,
                             [.. benchGpu], [.. benchCpu], path, renderer.DescribeCompositionMode(), [.. benchFlow],
@@ -1472,6 +1561,13 @@ void RunLoop()
                 $"x{(uniqueFps > 0 ? presentFps / uniqueFps : 0),4:0.00})  " +
                 $"vblank {(vblankHz > 0 ? $"{vblankHz,5:0.0}Hz" : "  n/a")}  " +
                 $"late {s.FramesLate} slow {slowFrames} dropped {s.FramesDropped}  {model.Composition}");
+
+            // What frame generation is doing, when it is on.
+            if (renderer.UseFrameGen)
+                Log.Info($"fg   x{renderer.FrameGenFactor}  generating {renderer.LastFrameGenMs,5:0.00}ms  " +
+                         $"adds {renderer.FrameGenDelayMs,5:0.00}ms  dropped for an early frame {frameGenCaughtUp}");
+            else if (renderer.FrameGenEnabled && renderer.FrameGenBlocked is { } blocked)
+                Log.Info($"fg   asked for, not running: {blocked}");
 
             // The age above, taken apart, when the frames come over the network.
             if (pump.Network is { } net)
@@ -1920,6 +2016,31 @@ bool PointerOverClient()
 /// Applies a choice of upscaler through the toggles, which see to it that only one has
 /// the picture: 0 none, 1 DLSS, 2 FSR.
 /// </summary>
+/// <summary>
+/// Turns frame generation on or off. On means NGX is started on a thread of its own - it
+/// takes a couple of seconds - and the picture goes on being shown as it is until then.
+/// A machine that cannot have it at all leaves the choice where it was.
+/// </summary>
+void SelectFrameGen(int want)
+{
+    if (renderer is null) return;
+    if (want == 1)
+    {
+        if (renderer.StartFrameGen() is { } why)
+        {
+            Log.Warn($"frame generation stays off: {why}");
+            return;
+        }
+        renderer.FrameGenEnabled = true;
+        Log.Info($"frame generation on: DLSS FG, x{model?.FrameGenOutput(model.FrameMultiplierId).Factor} ({model?.FrameMultiplierId})");
+    }
+    else
+    {
+        renderer.FrameGenEnabled = false;
+        Log.Info("frame generation off");
+    }
+}
+
 void SelectScaler(int want)
 {
     switch (want)

@@ -158,6 +158,9 @@ Everything is optional; the app needs no arguments.
 | `--fsr-model=full\|lite\|rdna2` | the network of FSR 4 to run, whatever card it is |
 | `--fsr-version=<n>` | a version AMD's library offers by itself, e.g. `3.1` |
 | `--fsr-dir=<folder>` | where to look for AMD's library first |
+| `--framegen=dlss\|off` | start with DLSS Frame Generation on or off |
+| `--fg=2\|3\|4\|auto` | frames shown for each real one; `auto` is the most the display can show |
+| `--fg-probe=<file.png>` | put frames through frame generation, write one set out, and exit (`--fg-probe-x=2\|3\|4`) |
 | `--net=<host>[:port]` | a Steam Deck running `rayxel-send --listen`, as a device |
 | `--net-codec=hevc\|av1\|pyrowave` | the codec the Deck is asked for (default HEVC; a Deck sends HEVC for one it cannot encode, and has no AV1 encoder) |
 | `--net-bitrate=auto\|<Mbit/s>` | what the Deck is asked to spend; for PyroWave, its own fixed figure (default 140) |
@@ -245,6 +248,17 @@ and why.
   or its own copy - which it only lends to a program it does not know while DLSS override
   is switched on for all programs in the NVIDIA app. The driver's settings may also replace
   the model and mode Rayxel asks for; the log says what was used.
+- **Frame generation adds delay, by its nature.** A frame between two real ones can only
+  be drawn once the second exists, so the real one is shown later: at 60 fps, 8.3 ms for
+  ×2, 11.1 for ×3, 12.5 for ×4, plus 1-3 ms of GPU work. The telemetry adds it to the
+  delay as its own part, measured from the presents.
+- **DLSS Frame Generation needs `nvngx_dlssg.dll` 310.7 or newer beside `Rayxel.exe`,**
+  from NVIDIA's DLSS SDK, a game with DLSS 4, or DLSS Swapper's library
+  (`%LOCALAPPDATA%\DLSS Swapper\dlls\dlss_g`). The driver keeps an older copy of its
+  own (310.2) that refuses every frame given to it the way Rayxel calls it - through NGX
+  directly, so that Rayxel decides when each frame is shown. It runs on a Direct3D 12
+  device beside Rayxel's own, works on SDR pictures only (not with an HDR source shown as
+  it is, nor with RTX Video HDR), and starting it takes a couple of seconds the first time.
 - **FSR needs two DLLs of AMD's,** `amd_fidelityfx_loader_dx12.dll` and
   `amd_fidelityfx_upscaler_dx12.dll`, which are not part of Rayxel. They come with AMD's
   [FSR SDK](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK) (`Kits/FidelityFX/signedbin`)
