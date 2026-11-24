@@ -46,6 +46,9 @@ internal sealed class PairFlow : IDisposable
     /// <summary>Set by the dialog once it has acted on <see cref="Result"/>, so it does so once.</summary>
     public bool Delivered;
 
+    /// <summary>Esc was pressed: the dialog closes on its next frame, as if Cancel had been.</summary>
+    public volatile bool CloseRequested;
+
     private void Scan()
     {
         _stage = Stages.Scanning;

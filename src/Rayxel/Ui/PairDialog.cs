@@ -112,7 +112,7 @@ internal static class PairDialog
             }
 
             ImGui.PopTextWrapPos();
-            if (close || ImGui.IsKeyPressed(ImGuiKey.Escape))
+            if (close || flow.CloseRequested || ImGui.IsKeyPressed(ImGuiKey.Escape))
             {
                 flow.Dispose();
                 model.Pairing = null;

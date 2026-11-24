@@ -78,6 +78,30 @@ docker build -f Rayxel.Send/Dockerfile --output type=local,dest=Rayxel.Send/out/
 
 The Decky plugin, which carries that build in its `bin` folder: see `src/rayxel-decky/README.md`.
 
+The sender with its window, as one folder to copy to a PC or a Linux desktop
+(`publish/sender-win-x64` or `publish/sender-linux-x64`):
+
+```
+powershell -File src/Rayxel.Send/publish.ps1 [-Target linux-x64]
+```
+
+`rayxel-send --probe` reports what a machine offers - the encoders, the pointer, input, the
+key and the paired viewers - without opening a capture, so it is safe while a game runs.
+
+## Not carried over from the C sender
+
+- `--record`, which captured, encoded to a file and measured each stage. Measuring now goes
+  through a viewer (`Rayxel --bench`) and `--frames-file`.
+- The probe's trial capture: opening a capture to see that frames come is exactly what is
+  risky under a running game.
+
+## Not there yet
+
+- A virtual gamepad on Windows (needs the ViGEmBus driver); keyboard and mouse work.
+- Starting with Windows or with a Linux desktop session. On a Deck the plugin's service does it.
+- The window and the plugin speak English, Russian, Ukrainian, German and Spanish; the reasons
+  the core gives (why a pairing failed, why a codec is missing) are English.
+
 ## Status
 
 Written, compiled, not yet run: nothing here has been tried on a Deck or a PC yet. What needs

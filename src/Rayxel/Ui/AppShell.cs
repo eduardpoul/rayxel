@@ -157,7 +157,7 @@ public static class AppShell
         // one row is a dialog asking permission to do the only possible thing. The same
         // goes for a device named on the command line, however many others there are.
         int choices = model.Devices.Count(d => !d.IsVirtual);
-        model.Screen = choices > 1 && !model.DeviceNamed ? Screen.Devices : Screen.App;
+        model.Screen = (choices > 1 || model.NoDevice) && !model.DeviceNamed ? Screen.Devices : Screen.App;
 
         // The bar comes up with the first picture, so the first thing anyone sees is
         // where the controls are — and then, five seconds later, that they go away.

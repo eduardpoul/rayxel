@@ -195,6 +195,8 @@ bool pendingHdrToggle = false, autoHdrPending = false;
 bool deferredStatePending = true;
 int pendingScaler = -1;
 CaptureDeviceInfo? pendingDeviceSwitch = null;
+// The stand-in device of a window opened with nothing usable: never opened, never remembered.
+const string NoDeviceLink = "none://";
 WindowKind? pendingWindowKind = null;
 bool pendingAudioRestart = false;
 WindowMode? windowMode = null;
@@ -227,11 +229,10 @@ try
     if (netAddress is not null && deviceSelector is null)
         deviceSelector = allDevices[^1].SymbolicLink;
 
+    // Nothing to show is not a reason to have no window: a Steam Deck is paired from it.
     if (allDevices.Count == 0)
-    {
-        Log.Error("no video capture devices at all. Plug the card in, or check Windows camera privacy settings.");
-        return 1;
-    }
+        Log.Warn("no video capture devices and no paired Steam Deck. Plug a card in, check Windows camera " +
+                 "privacy settings, or pair a Steam Deck from the window that opens now.");
 
     if (listOnly)
     {
@@ -285,6 +286,7 @@ try
 
     foreach (var p in probed.Values) Report(p);
 
+    bool noDevice = false;
     if (active is null || !active.IsReady)
     {
         var busy = probed.Values.Count(p => p.Availability == DeviceAvailability.Busy);
@@ -292,7 +294,13 @@ try
             ? $"no usable device. {busy} of {probed.Count} are held by another application "
               + "(a browser tab, OBS, Teams) - close it and try again."
             : "no usable device: nothing here exposes a mode this app can render.");
-        return 1;
+        // A device named outright stays a failure: that one was asked for. Otherwise the
+        // window opens on the device picker - one may come free, or a Steam Deck be paired -
+        // with a stand-in that is never opened, so nothing is retried behind the picker.
+        if (deviceSelector is not null) return 1;
+        noDevice = true;
+        active = new DeviceProbe(new CaptureDeviceInfo(-1, Strings.T("noDevice"), NoDeviceLink),
+                                 DeviceAvailability.Unreadable, [], LinkBudget.Unknown, "no usable device");
     }
 
     Log.Info($"using: {active.Device.FriendlyName}  ({active.Device.ShortId})");
@@ -328,6 +336,7 @@ try
     model.Probed = probed;
     model.Active = active;
     model.DeviceNamed = deviceSelector is not null;
+    model.NoDevice = noDevice;
     model.DisplayHz = Win32.MonitorRefreshHz(hwnd);
     model.SelectScaler = want => { pendingScaler = want; model!.Touch(); };
     model.ToggleHdr = () => pendingHdrToggle = true;
@@ -380,7 +389,7 @@ try
                          && model.AudioInputs.Any(e => e.Id == saved)
         ? saved
         : AudioEndpoints.MatchTo(active.Device)?.Id;
-    pendingAudioRestart = HasSound(active.Device);
+    pendingAudioRestart = !noDevice && HasSound(active.Device);
 
     if (settings.Borderless) pendingWindowKind = WindowKind.BorderlessFullscreen;
     if (forcedScreen is not null)
@@ -410,10 +419,13 @@ try
     if (forcedScreen == "more") model.Flyout = Flyout.More;
     if (forcedScreen == "quit") model.ConfirmQuit = true;
 
-    var initial = ForcedMode(active, forcedMode) ?? RememberedMode(active, settings) ?? PickInitialMode(active);
-    if (initial is null) { Log.Error("no renderable mode found"); return 1; }
-    pump.Select(initial.Mode, initial.Fps);
-    ReportFirstFrame(pump);
+    if (!noDevice)
+    {
+        var initial = ForcedMode(active, forcedMode) ?? RememberedMode(active, settings) ?? PickInitialMode(active);
+        if (initial is null) { Log.Error("no renderable mode found"); return 1; }
+        pump.Select(initial.Mode, initial.Fps);
+        ReportFirstFrame(pump);
+    }
 
     // Probing cannot see "in use elsewhere" — that only shows at the first read — so the
     // best-looking device can still turn out to be held by something else. With more than
@@ -1582,7 +1594,11 @@ void SwitchDevice(CaptureDeviceInfo target)
 
     pump.SwitchTo(fresh.Device);
     active = fresh;
-    if (model is not null) model.Active = fresh;
+    if (model is not null)
+    {
+        model.Active = fresh;
+        model.NoDevice = false;
+    }
     menuEntries = BuildMenuEntries(fresh.Modes);
     Report(fresh);
     pump.Select(entry.Mode, entry.Fps);
@@ -1837,6 +1853,8 @@ void HandleKey(int vk, IntPtr h)
             // Esc never closes the app. It backs out of the innermost thing that is open,
             // and once nothing is nested it toggles the bar: same key in, same key out.
             if (model is { ConfirmQuit: true }) { model.ConfirmQuit = false; break; }
+            // Pairing is closed by its own dialog, which also tells the Deck to stop showing the PIN.
+            if (model?.Pairing is { } pairing) { pairing.CloseRequested = true; break; }
             // A dropped-open list is nested inside its flyout, so it goes first.
             if (Widgets.ComboOpen) { Widgets.CloseCombo(); break; }
             if (model is not null && model.Flyout != Flyout.None) { model.Flyout = Flyout.None; break; }

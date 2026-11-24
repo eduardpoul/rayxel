@@ -46,4 +46,12 @@
     <ProjectReference Include="..\Rayxel.Send.Windows\Rayxel.Send.Windows.csproj" />
   </ItemGroup>
 
+  <!-- PyroWave's library for Windows, when it has been built (src/pyrowave-windows), beside
+       the program where PyroWaveEncoder looks first - kept out of a single-file bundle so
+       it stays a file there. On Linux the Dockerfile puts the .so beside the binary. -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net10.0-windows' And Exists('..\pyrowave-windows\out\libpyrowave-shared-1.dll')">
+    <None Include="..\pyrowave-windows\out\libpyrowave-shared-1.dll" Link="libpyrowave-shared-1.dll"
+          CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+  </ItemGroup>
+
 </Project>

@@ -194,6 +194,12 @@ public sealed class AppModel
     /// </summary>
     public bool DeviceNamed;
 
+    /// <summary>
+    /// The window opened with no usable device: the pump stands on a stand-in that is never
+    /// opened, and the device picker is where to go - to choose one, or pair a Steam Deck.
+    /// </summary>
+    public bool NoDevice;
+
     /// <summary>Diagnostic only: renders the no-signal card without unplugging anything.</summary>
     public bool ForceNoSignal;
 
@@ -341,7 +347,7 @@ public sealed class AppModel
         s.ShowTelemetry = ShowTelemetry;
         s.TelemetryDetailed = TelemetryDetailed;
         s.Borderless = WindowKind != Native.WindowKind.Windowed;
-        s.DeviceLink = Pump.Device.SymbolicLink;
+        if (!NoDevice) s.DeviceLink = Pump.Device.SymbolicLink;
 
         if (Pump.CurrentMode is { } m)
         {

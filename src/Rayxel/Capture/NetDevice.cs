@@ -210,7 +210,7 @@ public static class NetDevice
                 return new DeviceProbe(device, DeviceAvailability.Unreadable, [], LinkBudget.Unknown,
                     $"{peer.Name} is switched off - switch the sender on there");
             Log.Info($"{peer.Name} found at {found.EndPoint}" + (found.Streaming ? ", streaming to another computer" : ""));
-            return new DeviceProbe(device, DeviceAvailability.Ready, Modes(), LinkBudget.Unknown, null);
+            return new DeviceProbe(device, DeviceAvailability.Ready, Modes(found.Model), LinkBudget.Unknown, null);
         }
 
         if (PeerOf(device) is null && device.Hardware.Instance.StartsWith(LinkInstance, StringComparison.Ordinal))
@@ -226,7 +226,7 @@ public static class NetDevice
                 $"no answer from {endPoint} - is `rayxel-send --listen` running on the Deck?");
 
         Log.Info($"sender at {endPoint} answered in {roundTripMs:0.0} ms");
-        return new DeviceProbe(device, DeviceAvailability.Ready, Modes(), LinkBudget.Unknown, null);
+        return new DeviceProbe(device, DeviceAvailability.Ready, Modes("Steam Deck"), LinkBudget.Unknown, null);
     }
 
     /// <summary>
@@ -236,10 +236,15 @@ public static class NetDevice
     /// list — is what the app reports once the stream is running: a docked Deck has a
     /// larger picture than any of these and simply sends the nearest fit.
     /// </summary>
-    private static List<CaptureMode> Modes()
+    private static List<CaptureMode> Modes(string model)
     {
         var nv12 = VideoFormat.FromSubtype(VideoFormatGuids.NV12);
-        (int Width, int Height)[] sizes = [(1280, 800), (960, 600), (640, 400)];
+        // A Deck's own picture is 1280x800, and gamescope only scales down. A PC's desktop
+        // is whatever its display is; a sender asked for more than it has sends its own size,
+        // which the stream then states, so the larger sizes are safe to offer.
+        (int Width, int Height)[] sizes = model == "Steam Deck"
+            ? [(1280, 800), (960, 600), (640, 400)]
+            : [(3840, 2160), (2560, 1440), (1920, 1080), (1280, 720)];
 
         var modes = new List<CaptureMode>();
         for (int i = 0; i < sizes.Length; i++)
