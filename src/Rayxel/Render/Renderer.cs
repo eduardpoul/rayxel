@@ -1578,24 +1578,38 @@ public sealed class Renderer : IDisposable
                 _dlssSettling = settlingWas;
             }
 
+            // RTX VSR, when it is what has the picture, exactly as it is shown: it has been
+            // running for as long as the app has, and the driver brings it in when it sees
+            // fit - switched on for a moment it may not be in effect at all.
+            bool vsrLive = vsrWas && UseVsr;
+            if (vsrLive)
+            {
+                Render();
+                ok &= SaveBackBuffer(Named("vsr"));
+            }
+
             DlssEnabled = false;
             FsrEnabled = false;
             if (vsrWas) Processor!.ToggleSuperResolution();
             Render();
             ok &= SaveBackBuffer(Named("none"));
 
-            // The driver's RTX VSR on the same frame. Its filter reads its own copy of the
-            // frame, which is only kept up to date while the driver's path is in use.
-            if (Processor is { Available: true, SuperResolutionSupported: true } processor
+            // Otherwise switched on for the same frame. Its filter reads its own copy of
+            // the frame, which is only kept up to date while the driver's path is in use.
+            // Given time between frames: whether the filter is in effect on the first one
+            // after it is switched on is the driver's business.
+            if (!vsrLive && Processor is { Available: true, SuperResolutionSupported: true } processor
                 && _vpTexture is not null && _videoTexture is not null && !SourceIsHdr)
             {
                 _context.CopyResource(_vpTexture, _videoTexture);
                 if (processor.ToggleSuperResolution())
                 {
-                    // More than once: whether the filter is fully in effect on the first
-                    // frame after it is switched on is the driver's business.
-                    for (int i = 0; i < 4; i++) Render();
-                    ok &= SaveBackBuffer(Named("vsr"));
+                    for (int i = 0; i < 20; i++)
+                    {
+                        Render();
+                        Thread.Sleep(50);
+                    }
+                    ok &= SaveBackBuffer(Named("vsr-switched"));
                     processor.ToggleSuperResolution();
                 }
             }
