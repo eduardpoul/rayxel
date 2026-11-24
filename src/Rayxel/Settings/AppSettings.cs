@@ -61,6 +61,28 @@ public sealed class AppSettings
     /// <summary>The fixed bitrate a Steam Deck is asked for, in kbit/s, when it does not follow the link.</summary>
     public int NetBitrateKbps { get; set; } = 20_000;
 
+    /// <summary>The codec a Steam Deck is asked for: "hevc", "av1" or "pyrowave".</summary>
+    public string NetCodec { get; set; } = "hevc";
+
+    /// <summary>What a Steam Deck is asked to spend on PyroWave, in kbit/s. Always fixed.</summary>
+    public int NetPyroWaveKbps { get; set; } = 140_000;
+
+    /// <summary>A codec by the name <see cref="NetCodec"/> and the command line use, or null.</summary>
+    internal static Capture.NetWire.Codec? ParseCodec(string? name) => name?.Trim().ToLowerInvariant() switch
+    {
+        "hevc" or "h265" => Capture.NetWire.Codec.Hevc,
+        "av1" => Capture.NetWire.Codec.Av1,
+        "pyrowave" => Capture.NetWire.Codec.PyroWave,
+        _ => null
+    };
+
+    internal static string CodecKey(Capture.NetWire.Codec codec) => codec switch
+    {
+        Capture.NetWire.Codec.Av1 => "av1",
+        Capture.NetWire.Codec.PyroWave => "pyrowave",
+        _ => "hevc"
+    };
+
     /// <summary>
     /// Level the video is encoded at when our own shader converts it into a PQ swapchain.
     /// Separate from the overlay: the interface must stay dim enough not to burn an OLED,

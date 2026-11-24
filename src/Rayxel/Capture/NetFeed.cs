@@ -17,9 +17,16 @@ namespace Rayxel.Capture;
 /// only done while somebody is looking at the figure.
 /// </param>
 /// <param name="AskedKbps">What the Deck is being asked to spend now.</param>
+/// <param name="Codec">What the frames arriving are, or "-" before the first.</param>
+/// <param name="AskedCodec">What the Deck is being asked for. Not the same when it cannot encode it.</param>
+/// <param name="CodecRefused">
+/// The frames have gone on being of another codec than the one asked for, for longer than
+/// a change-over takes: the Deck cannot encode it.
+/// </param>
 public sealed record NetStats(
     double EncodeMs, double NetworkMs, double DecodeMs, double RoundTripMs, bool ClockKnown, bool DecodeKnown,
-    long FramesLost, long PacketsLate, long KeyframesRequested, double Mbps, string Decoder, int AskedKbps);
+    long FramesLost, long PacketsLate, long KeyframesRequested, double Mbps, string Decoder, int AskedKbps,
+    string Codec, string AskedCodec, bool CodecRefused);
 
 /// <summary>Every frame's figures over a measurement window, for percentiles.</summary>
 public sealed record NetRecording(double[] EncodeMs, double[] NetworkMs, double[] DecodeMs, double[] FrameKb);
@@ -54,16 +61,20 @@ internal interface INetSink
 /// handing it to someone else at that moment.
 /// </para>
 /// </summary>
-internal sealed class NetFeed : IDisposable, HevcDecoder.ISink
+internal sealed class NetFeed : IDisposable, IPictureSink
 {
     private readonly IPEndPoint _sender;
     private readonly int _width, _height, _fps;
 
-    // What the Deck is asked to spend: fixed, or followed by the governor. The HELLO says
-    // it twice a second, and at once when it changes.
+    // What the Deck is asked for: a codec, and what to spend - fixed, or followed by the
+    // governor. The HELLO says it twice a second, and at once when it changes.
     private readonly BitrateGovernor _governor = new(NetDevice.AdaptiveCeilingKbps);
     private volatile int _askedKbps;
+    private volatile NetWire.Codec _askedCodec;
+    private long _askedCodecAtNs;
+    private bool _pyroWaveRefusalSaid;
     private readonly IMFDXGIDeviceManager _deviceManager;
+    private readonly ID3D11Device _device;
     private readonly INetSink _sink;
     private readonly Func<bool> _focused;
     private volatile DeskForwarder? _desk;
@@ -71,8 +82,15 @@ internal sealed class NetFeed : IDisposable, HevcDecoder.ISink
 
     private Thread? _thread;
     private volatile bool _running;
-    private HevcDecoder? _decoder;
+
+    // HEVC and AV1 go through Windows' decoders, PyroWave through its own. Whichever the
+    // frames say they are; only one is open at a time.
+    private MfDecoder? _decoder;
+    private PyroWaveDecoder? _pyroWave;
     private (int Width, int Height) _decoderSize;
+    private NetWire.Codec _arriving;
+    private bool _arrivedAny;
+    private volatile string _arrivingName = "-";
 
     // The frame being put together.
     private byte[] _frame = new byte[512 * 1024];
@@ -105,20 +123,46 @@ internal sealed class NetFeed : IDisposable, HevcDecoder.ISink
     private static long NowNs() => (long)(Stopwatch.GetTimestamp() * NsPerTick);
 
     public NetFeed(IPEndPoint sender, int width, int height, int fps,
-                   IMFDXGIDeviceManager deviceManager, INetSink sink, Func<bool> focused)
+                   IMFDXGIDeviceManager deviceManager, ID3D11Device device, INetSink sink, Func<bool> focused)
     {
         _focused = focused;
         _sender = sender;
         _width = width;
         _height = height;
         _fps = fps;
-        _askedKbps = Wanted();
+        _askedCodec = WantedCodec();
+        _askedKbps = Wanted(_askedCodec);
         _deviceManager = deviceManager;
+        _device = device;
         _sink = sink;
     }
 
-    /// <summary>The bitrate to ask for now: the fixed one, or whatever the governor has come to.</summary>
-    private int Wanted() => NetDevice.Adaptive ? _governor.Current : NetDevice.BitrateKbps;
+    /// <summary>
+    /// The codec to ask for now: the one chosen, except PyroWave when its library is not
+    /// here to decode it — then HEVC, as the Deck itself would answer a codec it lacks.
+    /// </summary>
+    private NetWire.Codec WantedCodec()
+    {
+        var codec = NetDevice.Codec;
+        if (codec != NetWire.Codec.PyroWave || PyroWaveDecoder.Problem is not { } problem) return codec;
+        if (!_pyroWaveRefusalSaid)
+        {
+            Log.Warn($"PyroWave cannot be decoded here, so HEVC is asked for instead: {problem}");
+            _pyroWaveRefusalSaid = true;
+        }
+        return NetWire.Codec.Hevc;
+    }
+
+    /// <summary>
+    /// The bitrate to ask for now: PyroWave's own figure, or for HEVC and AV1 the fixed one
+    /// or whatever the governor has come to.
+    /// </summary>
+    private int Wanted(NetWire.Codec codec) =>
+        codec == NetWire.Codec.PyroWave ? NetDevice.PyroWaveKbps
+        : NetDevice.Adaptive ? _governor.Current : NetDevice.BitrateKbps;
+
+    /// <summary>What the frames arriving are, or "-" before the first. Read by the pump to say so.</summary>
+    public string ArrivingCodec => _arrivingName;
 
     /// <summary>True while the keyboard and mouse are being sent to the Deck instead of used here.</summary>
     public bool InputCaptured => _desk?.Captured == true;
@@ -152,33 +196,53 @@ internal sealed class NetFeed : IDisposable, HevcDecoder.ISink
             desk.Start();
             _desk = desk;
 
+            // PyroWave's decoder is made before it is needed: its Vulkan device and shaders
+            // take a good part of a second the first time, and frames that arrived meanwhile
+            // would wait in the socket and come out too late to show.
+            if (_askedCodec == NetWire.Codec.PyroWave) OpenPyroWave(_width, _height);
+
+            Volatile.Write(ref _askedCodecAtNs, NowNs());
             byte[] packet = new byte[2048];
             byte[] outgoing = new byte[32];
             long nextHello = 0, nextPing = 0;
             int pingsSent = 0;
             _windowStartNs = NowNs();
 
-            Log.Info($"asking {_sender} for {_width}x{_height}, {_askedKbps / 1000.0:0.#} Mbit/s at {_fps} fps" +
-                     (NetDevice.Adaptive ? $", following the link up to {NetDevice.AdaptiveCeilingKbps / 1000.0:0.#}" : ""));
+            Log.Info($"asking {_sender} for {_width}x{_height} {NetDevice.CodecName(_askedCodec)}, " +
+                     $"{_askedKbps / 1000.0:0.#} Mbit/s at {_fps} fps" +
+                     (NetDevice.Adaptive && _askedCodec != NetWire.Codec.PyroWave
+                         ? $", following the link up to {NetDevice.AdaptiveCeilingKbps / 1000.0:0.#}" : ""));
 
             while (_running)
             {
                 long now = NowNs();
 
-                // The bitrate, which the HELLO carries. A sender since this version takes a
-                // new figure up while the stream runs; an older one keeps the first it heard.
-                if (NetDevice.Adaptive) _governor.Judge(now, NetDevice.AdaptiveCeilingKbps);
-                int wanted = Wanted();
+                // The codec and the bitrate, which the HELLO carries. A sender since these
+                // were added takes a new one up while the stream runs; an older one keeps
+                // the bitrate it first heard, and sends HEVC whatever is asked.
+                var codec = WantedCodec();
+                if (codec != _askedCodec)
+                {
+                    Log.Info($"codec: {NetDevice.CodecName(_askedCodec)} -> {NetDevice.CodecName(codec)}");
+                    _askedCodec = codec;
+                    Volatile.Write(ref _askedCodecAtNs, now);
+                    nextHello = now;
+                }
+                // PyroWave's figure is fixed; the governor is for the codecs it was made for.
+                bool governed = NetDevice.Adaptive && codec != NetWire.Codec.PyroWave;
+                if (governed) _governor.Judge(now, NetDevice.AdaptiveCeilingKbps);
+                int wanted = Wanted(codec);
                 if (wanted != _askedKbps)
                 {
-                    if (!NetDevice.Adaptive) Log.Info($"bitrate: {wanted / 1000.0:0.#} Mbit/s, fixed");
+                    if (!governed) Log.Info($"bitrate: {wanted / 1000.0:0.#} Mbit/s, fixed");
                     _askedKbps = wanted;
                     nextHello = now;
                 }
 
                 if (now >= nextHello)
                 {
-                    socket.Send(outgoing, NetWire.WriteHello(outgoing, _session, _width, _height, _fps, _askedKbps), SocketFlags.None);
+                    socket.Send(outgoing, NetWire.WriteHello(outgoing, _session, _width, _height, _fps, _askedCodec, _askedKbps),
+                                SocketFlags.None);
                     nextHello = now + 500_000_000;
                 }
                 if (now >= nextPing)
@@ -231,6 +295,8 @@ internal sealed class NetFeed : IDisposable, HevcDecoder.ISink
         {
             _decoder?.Dispose();
             _decoder = null;
+            _pyroWave?.Dispose();
+            _pyroWave = null;
             socket?.Dispose();
         }
     }
@@ -256,14 +322,18 @@ internal sealed class NetFeed : IDisposable, HevcDecoder.ISink
 
     private void OnPacket(Socket socket, in NetWire.VideoHeader h, ReadOnlySpan<byte> payload, long arrived)
     {
+        if ((int)h.Codec >= NetWire.CodecCount) return; // from a sender newer than this viewer
+        bool pyroWave = h.Codec == NetWire.Codec.PyroWave;
+
         // Left over from a frame already given up on - unless the sender has started over.
         // It does when it is restarted, or when it stopped hearing from us for a while:
         // its count begins again from nothing, and everything it sends from then on looks
         // old. A keyframe with an old number, or a number far behind, is a new beginning
-        // and not a straggler; taking it for one left the picture gone for good.
+        // and not a straggler; taking it for one left the picture gone for good. Every
+        // PyroWave frame is a keyframe, so for it only the distance tells.
         if (_hasFrame && (int)(h.Frame - _head.Frame) < 0)
         {
-            bool startedOver = h.Keyframe || (int)(_head.Frame - h.Frame) > 60;
+            bool startedOver = (h.Keyframe && !pyroWave) || (int)(_head.Frame - h.Frame) > 60;
             if (!startedOver)
             {
                 Interlocked.Increment(ref _packetsLate);
@@ -271,20 +341,24 @@ internal sealed class NetFeed : IDisposable, HevcDecoder.ISink
             }
             _hasFrame = false;
             _waitingForKeyframe = true;
+            // PyroWave counts frames of its own as well, and its encoder began that count
+            // again too; a decoder that remembers the old one takes the new frames for stale.
+            if (pyroWave) ClosePyroWave();
         }
 
         if (!_hasFrame || h.Frame != _head.Frame)
         {
             // A newer frame has started. The one before it is lost if it never became
             // whole, and so is every frame none of whose packets arrived; either way what
-            // follows refers to pictures we do not have, until the next keyframe.
+            // follows refers to pictures we do not have, until the next keyframe. PyroWave
+            // has none to wait for: its next frame is whole by itself.
             if (_hasFrame)
             {
                 long missing = (_got < _head.Count ? 1 : 0) + (long)(h.Frame - _head.Frame - 1);
                 if (missing > 0)
                 {
                     Interlocked.Add(ref _framesLost, missing);
-                    _governor.Lost(arrived, missing);
+                    if (_head.Codec != NetWire.Codec.PyroWave) _governor.Lost(arrived, missing);
                     _sink.NetLost(missing);
                     _waitingForKeyframe = true;
                 }
@@ -293,6 +367,8 @@ internal sealed class NetFeed : IDisposable, HevcDecoder.ISink
             if (h.Count <= 0 || h.Count > NetWire.MaxPackets || h.FrameBytes <= 0 ||
                 h.FrameBytes > h.Count * NetWire.PayloadMax)
                 return;
+
+            if (!_arrivedAny || h.Codec != _arriving) NoteCodec(h.Codec);
 
             _head = h;
             _hasFrame = true;
@@ -312,6 +388,11 @@ internal sealed class NetFeed : IDisposable, HevcDecoder.ISink
 
         // The frame is whole: what the governor judges the link by, with how long it took.
         _completedNs = arrived;
+        if (pyroWave)
+        {
+            DecodePyroWave(arrived);
+            return;
+        }
         _governor.Frame(arrived, _clockKnown
             ? (arrived - (_head.CaptureTimeNs - _offsetNs)) / 1e6 - _head.EncodeUs / 1000.0
             : double.NaN);
@@ -322,6 +403,91 @@ internal sealed class NetFeed : IDisposable, HevcDecoder.ISink
             return;
         }
         DecodeFrame(socket, arrived);
+    }
+
+    /// <summary>
+    /// The frames have begun to be of another codec: the one asked for has arrived, or the
+    /// Deck cannot do it and sends HEVC. A new codec is a new stream. The decoder of the
+    /// old one goes, and HEVC and AV1 start again from a keyframe, as the Deck's new
+    /// encoder does by itself.
+    /// </summary>
+    private void NoteCodec(NetWire.Codec codec)
+    {
+        string name = NetDevice.CodecName(codec);
+        if (codec != _askedCodec)
+            Log.Info($"the Deck sends {name}: it cannot encode {NetDevice.CodecName(_askedCodec)}, or has not changed over yet");
+        else
+            Log.Info(_arrivedAny ? $"the Deck now sends {name}" : $"the Deck sends {name}");
+
+        _arriving = codec;
+        _arrivedAny = true;
+        _arrivingName = name;
+        _decoder?.Dispose();
+        _decoder = null;
+        // One made ahead for the first frames is kept.
+        if (codec != NetWire.Codec.PyroWave) ClosePyroWave();
+        _waitingForKeyframe = true;
+    }
+
+    private void OpenPyroWave(int width, int height)
+    {
+        ClosePyroWave();
+        try
+        {
+            _pyroWave = new PyroWaveDecoder(_device, width, height);
+            _decoderSize = (width, height);
+            Log.Info($"decoding {width}x{height} PyroWave with '{_pyroWave.Name}'");
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or ArgumentException or EntryPointNotFoundException)
+        {
+            // No library, or a GPU it will not run on: nothing later will fix that.
+            Log.Error($"cannot decode: {ex.Message}");
+            _running = false;
+            _sink.NetFailed(ex.Message);
+        }
+    }
+
+    private void ClosePyroWave()
+    {
+        _pyroWave?.Dispose();
+        _pyroWave = null;
+    }
+
+    private void DecodePyroWave(long arrived)
+    {
+        if (_pyroWave is null || _decoderSize != (_head.Width, _head.Height)) OpenPyroWave(_head.Width, _head.Height);
+        if (_pyroWave is null) return;
+
+        // The whole frame at once: the codec reads its packets one after another.
+        bool taken = _pyroWave.Push(_frame.AsSpan(0, _head.FrameBytes));
+
+        // Not whole by the codec's count, though every byte came: it took the frame for an
+        // older one. That happens when the Deck's encoder is opened again - for a new
+        // bitrate or size - and its own count of frames starts over with it. A new decoder
+        // knows no count, and takes the frame.
+        if (!taken || !_pyroWave.Ready)
+        {
+            Log.Info($"PyroWave frame {_head.Frame} was not taken by the decoder; it starts again");
+            OpenPyroWave(_head.Width, _head.Height);
+            if (_pyroWave is null) return;
+            if (!_pyroWave.Push(_frame.AsSpan(0, _head.FrameBytes)) || !_pyroWave.Ready)
+            {
+                Interlocked.Increment(ref _framesLost);
+                _sink.NetLost(1);
+                return;
+            }
+        }
+
+        try
+        {
+            long captureTime = _clockKnown ? (_head.CaptureTimeNs - _offsetNs) / 100 : 0;
+            _pyroWave.Decode(captureTime, this);
+        }
+        catch (IOException ex)
+        {
+            Log.Warn($"PyroWave decode failed, starting the decoder again: {ex.Message}");
+            OpenPyroWave(_head.Width, _head.Height);
+        }
     }
 
     /// <summary>At most a few times a second: the answer takes a frame or two to arrive, and asking again in the meantime changes nothing.</summary>
@@ -340,13 +506,13 @@ internal sealed class NetFeed : IDisposable, HevcDecoder.ISink
     {
         try
         {
-            if (_decoder is null || _decoderSize != (_head.Width, _head.Height))
+            if (_decoder is null || _decoder.Codec != _head.Codec || _decoderSize != (_head.Width, _head.Height))
             {
                 _decoder?.Dispose();
                 _decoder = null;
-                _decoder = new HevcDecoder(_deviceManager, _head.Width, _head.Height);
+                _decoder = new MfDecoder(_deviceManager, _head.Codec, _head.Width, _head.Height);
                 _decoderSize = (_head.Width, _head.Height);
-                Log.Info($"decoding {_head.Width}x{_head.Height} HEVC with '{_decoder.Name}'");
+                Log.Info($"decoding {_head.Width}x{_head.Height} {NetDevice.CodecName(_head.Codec)} with '{_decoder.Name}'");
             }
 
             // The capture time goes in as the sample's timestamp and comes back out on the
@@ -373,7 +539,7 @@ internal sealed class NetFeed : IDisposable, HevcDecoder.ISink
         }
     }
 
-    void HevcDecoder.ISink.OnPicture(ID3D11Texture2D texture, int subresource, long sampleTime)
+    void IPictureSink.OnPicture(ID3D11Texture2D texture, int subresource, long sampleTime)
     {
         double encodeMs = _head.EncodeUs / 1000.0;
         double networkMs = _clockKnown
@@ -422,7 +588,10 @@ internal sealed class NetFeed : IDisposable, HevcDecoder.ISink
         {
             return new NetStats(_encodeMs, _networkMs, _decodeMs, _bestRoundTripNs / 1e6, _clockKnown, _decodeKnown,
                 Interlocked.Read(ref _framesLost), Interlocked.Read(ref _packetsLate),
-                Interlocked.Read(ref _keyframesRequested), _mbps, _decoder?.Name ?? "-", _askedKbps);
+                Interlocked.Read(ref _keyframesRequested), _mbps, _pyroWave?.Name ?? _decoder?.Name ?? "-", _askedKbps,
+                _arrivingName, NetDevice.CodecName(_askedCodec),
+                _arrivedAny && _arrivingName != NetDevice.CodecName(_askedCodec) &&
+                NowNs() - Volatile.Read(ref _askedCodecAtNs) > 1_500_000_000);
         }
     }
 

@@ -303,7 +303,8 @@ public sealed class FramePump : IDisposable, INetSink
     /// </summary>
     private void SelectNetwork(CaptureMode mode, double fps)
     {
-        Log.Section($"network source: {mode.Width}x{mode.Height} @ {fps:0.##} HEVC from {Device.Hardware.Instance}");
+        Log.Section($"network source: {mode.Width}x{mode.Height} @ {fps:0.##} {NetDevice.CodecName(NetDevice.Codec)} " +
+                    $"from {Device.Hardware.Instance}");
 
         if (_dxgiManager is null)
             throw new InvalidOperationException("the decoder needs the Direct3D device attached first");
@@ -331,7 +332,7 @@ public sealed class FramePump : IDisposable, INetSink
         _state = CaptureState.Starting;
 
         _running = true;
-        _net = new NetFeed(endPoint, mode.Width, mode.Height, (int)Math.Round(fps), _dxgiManager, this,
+        _net = new NetFeed(endPoint, mode.Width, mode.Height, (int)Math.Round(fps), _dxgiManager, _renderer.Device, this,
                            () => _hasFocus);
         _net.Start();
     }
@@ -391,6 +392,11 @@ public sealed class FramePump : IDisposable, INetSink
     /// </summary>
     public void Service()
     {
+        // The codec the frames say they are, which is what the mode is said to carry: the
+        // one asked for, or HEVC from a Deck that cannot encode it.
+        if (_net is { ArrivingCodec: var codec } && codec != "-" && CurrentMode is { } shown && shown.WireCodec != codec)
+            CurrentMode = shown with { WireCodec = codec };
+
         long size = Interlocked.Exchange(ref _pendingNetSize, 0);
         if (size == 0 || size == Volatile.Read(ref _netSize)) return;
 

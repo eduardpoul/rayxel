@@ -6,6 +6,7 @@
 #include <pipewire/pipewire.h>
 
 #include "common.h"
+#include "encoder.h"
 #include "probe.h"
 #include "record.h"
 #include "server.h"
@@ -16,26 +17,32 @@ static void usage(void)
 	printf("rayxel-send %s - sends a Steam Deck's picture to Rayxel\n"
 	       "\n"
 	       "  rayxel-send --listen[=PORT] [--allow-input] [--buffer=FRAMES] [--max-frame=X] [--gop=N]\n"
-	       "                              [--source=NAME]\n"
+	       "                              [--source=NAME] [--frames-file=FILE --frames-size=WxH]\n"
 	       "  rayxel-send --probe [--size=WxH] [--seconds=N] [--no-capture]\n"
-	       "  rayxel-send --record=FILE [--size=WxH] [--seconds=N] [--bitrate=MBIT] [--fps=N]\n"
-	       "                            [--buffer=FRAMES] [--max-frame=X] [--gop=N] [--source=NAME]\n"
+	       "  rayxel-send --record=FILE [--codec=NAME] [--size=WxH] [--seconds=N] [--bitrate=MBIT]\n"
+	       "                            [--fps=N] [--buffer=FRAMES] [--max-frame=X] [--gop=N]\n"
+	       "                            [--source=NAME]\n"
 	       "\n"
 	       "  --listen[=PORT] wait for Rayxel to ask for the picture and stream it there; the\n"
-	       "                  viewer chooses the size and bitrate (default port %d)\n"
+	       "                  viewer chooses the codec, size and bitrate (default port %d)\n"
 	       "  --probe         report what this machine offers: the gamescope video source and\n"
-	       "                  its formats, the hardware HEVC encoder, and a short trial capture\n"
-	       "  --record=FILE   capture, encode to HEVC and write the stream to FILE, then report\n"
+	       "                  its formats, the encoders, and a short trial capture\n"
+	       "  --record=FILE   capture, encode and write the stream to FILE, then report\n"
 	       "                  what each stage cost; FILE may be - to measure without writing\n"
 	       "\n"
 	       "  --allow-input   --listen: let the viewer play with its own gamepad, keyboard and\n"
 	       "                  mouse, which appear here as devices. Off unless asked for: it\n"
 	       "                  lets whoever is watching type and click on this machine\n"
+	       "  --frames-file=FILE --listen: send these pictures in a loop instead of capturing:\n"
+	       "                  raw NV12, one after another, BT.709 limited range; for tests\n"
+	       "  --frames-size=WxH the size of each picture in --frames-file\n"
+	       "  --codec=NAME    --record: hevc (default), av1 or pyrowave\n"
 	       "  --size=WxH      size to ask gamescope for (default: the output's own; gamescope\n"
 	       "                  only scales down)\n"
 	       "  --seconds=N     how long to run (default 3 for --probe, 5 for --record)\n"
 	       "  --no-capture    --probe: skip the trial capture\n"
-	       "  --bitrate=MBIT  target bitrate in Mbit/s (default 20)\n"
+	       "  --bitrate=MBIT  target bitrate in Mbit/s (default 20 for HEVC, 15 for AV1,\n"
+	       "                  140 for PyroWave)\n"
 	       "  --fps=N         the rate the bitrate is budgeted for (default 60); frames are\n"
 	       "                  encoded as they arrive whatever this says\n"
 	       "  --buffer=FRAMES how many frames' worth of bits the rate control may borrow\n"
@@ -59,6 +66,15 @@ static bool parse_size(const char *text, uint32_t *width, uint32_t *height)
 	return true;
 }
 
+static bool parse_codec(const char *text, uint8_t *codec)
+{
+	if (strcmp(text, "hevc") == 0) *codec = WIRE_CODEC_HEVC;
+	else if (strcmp(text, "av1") == 0) *codec = WIRE_CODEC_AV1;
+	else if (strcmp(text, "pyrowave") == 0) *codec = WIRE_CODEC_PYROWAVE;
+	else return false;
+	return true;
+}
+
 static bool parse_number(const char *text, double min, double max, double *value)
 {
 	char *end = NULL;
@@ -75,6 +91,7 @@ static int run_probe(uint32_t width, uint32_t height, int seconds, bool capture)
 	struct trial_summary trial = { 0 };
 
 	printf("rayxel-send %s probe\n", RAYXEL_SEND_VERSION);
+	char why[256];
 
 	probe_system();
 	bool have_source = probe_pipewire(&target) && target.found;
@@ -92,6 +109,13 @@ static int run_probe(uint32_t width, uint32_t height, int seconds, bool capture)
 	else
 		printf("HEVC encoder : not found\n");
 
+	why[0] = '\0';
+	if (encoder_available(WIRE_CODEC_AV1, why, sizeof(why))) printf("AV1 encoder  : yes\n");
+	else printf("AV1 encoder  : no, %s\n", why);
+	why[0] = '\0';
+	if (encoder_available(WIRE_CODEC_PYROWAVE, why, sizeof(why))) printf("PyroWave     : yes\n");
+	else printf("PyroWave     : no, %s\n", why);
+
 	if (!capture) printf("trial capture: skipped\n");
 	else if (!have_source) printf("trial capture: not run, there is no source\n");
 	else if (trial.frames > 0)
@@ -105,9 +129,10 @@ static int run_probe(uint32_t width, uint32_t height, int seconds, bool capture)
 int main(int argc, char **argv)
 {
 	bool probe = false, capture = true, listen = false, allow_input = false;
-	const char *record = NULL, *source = "gamescope";
-	uint32_t width = 0, height = 0;
-	double seconds = 0, bitrate = 20, fps = 60, buffer = 2, gop = 0, max_frame = 0, port = WIRE_PORT;
+	const char *record = NULL, *source = "gamescope", *frames_file = NULL;
+	uint32_t width = 0, height = 0, frames_width = 0, frames_height = 0;
+	uint8_t codec = WIRE_CODEC_HEVC;
+	double seconds = 0, bitrate = 0, fps = 60, buffer = 2, gop = 0, max_frame = 0, port = WIRE_PORT;
 
 	/* The report is read through ssh or a pipe as often as on a terminal; without this
 	 * it would arrive after everything the libraries write to stderr. */
@@ -127,6 +152,9 @@ int main(int argc, char **argv)
 		} else if (strncmp(arg, "--record=", 9) == 0) record = arg + 9;
 		else if (strncmp(arg, "--source=", 9) == 0) source = arg + 9;
 		else if (strncmp(arg, "--size=", 7) == 0) ok = parse_size(arg + 7, &width, &height);
+		else if (strncmp(arg, "--codec=", 8) == 0) ok = parse_codec(arg + 8, &codec);
+		else if (strncmp(arg, "--frames-file=", 14) == 0) frames_file = arg + 14;
+		else if (strncmp(arg, "--frames-size=", 14) == 0) ok = parse_size(arg + 14, &frames_width, &frames_height);
 		else if (strncmp(arg, "--seconds=", 10) == 0) ok = parse_number(arg + 10, 1, 3600, &seconds);
 		else if (strncmp(arg, "--bitrate=", 10) == 0) ok = parse_number(arg + 10, 0.2, 500, &bitrate);
 		else if (strncmp(arg, "--fps=", 6) == 0) ok = parse_number(arg + 6, 1, 240, &fps);
@@ -157,10 +185,19 @@ int main(int argc, char **argv)
 		usage();
 		return 2;
 	}
-	if ((record && record[0] == '\0') || source[0] == '\0') {
-		fprintf(stderr, "--record and --source need a value\n");
+	if ((record && record[0] == '\0') || source[0] == '\0' || (frames_file && frames_file[0] == '\0')) {
+		fprintf(stderr, "--record, --source and --frames-file need a value\n");
 		return 2;
 	}
+	if (frames_file && (!listen || frames_width == 0)) {
+		fprintf(stderr, "--frames-file goes with --listen and needs --frames-size\n");
+		return 2;
+	}
+	if (frames_width && (frames_width % 2 || frames_height % 2)) {
+		fprintf(stderr, "--frames-size: NV12 needs an even width and height\n");
+		return 2;
+	}
+	if (bitrate == 0) bitrate = codec == WIRE_CODEC_PYROWAVE ? 140 : codec == WIRE_CODEC_AV1 ? 15 : 20;
 
 	/* A plain ssh command line does not always carry the session's runtime directory,
 	 * and without it the PipeWire socket cannot be found. */
@@ -182,12 +219,16 @@ int main(int argc, char **argv)
 			.max_frame = max_frame,
 			.gop = (uint32_t)gop,
 			.allow_input = allow_input,
+			.frames_file = frames_file,
+			.frames_width = frames_width,
+			.frames_height = frames_height,
 		};
 		printf("rayxel-send %s\n", RAYXEL_SEND_VERSION);
 		status = server_run(&options);
 	} else {
 		struct record_options options = {
 			.path = strcmp(record, "-") == 0 ? NULL : record,
+			.codec = codec,
 			.source = source,
 			.width = width,
 			.height = height,

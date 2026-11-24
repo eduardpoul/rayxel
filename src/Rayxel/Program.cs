@@ -23,6 +23,9 @@ var settings = AppSettings.Load();
 Strings.Use(settings.Language);
 NetDevice.Adaptive = settings.NetAdaptive;
 NetDevice.BitrateKbps = Math.Clamp(settings.NetBitrateKbps, 500, 500_000);
+NetDevice.Codec = AppSettings.ParseCodec(settings.NetCodec) ?? NetWire.Codec.Hevc;
+NetDevice.PyroWaveKbps = Math.Clamp(settings.NetPyroWaveKbps, 10_000, 1_000_000);
+double? netMbit = null;
 
 string? deviceSelector = null;
 string? netAddress = null;
@@ -138,20 +141,24 @@ foreach (var arg in args)
     // A Steam Deck running rayxel-send, as --net=host[:port]. It joins the device list and is
     // chosen, exactly as a card named on the command line would be.
     else if (arg.StartsWith("--net=", StringComparison.OrdinalIgnoreCase)) netAddress = arg[6..];
-    // What that sender is asked to spend: a fixed figure in Mbit/s, or "auto" to follow the link.
+    // The codec that sender is asked for: hevc, av1 or pyrowave.
+    else if (arg.StartsWith("--net-codec=", StringComparison.OrdinalIgnoreCase))
+    {
+        if (AppSettings.ParseCodec(arg[12..]) is { } codec) NetDevice.Codec = codec;
+        else Log.Warn($"{arg}: expected hevc, av1 or pyrowave");
+    }
+    // What it is asked to spend: a fixed figure in Mbit/s, or "auto" to follow the link. The
+    // figure is for the codec asked for, whichever side of --net-codec it is written on.
     else if (arg.StartsWith("--net-bitrate=", StringComparison.OrdinalIgnoreCase))
     {
         if (arg[14..].Equals("auto", StringComparison.OrdinalIgnoreCase))
             NetDevice.Adaptive = true;
         else if (double.TryParse(arg[14..], System.Globalization.NumberStyles.Float,
                                  System.Globalization.CultureInfo.InvariantCulture, out double mbit)
-                 && mbit is >= 0.5 and <= 500)
-        {
-            NetDevice.BitrateKbps = (int)Math.Round(mbit * 1000);
-            NetDevice.Adaptive = false;
-        }
+                 && mbit is >= 0.5 and <= 1000)
+            netMbit = mbit;
         else
-            Log.Warn($"{arg}: expected auto, or a bitrate in Mbit/s between 0.5 and 500");
+            Log.Warn($"{arg}: expected auto, or a bitrate in Mbit/s between 0.5 and 1000");
     }
     // The combination that hands the keyboard and mouse to a network sender and takes them
     // back, as --capture-key=ctrl+alt+k.
@@ -165,6 +172,16 @@ foreach (var arg in args)
     else if (arg.StartsWith("--flow=", StringComparison.OrdinalIgnoreCase))
         startFlow = arg[7..].Equals("only", StringComparison.OrdinalIgnoreCase) ? FlowView.Only : FlowView.Overlay;
     else if (!arg.StartsWith('-')) deviceSelector = arg;
+}
+
+if (netMbit is { } netAsked)
+{
+    if (NetDevice.Codec == NetWire.Codec.PyroWave) NetDevice.PyroWaveKbps = (int)Math.Round(netAsked * 1000);
+    else
+    {
+        NetDevice.BitrateKbps = (int)Math.Round(netAsked * 1000);
+        NetDevice.Adaptive = false;
+    }
 }
 
 Renderer? renderer = null;
@@ -1001,10 +1018,15 @@ void Report(DeviceProbe p)
     if (d.Bus == DeviceBus.Network)
     {
         if (!p.IsReady) { Log.Warn($"  state  {p.Problem}"); return; }
-        Log.Info($"  state  ready - {p.Modes.Count} sizes, " + (NetDevice.Adaptive
-            ? $"a bitrate that follows the link, up to {NetDevice.AdaptiveCeilingKbps / 1000.0:0.#} Mbit/s"
-            : $"{NetDevice.BitrateKbps / 1000.0:0.#} Mbit/s asked for"));
-        Log.Info("  wire   HEVC, always: the Deck encodes and this machine decodes");
+        Log.Info($"  state  ready - {p.Modes.Count} sizes, " + (NetDevice.Codec == NetWire.Codec.PyroWave
+            ? $"{NetDevice.PyroWaveKbps / 1000.0:0.#} Mbit/s asked for"
+            : NetDevice.Adaptive
+                ? $"a bitrate that follows the link, up to {NetDevice.AdaptiveCeilingKbps / 1000.0:0.#} Mbit/s"
+                : $"{NetDevice.BitrateKbps / 1000.0:0.#} Mbit/s asked for"));
+        Log.Info($"  wire   {NetDevice.CodecName(NetDevice.Codec)} asked for: the Deck encodes and this machine decodes; " +
+                 "a Deck that cannot encode it sends HEVC");
+        if (NetDevice.Codec == NetWire.Codec.PyroWave && PyroWaveDecoder.Problem is { } problem)
+            Log.Warn($"  codec  PyroWave cannot be decoded here, HEVC will be asked for: {problem}");
         return;
     }
 

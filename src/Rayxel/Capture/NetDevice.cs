@@ -43,6 +43,31 @@ public static class NetDevice
     /// <summary>The fixed rates offered beside the adaptive one, in kbit/s.</summary>
     public static readonly int[] FixedKbps = [30_000, 20_000, 15_000, 10_000, 5_000];
 
+    /// <summary>
+    /// The codec the Deck is asked for. HEVC unless chosen otherwise: every Deck encodes it.
+    /// AV1 needs an encoder a Deck's GPU does not have, and a sender that cannot do what is
+    /// asked sends HEVC instead and says so in every frame. Read by the stream while it
+    /// runs, so a change takes effect at once, like the bitrate.
+    /// </summary>
+    internal static NetWire.Codec Codec { get; set; } = NetWire.Codec.Hevc;
+
+    /// <summary>
+    /// What PyroWave is asked to spend, in kbit/s. Its own figure, because it is a different
+    /// order of thing: every frame is compressed alone, so it needs several times HEVC's
+    /// rate for the same picture. Always fixed — it is meant for a link that has the room.
+    /// </summary>
+    public static int PyroWaveKbps { get; set; } = 140_000;
+
+    /// <summary>PyroWave's rates to choose from, in kbit/s. 140 looks like HEVC at 20.</summary>
+    public static readonly int[] PyroWaveChoicesKbps = [200_000, 140_000, 100_000, 70_000];
+
+    internal static string CodecName(NetWire.Codec codec) => codec switch
+    {
+        NetWire.Codec.Av1 => "AV1",
+        NetWire.Codec.PyroWave => "PyroWave",
+        _ => "HEVC"
+    };
+
     /// <summary>Makes the device record for a sender at <c>host</c> or <c>host:port</c>.</summary>
     public static CaptureDeviceInfo Create(string address, int ordinal)
     {
@@ -131,12 +156,12 @@ public static class NetDevice
         for (int i = 0; i < sizes.Length; i++)
         {
             // NV12 is what the app is handed, after its own decode; the codec on the wire is
-            // HEVC and is declared as such, so the mode carries the same "zip" tag a card's
-            // compressed modes do.
+            // declared as such, so the mode carries the same "zip" tag a card's compressed
+            // modes do. It is the one asked for; once frames arrive, the one they say.
             modes.Add(new CaptureMode(i, nv12, sizes[i].Width, sizes[i].Height, 60, 60, 60)
             {
                 Transport = WireTransport.Compressed,
-                WireCodec = "HEVC"
+                WireCodec = CodecName(Codec)
             });
         }
         return modes;

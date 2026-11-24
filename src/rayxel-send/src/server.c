@@ -46,6 +46,7 @@ struct tally {
 	uint64_t since_ns;
 	uint32_t frames, keyframes, skipped;
 	uint64_t bytes, packets;
+	const char *unsent; /* why the last frame that could not be sent was not */
 	uint64_t encode_ns, encode_max_ns;
 	uint64_t send_ns, send_max_ns;
 	size_t largest;
@@ -93,6 +94,19 @@ struct server {
 	bool quitting;
 
 	struct encoder *encoder;
+	uint8_t codec; /* what the encoder is: what was asked for, or HEVC when that cannot be had */
+
+	/* Codecs this machine turned down once. A missing encoder does not appear later, so
+	 * each is tried once per run, not on every encoder that is opened. */
+	bool refused[WIRE_CODEC_COUNT];
+	bool fallback_said; /* the viewer's choice has been answered with HEVC, and the log says so */
+
+	/* --frames-file: pictures from memory instead of a capture, at a steady rate. For
+	 * testing a viewer and the codecs without going near gamescope. */
+	uint8_t *file_frames;
+	int file_count, file_next;
+	struct spa_source *file_timer;
+
 	struct cursor *cursor; /* the Deck's mouse pointer, which the capture does not have */
 	struct capture_format format;
 	bool format_changed;
@@ -171,12 +185,17 @@ static void report(struct server *s, uint64_t now)
 	double seconds = (double)(now - t->since_ns) / 1e9;
 
 	if (t->frames > 0 && seconds > 0)
-		printf("  %5.1f fps  %6.2f Mbit/s  encode %.2f ms (max %.2f)  send %.2f ms (max %.2f)  largest %.0f kB  "
-		       "%u keyframe%s%s\n",
-		       t->frames / seconds, (double)t->bytes * 8 / seconds / 1e6, (double)t->encode_ns / t->frames / 1e6,
+		printf("  %5.1f fps  %6.2f Mbit/s %s  encode %.2f ms (max %.2f)  send %.2f ms (max %.2f)  largest %.0f kB  "
+		       "%u keyframe%s",
+		       t->frames / seconds, (double)t->bytes * 8 / seconds / 1e6, encoder_codec_name(s->codec),
+		       (double)t->encode_ns / t->frames / 1e6,
 		       (double)t->encode_max_ns / 1e6, (double)t->send_ns / t->frames / 1e6, (double)t->send_max_ns / 1e6,
-		       (double)t->largest / 1024.0, t->keyframes, t->keyframes == 1 ? "" : "s",
-		       t->skipped ? ", some frames skipped" : "");
+		       (double)t->largest / 1024.0, t->keyframes, t->keyframes == 1 ? "" : "s");
+	if (t->frames > 0 && seconds > 0) {
+		if (t->skipped) printf(", %u frame%s not sent: %s", t->skipped, t->skipped == 1 ? "" : "s", t->unsent ? t->unsent : "no reason recorded");
+		printf("\n");
+	} else if (s->watching && t->skipped)
+		printf("  %u frame%s not sent: %s\n", t->skipped, t->skipped == 1 ? "" : "s", t->unsent ? t->unsent : "no reason recorded");
 	else if (s->watching)
 		printf("  no frames - gamescope draws only when something on screen changes\n");
 
@@ -208,27 +227,70 @@ static void on_format(void *user, const struct capture_format *f)
 	s->format_changed = true;
 }
 
+/* What each codec is asked to spend when the viewer names no figure: what a picture of the
+ * Deck's size needs for each to look its best. PyroWave's is high because it compresses each
+ * frame alone. */
+static uint32_t default_kbps(uint8_t codec)
+{
+	switch (codec) {
+	case WIRE_CODEC_AV1: return 15000;
+	case WIRE_CODEC_PYROWAVE: return 140000;
+	default: return 20000;
+	}
+}
+
 static bool open_encoder(struct server *s)
 {
 	const struct capture_format *f = &s->format;
 	uint32_t fps = s->wanted.fps ? s->wanted.fps : 60;
-	uint32_t kbps = s->wanted.bitrate_kbps ? s->wanted.bitrate_kbps : 20000;
+	uint8_t wanted = s->wanted.codec < WIRE_CODEC_COUNT ? s->wanted.codec : WIRE_CODEC_HEVC;
 
 	encoder_close(s->encoder);
-	struct encoder_config config = {
-		.width = f->width,
-		.height = f->height,
-		.fps = fps,
-		.bitrate_kbps = kbps,
-		.buffer_frames = s->options->buffer_frames,
-		.max_frame_bytes = s->options->max_frame > 0
-			? (uint32_t)((double)kbps * 125.0 / (double)fps * s->options->max_frame) : 0,
-		.gop = s->options->gop,
-		.bt601 = f->color_matrix == SPA_VIDEO_COLOR_MATRIX_BT601,
-		.full_range = f->color_range == SPA_VIDEO_COLOR_RANGE_0_255,
-	};
-	s->encoder = encoder_open(&config);
+	s->encoder = NULL;
 	s->format_changed = false;
+
+	if (wanted != WIRE_CODEC_HEVC && s->refused[wanted] && !s->fallback_said) {
+		printf("codec    : %s cannot be had here; sending HEVC instead\n", encoder_codec_name(wanted));
+		s->fallback_said = true;
+	}
+
+	/* The codec asked for, and HEVC when this machine cannot do it. The viewer learns
+	 * which from every datagram and decodes accordingly. */
+	uint8_t tries[2] = { wanted, WIRE_CODEC_HEVC };
+	for (int i = 0; i < 2 && !s->encoder; i++) {
+		uint8_t codec = tries[i];
+		if (i == 1 && codec == wanted) break;
+		if (s->refused[codec] && codec != WIRE_CODEC_HEVC) continue;
+
+		/* A figure meant for one codec is no use to another: PyroWave's would swamp HEVC,
+		 * HEVC's would starve PyroWave. The viewer's goes to the codec it asked for. */
+		uint32_t kbps = codec == wanted && s->wanted.bitrate_kbps ? s->wanted.bitrate_kbps : default_kbps(codec);
+		struct encoder_config config = {
+			.codec = codec,
+			.width = f->width,
+			.height = f->height,
+			.fps = fps,
+			.bitrate_kbps = kbps,
+			.buffer_frames = s->options->buffer_frames,
+			.max_frame_bytes = s->options->max_frame > 0
+				? (uint32_t)((double)kbps * 125.0 / (double)fps * s->options->max_frame) : 0,
+			.gop = s->options->gop,
+			.bt601 = f->color_matrix == SPA_VIDEO_COLOR_MATRIX_BT601,
+			.full_range = f->color_range == SPA_VIDEO_COLOR_RANGE_0_255,
+		};
+		char why[256] = "";
+		s->encoder = encoder_open(&config, why, sizeof(why));
+		if (s->encoder) {
+			s->codec = codec;
+		} else if (codec != WIRE_CODEC_HEVC) {
+			s->refused[codec] = true;
+			s->fallback_said = true;
+			printf("codec    : %s cannot be had here (%s); sending HEVC instead\n", encoder_codec_name(codec), why);
+		} else {
+			printf("codec    : HEVC cannot be had either: %s\n", why);
+		}
+	}
+
 	if (!s->encoder) {
 		on_failed(s, "the encoder could not be opened");
 		return false;
@@ -238,11 +300,14 @@ static bool open_encoder(struct server *s)
 }
 
 /* One frame as `count` datagrams, handed to the kernel in a single call. The payloads are
- * not copied: each datagram is its own header followed by a slice of the frame. */
+ * not copied: each datagram is its own header followed by the next slice of the frame. */
 static bool send_frame(struct server *s, const struct encoded_frame *frame, uint64_t capture_ns, uint64_t encoded_ns)
 {
 	size_t count = (frame->size + WIRE_PAYLOAD_MAX - 1) / WIRE_PAYLOAD_MAX;
-	if (count == 0 || count > MAX_PACKETS) return false;
+	if (count == 0 || count > MAX_PACKETS) {
+		s->tally.unsent = count ? "more packets than a frame may have" : "an empty frame";
+		return false;
+	}
 
 	struct wire_video base = {
 		.header = { .magic = WIRE_MAGIC, .version = WIRE_VERSION, .type = WIRE_VIDEO },
@@ -253,6 +318,7 @@ static bool send_frame(struct server *s, const struct encoded_frame *frame, uint
 		.width = (uint16_t)s->format.width,
 		.height = (uint16_t)s->format.height,
 		.flags = frame->keyframe ? WIRE_FLAG_KEYFRAME : 0,
+		.codec = s->codec,
 		.capture_time_ns = capture_ns,
 		.encode_us = (uint32_t)((encoded_ns - capture_ns) / 1000),
 	};
@@ -280,6 +346,7 @@ static bool send_frame(struct server *s, const struct encoded_frame *frame, uint
 			if (errno == EINTR) continue;
 			/* Whatever went wrong, the viewer is missing part of a frame and will ask
 			 * for a keyframe; there is nothing better to do with the rest of it. */
+			s->tally.unsent = strerror(errno);
 			return false;
 		}
 		sent += (size_t)n;
@@ -370,9 +437,68 @@ static void on_bitrate(struct server *s, uint32_t kbps)
 {
 	if (!s->watching || kbps == 0 || kbps == s->wanted.bitrate_kbps) return;
 	printf("bitrate  : %.1f -> %.1f Mbit/s, as the viewer asks\n",
-	       (s->wanted.bitrate_kbps ? s->wanted.bitrate_kbps : 20000) / 1000.0, kbps / 1000.0);
+	       (s->wanted.bitrate_kbps ? s->wanted.bitrate_kbps : default_kbps(s->wanted.codec)) / 1000.0, kbps / 1000.0);
 	s->wanted.bitrate_kbps = kbps;
 	if (s->have_format) s->format_changed = true;
+}
+
+/* The viewer switches codec while the stream runs, the same way: the next frame comes from
+ * an encoder of the new kind. One this machine cannot do is answered with HEVC. */
+static void on_codec(struct server *s, uint8_t codec)
+{
+	if (!s->watching || codec == s->wanted.codec) return;
+	printf("codec    : %s -> %s, as the viewer asks\n", encoder_codec_name(s->wanted.codec), encoder_codec_name(codec));
+	s->wanted.codec = codec;
+	s->fallback_said = false;
+	if (s->have_format) s->format_changed = true;
+}
+
+/* --frames-file: the next picture of the file, as though a capture had just delivered it. */
+static void on_file_tick(void *data, uint64_t expirations)
+{
+	struct server *s = data;
+	if (!s->watching || s->broken || !s->file_frames) return;
+	if ((s->format_changed || !s->encoder) && !open_encoder(s)) return;
+
+	size_t frame = (size_t)s->format.width * s->format.height * 3 / 2;
+	const uint8_t *picture = s->file_frames + frame * (size_t)s->file_next;
+	s->file_next = (s->file_next + 1) % s->file_count;
+	send_picture(s, picture, s->format.width, now_ns());
+}
+
+/* Reads the whole file: the pictures are sent from memory so that reading never sets the pace. */
+static bool load_frames_file(struct server *s)
+{
+	const struct server_options *o = s->options;
+	size_t frame = (size_t)o->frames_width * o->frames_height * 3 / 2;
+	FILE *f = fopen(o->frames_file, "rb");
+	if (!f) {
+		printf("cannot open %s: %s\n", o->frames_file, strerror(errno));
+		return false;
+	}
+	fseek(f, 0, SEEK_END);
+	long size = ftell(f);
+	fseek(f, 0, SEEK_SET);
+	s->file_count = frame ? (int)(size / (long)frame) : 0;
+	if (s->file_count > 0) s->file_frames = malloc(frame * (size_t)s->file_count);
+	bool ok = s->file_frames && fread(s->file_frames, frame, (size_t)s->file_count, f) == (size_t)s->file_count;
+	fclose(f);
+	if (!ok) {
+		printf("%s holds no whole %ux%u NV12 picture, or could not be read\n", o->frames_file, o->frames_width,
+		       o->frames_height);
+		free(s->file_frames);
+		s->file_frames = NULL;
+		return false;
+	}
+
+	s->format = (struct capture_format){
+		.width = o->frames_width,
+		.height = o->frames_height,
+		.color_matrix = SPA_VIDEO_COLOR_MATRIX_BT709,
+		.color_range = SPA_VIDEO_COLOR_RANGE_16_235,
+	};
+	s->have_format = true;
+	return true;
 }
 
 static void start_stream(struct server *s, const struct sockaddr_in *from, const struct wire_hello *hello)
@@ -414,6 +540,7 @@ static void start_stream(struct server *s, const struct sockaddr_in *from, const
 	s->keys_heard = s->mouse_heard = false;
 	s->key_seen = s->motion_seen = false;
 	s->keyframe_wanted = false;
+	s->fallback_said = false;
 	/* With a capture already running its format is known and will not be announced
 	 * again, so the encoder is opened for it by the first frame. */
 	s->format_changed = s->capture != NULL && s->have_format;
@@ -423,8 +550,16 @@ static void start_stream(struct server *s, const struct sockaddr_in *from, const
 	printf("viewer   : %s asks for ", viewer_name(s, name, sizeof(name)));
 	if (width) printf("%ux%u", width, height);
 	else printf("the Deck's own size");
-	printf(", %.1f Mbit/s at %u fps\n", (hello->bitrate_kbps ? hello->bitrate_kbps : 20000) / 1000.0,
-	       hello->fps ? hello->fps : 60);
+	printf(", %s at %.1f Mbit/s, %u fps\n", encoder_codec_name(hello->codec),
+	       (hello->bitrate_kbps ? hello->bitrate_kbps : default_kbps(hello->codec)) / 1000.0, hello->fps ? hello->fps : 60);
+
+	/* A file instead of a capture: nothing to open, and no pointer to draw. */
+	if (s->file_frames) {
+		if (width && (width != s->format.width || height != s->format.height))
+			printf("viewer   : the file's pictures are %ux%u and go out at that size\n", s->format.width, s->format.height);
+		s->format_changed = true;
+		return;
+	}
 
 	struct capture_config config = {
 		.target_id = 0xffffffffu, /* PW_ID_ANY: found by name */
@@ -580,6 +715,7 @@ static void on_socket(void *data, int fd, uint32_t mask)
 			uint64_t now = now_ns();
 			if (from_viewer && hello->session == s->session) {
 				s->last_hello_ns = now;
+				on_codec(s, hello->codec);
 				on_bitrate(s, hello->bitrate_kbps);
 			} else if (s->watching && now - s->last_hello_ns < VIEWER_BUSY_NS) {
 				/* Someone is watching and was heard from a moment ago. A second
@@ -725,6 +861,8 @@ int server_run(const struct server_options *options)
 		goto out;
 	}
 
+	if (options->frames_file && !load_frames_file(s)) goto out;
+
 	s->loop = pw_main_loop_new(NULL);
 	if (!s->loop) {
 		printf("cannot create a PipeWire loop\n");
@@ -738,9 +876,23 @@ int server_run(const struct server_options *options)
 	struct timespec period = { .tv_nsec = 100000000 };
 	pw_loop_update_timer(loop, timer, &period, &period, false);
 
-	printf("listening: UDP port %u, source '%s', send buffer %d kB\n", options->port, options->source, granted / 1024);
-	printf("           waiting for a viewer; nothing is captured until the first one asks,\n");
-	printf("           and from then on the capture stays attached until this program ends\n");
+	if (options->frames_file) {
+		s->file_timer = pw_loop_add_timer(loop, on_file_tick, s);
+		struct timespec frame_period = { .tv_nsec = 1000000000L / 60 };
+		pw_loop_update_timer(loop, s->file_timer, &frame_period, &frame_period, false);
+		printf("listening: UDP port %u, %d pictures of %ux%u from %s at 60 a second - no capture, nothing on screen touched\n",
+		       options->port, s->file_count, s->format.width, s->format.height, options->frames_file);
+	} else {
+		printf("listening: UDP port %u, source '%s', send buffer %d kB\n", options->port, options->source, granted / 1024);
+		printf("           waiting for a viewer; nothing is captured until the first one asks,\n");
+		printf("           and from then on the capture stays attached until this program ends\n");
+	}
+	for (uint8_t codec = 0; codec < WIRE_CODEC_COUNT; codec++) {
+		char why[256] = "";
+		bool can = encoder_available(codec, why, sizeof(why));
+		printf("           %-8s : %s%s\n", encoder_codec_name(codec), can ? "can be sent" : "not here - ", can ? "" : why);
+		if (!can) s->refused[codec] = true;
+	}
 	printf("           %s\n", options->allow_input ? "the viewer may play with its own gamepad, keyboard and mouse (--allow-input)"
 						       : "input from the viewer is not accepted");
 
@@ -750,6 +902,8 @@ int server_run(const struct server_options *options)
 	capture_close(s->leaving);
 	capture_close(s->capture);
 	free(s->kept);
+	if (s->file_timer) pw_loop_destroy_source(loop, s->file_timer);
+	free(s->file_frames);
 	pw_loop_destroy_source(loop, sigterm);
 	pw_loop_destroy_source(loop, sigint);
 	pw_loop_destroy_source(loop, timer);

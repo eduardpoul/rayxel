@@ -326,6 +326,8 @@ public sealed class AppModel
         s.OverlayNits = OverlayNits;
         s.NetAdaptive = NetDevice.Adaptive;
         s.NetBitrateKbps = NetDevice.BitrateKbps;
+        s.NetCodec = AppSettings.CodecKey(NetDevice.Codec);
+        s.NetPyroWaveKbps = NetDevice.PyroWaveKbps;
         s.VideoNits = VideoNits;
         s.ShowTelemetry = ShowTelemetry;
         s.TelemetryDetailed = TelemetryDetailed;

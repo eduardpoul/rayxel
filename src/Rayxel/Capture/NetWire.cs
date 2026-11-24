@@ -13,9 +13,29 @@ namespace Rayxel.Capture;
 /// acknowledged and nothing is resent — a frame with a packet missing is useless, and so
 /// is every frame after it until the next keyframe, so the viewer asks for one.
 /// </para>
+/// <para>
+/// The viewer also says which codec it wants. The sender uses it when its machine can
+/// encode it and HEVC otherwise, and every video datagram says which one it carries, so
+/// what arrives is decoded rather than what was asked for. Zero is HEVC, which is what
+/// the byte held before codecs were chosen.
+/// </para>
 /// </summary>
 internal static class NetWire
 {
+    /// <summary>The codec byte's values: <c>enum wire_codec</c>.</summary>
+    public enum Codec : byte
+    {
+        Hevc = 0,
+        Av1 = 1,
+        /// <summary>
+        /// Intra-only: every frame stands alone. A frame is the codec's packets one after
+        /// another, sent like any other frame and handed to the decoder whole.
+        /// </summary>
+        PyroWave = 2,
+    }
+
+    public const int CodecCount = 3;
+
     public const int DefaultPort = 45800;
 
     /// <summary>Bytes of picture per datagram; small enough that none is ever split in two.</summary>
@@ -44,14 +64,15 @@ internal static class NetWire
     public static byte TypeOf(ReadOnlySpan<byte> p) =>
         p.Length >= 4 && BinaryPrimitives.ReadUInt16LittleEndian(p) == Magic && p[2] == Version ? p[3] : (byte)0;
 
-    public static int WriteHello(Span<byte> p, uint session, int width, int height, int fps, int bitrateKbps)
+    public static int WriteHello(Span<byte> p, uint session, int width, int height, int fps, Codec codec, int bitrateKbps)
     {
         WriteHeader(p, Hello);
         BinaryPrimitives.WriteUInt32LittleEndian(p[4..], session);
         BinaryPrimitives.WriteUInt16LittleEndian(p[8..], (ushort)width);
         BinaryPrimitives.WriteUInt16LittleEndian(p[10..], (ushort)height);
         BinaryPrimitives.WriteUInt16LittleEndian(p[12..], (ushort)fps);
-        BinaryPrimitives.WriteUInt16LittleEndian(p[14..], 0);
+        p[14] = (byte)codec;
+        p[15] = 0;
         BinaryPrimitives.WriteUInt32LittleEndian(p[16..], (uint)bitrateKbps);
         return 20;
     }
@@ -141,7 +162,7 @@ internal static class NetWire
     /// <param name="EncodeUs">From then until the sender held the encoded frame.</param>
     public readonly record struct VideoHeader(
         uint Session, uint Frame, int Index, int Count, int FrameBytes,
-        int Width, int Height, bool Keyframe, long CaptureTimeNs, int EncodeUs);
+        int Width, int Height, bool Keyframe, Codec Codec, long CaptureTimeNs, int EncodeUs);
 
     public static bool TryReadVideo(ReadOnlySpan<byte> p, out VideoHeader header)
     {
@@ -156,6 +177,7 @@ internal static class NetWire
             Width: BinaryPrimitives.ReadUInt16LittleEndian(p[20..]),
             Height: BinaryPrimitives.ReadUInt16LittleEndian(p[22..]),
             Keyframe: (p[24] & 1) != 0,
+            Codec: (Codec)p[25],
             CaptureTimeNs: BinaryPrimitives.ReadInt64LittleEndian(p[28..]),
             EncodeUs: (int)BinaryPrimitives.ReadUInt32LittleEndian(p[36..]));
         return true;

@@ -118,6 +118,7 @@ static bool open_encoder(struct recorder *r)
 
 	encoder_close(r->encoder);
 	struct encoder_config config = {
+		.codec = r->options->codec,
 		.width = f->width,
 		.height = f->height,
 		.fps = r->options->fps,
@@ -129,9 +130,11 @@ static bool open_encoder(struct recorder *r)
 		.bt601 = f->color_matrix == SPA_VIDEO_COLOR_MATRIX_BT601,
 		.full_range = f->color_range == SPA_VIDEO_COLOR_RANGE_0_255,
 	};
-	r->encoder = encoder_open(&config);
+	char why[256] = "";
+	r->encoder = encoder_open(&config, why, sizeof(why));
 	r->format_changed = false;
 	if (!r->encoder) {
+		printf("encoder  : %s cannot be had: %s\n", encoder_codec_name(config.codec), why[0] ? why : "no reason given");
 		r->failed = true;
 		capture_stop(r->capture);
 		return false;
@@ -183,7 +186,7 @@ static void on_frame(void *user, const struct capture_frame *f)
 	series_add(&r->upload_ms, (double)out.upload_ns / 1e6);
 	series_add(&r->encode_ms, (double)out.encode_ns / 1e6);
 	series_add(&r->total_ms, (double)(done - f->arrival_ns) / 1e6);
-	count_nal_units(r, out.data, out.size);
+	if (r->options->codec == WIRE_CODEC_HEVC) count_nal_units(r, out.data, out.size);
 
 	if (r->file && fwrite(out.data, 1, out.size, r->file) != out.size) {
 		printf("cannot write %s: %s\n", r->options->path, strerror(errno));
@@ -255,16 +258,18 @@ int record_run(const struct record_options *o)
 	series_print("encode   ", &r.encode_ms, "ms");
 	series_print("in hand  ", &r.total_ms, "ms after the frame reached this process");
 
-	printf("stream   :");
-	bool first = true;
-	for (int type = 0; type < 64; type++) {
-		if (!r.nal_units[type]) continue;
-		const char *name = nal_name(type);
-		if (name) printf("%s %llu %s", first ? "" : ",", (unsigned long long)r.nal_units[type], name);
-		else printf("%s %llu of type %d", first ? "" : ",", (unsigned long long)r.nal_units[type], type);
-		first = false;
+	if (o->codec == WIRE_CODEC_HEVC) {
+		printf("stream   :");
+		bool first = true;
+		for (int type = 0; type < 64; type++) {
+			if (!r.nal_units[type]) continue;
+			const char *name = nal_name(type);
+			if (name) printf("%s %llu %s", first ? "" : ",", (unsigned long long)r.nal_units[type], name);
+			else printf("%s %llu of type %d", first ? "" : ",", (unsigned long long)r.nal_units[type], type);
+			first = false;
+		}
+		printf("\n");
 	}
-	printf("\n");
 	if (o->path) printf("file     : %s, %.2f MB\n", o->path, (double)r.bytes / 1048576.0);
 
 	status = r.failed ? 1 : 0;

@@ -153,6 +153,9 @@ Everything is optional; the app needs no arguments.
 | `--fsr-model=full\|lite\|rdna2` | the network of FSR 4 to run, whatever card it is |
 | `--fsr-version=<n>` | a version AMD's library offers by itself, e.g. `3.1` |
 | `--fsr-dir=<folder>` | where to look for AMD's library first |
+| `--net=<host>[:port]` | a Steam Deck running `rayxel-send --listen`, as a device |
+| `--net-codec=hevc\|av1\|pyrowave` | the codec the Deck is asked for (default HEVC; a Deck sends HEVC for one it cannot encode, and has no AV1 encoder) |
+| `--net-bitrate=auto\|<Mbit/s>` | what the Deck is asked to spend; for PyroWave, its own fixed figure (default 140) |
 | `--no-auto-hdr` | do not follow the Windows HDR state at start-up |
 | `--pacing=arrival\|refresh` | present once per captured frame (default), or on every swapchain slot |
 | `--bench[=<seconds>]` | measure for a fixed time (default 20 s), log percentiles, and exit |
@@ -177,6 +180,17 @@ To produce the single-file executable:
 ```
 dotnet publish src/Rayxel/Rayxel.csproj -c Release -r win-x64 --self-contained -o publish
 ```
+
+For a Steam Deck's PyroWave stream the codec's library is needed beside the program. It is
+built in Docker, and the build above picks it up and carries it inside when it is there:
+
+```
+cd src/pyrowave-windows
+docker build --output type=local,dest=out .
+```
+
+which leaves `src/pyrowave-windows/out/libpyrowave-shared-1.dll`. The Deck's side,
+`rayxel-send`, is built the same way from `src/rayxel-send` and ships its own copy.
 
 The runtime identifier belongs on that command line and not in the project file: as a
 project property it moves every ordinary build into a `bin\...\win-x64\` subfolder and

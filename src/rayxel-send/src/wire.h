@@ -14,7 +14,23 @@
  * no work at all. Nothing is acknowledged and nothing is resent. A frame with a packet
  * missing is useless, and so is every frame after it until the next keyframe, so the
  * viewer asks for one.
+ *
+ * The viewer also says which codec it wants. The sender uses it when this machine can
+ * encode it and HEVC otherwise, and every video datagram says which one it carries, so the
+ * viewer decodes what arrives rather than what it asked for. A byte that used to be
+ * reserved holds the codec in both directions, and zero there is HEVC: a viewer or a
+ * sender from before codecs were chosen still talks to one from after.
  */
+
+enum wire_codec {
+	WIRE_CODEC_HEVC = 0,
+	WIRE_CODEC_AV1 = 1,
+	/* Intra-only and made for local links: every frame stands alone, so nothing is ever
+	 * waited for after a loss. A frame is the codec's packets one after another, sent
+	 * like any other frame, and handed to the decoder whole. */
+	WIRE_CODEC_PYROWAVE = 2,
+	WIRE_CODEC_COUNT
+};
 
 #define WIRE_PORT 45800
 #define WIRE_MAGIC 0x5852u /* the bytes 'R' 'X' */
@@ -50,7 +66,8 @@ struct wire_hello {
 	uint32_t session;       /* picked by the viewer; a new number starts a new stream */
 	uint16_t width, height; /* size wanted; 0x0 is the Deck's own. Only ever scaled down. */
 	uint16_t fps;           /* the rate the bitrate is budgeted for */
-	uint16_t reserved;
+	uint8_t codec;          /* WIRE_CODEC_*; may change while the stream runs, like the bitrate */
+	uint8_t reserved;
 	uint32_t bitrate_kbps;  /* may change while the stream runs; the encoder follows */
 };
 
@@ -82,10 +99,12 @@ struct wire_video {
 	uint32_t session;
 	uint32_t frame;        /* counts from zero in each session */
 	uint16_t index, count; /* this packet among the frame's packets */
-	uint32_t frame_bytes;  /* the whole frame; every packet but the last is full */
+	/* The whole frame; every packet but the last is full. */
+	uint32_t frame_bytes;
 	uint16_t width, height;
 	uint8_t flags;
-	uint8_t reserved[3];
+	uint8_t codec; /* WIRE_CODEC_*: what this frame is, which may not be what was asked for */
+	uint8_t reserved[2];
 	uint64_t capture_time_ns; /* sender clock: when gamescope handed the frame over */
 	uint32_t encode_us;       /* from then until the encoded frame was in hand */
 };

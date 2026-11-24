@@ -734,6 +734,8 @@ public static class BottomBar
         if (model.Pump.Device.Bus == DeviceBus.Network)
         {
             Widgets.Divider(12f);
+            CodecSection(model);
+            Widgets.Divider(12f);
             BitrateSection(model);
         }
         Widgets.Divider(12f);
@@ -790,6 +792,34 @@ public static class BottomBar
     }
 
     /// <summary>
+    /// Which codec a Steam Deck is asked for. Under it, what stands in the way of the one
+    /// chosen, when something does: the codec's library missing here, or a Deck that sends
+    /// HEVC because it cannot encode the other.
+    /// </summary>
+    private static void CodecSection(AppModel model)
+    {
+        var f = Widgets.F;
+        Widgets.Text(f.Caption, Theme.TextSecondary, Strings.T("netCodec"));
+
+        NetWire.Codec[] codecs = [NetWire.Codec.Hevc, NetWire.Codec.Av1, NetWire.Codec.PyroWave];
+        var names = codecs.Select(NetDevice.CodecName).ToList();
+        int current = Math.Max(0, Array.IndexOf(codecs, NetDevice.Codec));
+        if (Widgets.Combo("##netcodec", names[current], names, current, out int chosen))
+        {
+            NetDevice.Codec = codecs[chosen];
+            model.Touch();
+        }
+
+        if (NetDevice.Codec == NetWire.Codec.PyroWave && PyroWaveDecoder.Problem is not null)
+            Widgets.Wrapped(f.Caption, Theme.Caution, Strings.T("netPyroMissing"));
+        else if (model.ShownNet is { CodecRefused: true, Codec: var arriving, AskedCodec: var asked } &&
+                 asked == NetDevice.CodecName(NetDevice.Codec))
+            Widgets.Wrapped(f.Caption, Theme.Caution, string.Format(Strings.T("netFallback"), arriving, asked));
+        else if (NetDevice.Codec == NetWire.Codec.PyroWave)
+            Widgets.Wrapped(f.Caption, Theme.TextTertiary, Strings.T("netPyroNote"));
+    }
+
+    /// <summary>
     /// What a Steam Deck is asked to spend: following the link, which is what to leave it
     /// at, or a fixed figure. Under it, while it follows the link, what it has come to.
     /// </summary>
@@ -797,6 +827,23 @@ public static class BottomBar
     {
         var f = Widgets.F;
         Widgets.Text(f.Caption, Theme.TextSecondary, Strings.T("netBitrate"));
+
+        // PyroWave has figures of its own, all fixed: it is for links with room to spare,
+        // and what HEVC's governor knows about a link does not carry over to it.
+        if (NetDevice.Codec == NetWire.Codec.PyroWave && PyroWaveDecoder.Problem is null)
+        {
+            var rates = NetDevice.PyroWaveChoicesKbps;
+            var labels = rates.Select(k => string.Format(Strings.T("mbitps"), Strings.Num(k / 1000.0, "0"))).ToList();
+            int at = Array.IndexOf(rates, NetDevice.PyroWaveKbps);
+            string label = at >= 0 ? labels[at]
+                : string.Format(Strings.T("mbitps"), Strings.Num(NetDevice.PyroWaveKbps / 1000.0, "0.#"));
+            if (Widgets.Combo("##pyrowavebitrate", label, labels, Math.Max(0, at), out int picked))
+            {
+                NetDevice.PyroWaveKbps = rates[picked];
+                model.Touch();
+            }
+            return;
+        }
 
         var names = new List<string> { string.Format(Strings.T("netAdaptive"), Strings.Num(NetDevice.AdaptiveCeilingKbps / 1000.0, "0")) };
         foreach (int kbps in NetDevice.FixedKbps) names.Add(string.Format(Strings.T("mbitps"), Strings.Num(kbps / 1000.0, "0")));
