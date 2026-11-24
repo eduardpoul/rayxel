@@ -63,7 +63,39 @@ public sealed class ControlServer : IDisposable
         LinkLog.Info($"control: {_path}");
         _ = Task.Run(AcceptLoop);
         _ = Task.Run(PushLoop);
+        _ = Task.Run(WatchLoop);
         return true;
+    }
+
+    /// <summary>
+    /// Puts the socket back if its file goes: a clean-up of a temporary folder takes files
+    /// it does not know are in use, and with the file gone nothing can connect any more.
+    /// </summary>
+    private async Task WatchLoop()
+    {
+        while (!_stop.IsCancellationRequested)
+        {
+            try { await Task.Delay(TimeSpan.FromSeconds(30), _stop.Token); }
+            catch (OperationCanceledException) { return; }
+            if (File.Exists(_path)) continue;
+            LinkLog.Warn($"control: {_path} has gone; listening on it afresh");
+            try
+            {
+                var listener = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+                listener.Bind(new UnixDomainSocketEndPoint(_path));
+                listener.Listen(8);
+                if (!OperatingSystem.IsWindows())
+                    File.SetUnixFileMode(_path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+                var old = _listener;
+                _listener = listener;
+                old?.Dispose();
+                _ = Task.Run(AcceptLoop);
+            }
+            catch (Exception ex) when (ex is SocketException or IOException or UnauthorizedAccessException)
+            {
+                LinkLog.Warn($"control: cannot listen on {_path} again: {ex.Message}");
+            }
+        }
     }
 
     private async Task AcceptLoop()
@@ -73,6 +105,7 @@ public sealed class ControlServer : IDisposable
             Socket client;
             try { client = await _listener!.AcceptAsync(_stop.Token); }
             catch (Exception) when (_stop.IsCancellationRequested) { return; }
+            catch (ObjectDisposedException) { return; } // replaced by WatchLoop, which started another
             catch (SocketException) { continue; }
             _ = Task.Run(() => Serve(client));
         }

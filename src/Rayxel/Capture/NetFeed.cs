@@ -188,9 +188,13 @@ internal sealed class NetFeed : IDisposable, IPictureSink
         try
         {
             socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-            // Room for several frames. While one is being decoded nobody is reading, and
-            // whatever arrives in that time has to wait here rather than be dropped.
-            socket.ReceiveBufferSize = 8 << 20;
+            // Room for a couple of seconds. While one frame is being decoded nobody is reading,
+            // and whatever arrives in that time has to wait here rather than be dropped - and
+            // at the start the wait is longer: the first picture can switch the window to HDR,
+            // which holds the renderer, and this thread with it, for a second or more. At
+            // PyroWave's 140 Mbit/s eight megabytes lasted less than half a second of that,
+            // and a hundred frames were lost at the start of every stream.
+            socket.ReceiveBufferSize = 32 << 20;
             socket.Connect(_sender);
             var link = new NetLink(socket, secure: _peer is not null);
             _link = link;

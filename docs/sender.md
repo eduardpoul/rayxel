@@ -47,7 +47,7 @@ with `--net=`.
 | | Linux | Windows |
 |---|---|---|
 | Settings, key, paired viewers | `~/.config/rayxel-send/` (`settings.json`, `identity.key` readable by the user only, `viewers.json`) | `%LOCALAPPDATA%\Rayxel\Send\` (the key under DPAPI) |
-| Control socket | `$XDG_RUNTIME_DIR/rayxel-send.sock` | `%LOCALAPPDATA%\Rayxel\Send\control.sock` |
+| Control socket | `$XDG_RUNTIME_DIR/rayxel-send.sock` | `%TEMP%ayxel-send.sock` (the user's own temporary folder) |
 
 The control socket takes one JSON object per line: `status`, `subscribe`, `set_enabled`,
 `set_discoverable`, `cancel_pairing`, `forget`, `get_settings`, `set_settings`, `stop_stream`,
@@ -104,8 +104,16 @@ key and the paired viewers - without opening a capture, so it is safe while a ga
 
 ## Status
 
-Written, compiled, not yet run: nothing here has been tried on a Deck or a PC yet. What needs
-checking first, in order: the PipeWire capture against gamescope (format negotiation and the
-pod bytes), the VA-API encoder's structure layouts against the Deck's libva, a pairing and a
-sealed session between Rayxel and the sender on the same network, then the plugin's service and
-panel.
+Tried on 24 November 2026, without any capture (pictures from a file):
+
+- On a Steam Deck (SteamOS 3.9.5, a game running): the NativeAOT build runs, `--probe` is
+  right (HEVC and PyroWave yes, AV1 no), pairing with a PIN works over Wi-Fi with discovery by
+  broadcast (a wrong PIN is refused), sessions are sealed, HEVC and PyroWave stream to Rayxel
+  with nothing lost after the start - as fast as the C sender back to back - and switching off
+  and on mid-stream behaves (the capture kept, the viewer begins again by itself).
+- On Windows 11: the sender with Media Foundation's NVENC encoders streams HEVC, AV1 and
+  PyroWave to Rayxel on the same machine with nothing lost; its window shows it live.
+
+Not yet tried: the PipeWire capture of gamescope (it needs a moment when closing a capture
+cannot take a game down), desktop duplication on Windows, input of either kind, and the Decky
+plugin itself (installed from Decky's developer mode).

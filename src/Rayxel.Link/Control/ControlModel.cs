@@ -186,8 +186,13 @@ public static class ControlPaths
 {
     public static string SocketPath()
     {
+        // On Windows in the user's own temporary folder, which only that user can reach.
+        // Beside the settings in %LOCALAPPDATA% was the first choice, but connections to a
+        // socket there were refused ("invalid argument") on Windows 11 build 26300, while
+        // the same socket in Temp took them. The server puts the file back should a
+        // clean-up take it away.
         if (OperatingSystem.IsWindows())
-            return Path.Combine(ConfigDirectory(), "control.sock");
+            return Path.Combine(Path.GetTempPath(), "rayxel-send.sock");
         string? runtime = Environment.GetEnvironmentVariable("XDG_RUNTIME_DIR");
         return string.IsNullOrEmpty(runtime)
             ? Path.Combine(Path.GetTempPath(), $"rayxel-send-{Environment.UserName}.sock")

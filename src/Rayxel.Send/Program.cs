@@ -183,7 +183,7 @@ static async Task<int> Probe(ISenderPlatform platform, string? configDirectory)
     {
         var codec = (Wire.Codec)i;
         bool can = platform.CanEncode(codec, out string why);
-        Console.WriteLine($"{Wire.CodecName(codec) + " encoder",-13}: {(can ? "yes" : "no, " + why)}");
+        Console.WriteLine($"{Wire.CodecName(codec),-13}: {(can ? "can be sent" : "no, " + why)}");
     }
 
     using (var cursor = platform.CreateCursor())
