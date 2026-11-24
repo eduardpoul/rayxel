@@ -400,8 +400,8 @@ public sealed class AppModel
     /// <summary>Headroom as displayed — from the held sample, so it does not flicker.</summary>
     public double HeadroomMs => BudgetMs - ShownCpuMs - ShownGpuMs;
 
-    /// <summary>The upscaler that has the picture: 0 = none, 1 = DLSS, 2 = FSR.</summary>
-    public int ScalerIndex => Renderer.UseFsr ? 2 : Renderer.UseDlss ? 1 : 0;
+    /// <summary>The upscaler that has the picture: 0 = none, 1 = DLSS, 2 = FSR, 3 = RTX VSR.</summary>
+    public int ScalerIndex => Renderer.UseFsr ? 2 : Renderer.UseDlss ? 1 : Renderer.UseVsr ? 3 : 0;
 
     // ── upscalers and frame generators ───────────────────────────────────────────
 
@@ -414,7 +414,9 @@ public sealed class AppModel
     // lower power state, where it settles. FSR is listed at the first of these, which is
     // what runs unless another is picked. Shown as fixed figures, because a cost that
     // moves while it is being read cannot be compared with the one beside it.
-    private const double DlssCostMs = 1.1, FsrCostMs = 1.6;
+    // RTX VSR was measured the same way before it was taken out, at 4.1 ms, its quality
+    // level being whatever the NVIDIA app is set to.
+    private const double DlssCostMs = 1.1, FsrCostMs = 1.6, VsrCostMs = 4.1;
 
     private List<Technique>? _upscalers, _frameGenerators;
 
@@ -486,6 +488,21 @@ public sealed class AppModel
             },
             // While one is being built there is nothing running to name.
             Running = () => Renderer.Fsr is { Building: false, InUse: { } running } ? (running, null) : null
+        },
+        new()
+        {
+            // The driver's own upscaler for video, on its video processor. No variants: its
+            // quality level is set in the NVIDIA app.
+            Index = 3,
+            Short = () => Strings.T("pVsr"),
+            Name = () => "RTX Video Super Resolution",
+            Description = () => Strings.T("dVsr"),
+            CostMs = VsrCostMs,
+            Unavailable = () => Renderer.Processor is not { Available: true, SuperResolutionSupported: true }
+                ? Strings.Sentence(Strings.T("naVendor"))
+                : Renderer.SourceIsHdr ? Strings.T("naVsrHdr")
+                : Renderer.FrameGenEnabled ? Strings.T("naVsrFg")
+                : null
         }
     ];
 

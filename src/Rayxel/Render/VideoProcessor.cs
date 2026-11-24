@@ -16,12 +16,18 @@ namespace Rayxel.Render;
 /// this interface is documented in practice.
 /// </para>
 /// <para>
-/// The same path carries the drivers' own upscalers, RTX Video Super Resolution among
-/// them. That used to be offered here; with DLSS and FSR it no longer is.
+/// The same path carries RTX Video Super Resolution, the driver's own upscaler for video,
+/// offered beside DLSS and FSR: switched on for the stream, the processor's scale to the
+/// size the picture is shown at is done by it. Its quality level is the one set in the
+/// NVIDIA app; nothing here chooses it.
 /// </para>
 /// </summary>
 public sealed class VideoProcessor : IDisposable
 {
+    /// <summary>NVIDIA_PPE_INTERFACE_GUID — RTX Video Super Resolution.</summary>
+    private static readonly Guid NvidiaSuperResolution =
+        new(0xd43ce1b3, 0x1f4b, 0x48ac, 0xba, 0xee, 0xc3, 0xc2, 0x53, 0x75, 0xe6, 0xf7);
+
     /// <summary>NVIDIA_TRUE_HDR_INTERFACE_GUID — RTX Video HDR (SDR to HDR inverse tone map).</summary>
     private static readonly Guid NvidiaTrueHdr =
         new(0xfdd62bb4, 0x620b, 0x4fd7, 0x9a, 0xb3, 0x1e, 0x59, 0xd0, 0xd5, 0x44, 0xb3);
@@ -42,6 +48,9 @@ public sealed class VideoProcessor : IDisposable
     /// <summary>RTX Video HDR has no Intel or AMD equivalent — nothing to offer there.</summary>
     public bool HdrFilterSupported => Vendor == GpuVendor.Nvidia;
 
+    /// <summary>RTX Video Super Resolution: NVIDIA's. Intel's counterpart was never tried on Intel hardware and is not offered.</summary>
+    public bool SuperResolutionSupported => Vendor == GpuVendor.Nvidia;
+
     private readonly ID3D11Device _device;
     private ID3D11VideoDevice? _videoDevice;
     private ID3D11VideoContext? _videoContext;
@@ -61,6 +70,8 @@ public sealed class VideoProcessor : IDisposable
     public int OutputHeight => _outHeight;
 
     public bool HdrEnabled { get; private set; }
+
+    public bool SuperResolutionEnabled { get; private set; }
 
     /// <summary>Set when the driver rejected an extension, so the UI can stop claiming it is on.</summary>
     public string? LastError { get; private set; }
@@ -183,7 +194,8 @@ public sealed class VideoProcessor : IDisposable
             Log.Warn($"colour space setup failed: {e.ResultCode}");
         }
 
-        // The extension lives on the processor, so it is applied again to a new one.
+        // The extensions live on the processor, so they are applied again to a new one.
+        if (SuperResolutionEnabled) ApplySuperResolution(true);
         if (HdrEnabled) ApplyHdr(true);
     }
 
@@ -230,6 +242,22 @@ public sealed class VideoProcessor : IDisposable
     }
 
     public bool ToggleHdr() => ApplyHdr(!HdrEnabled);
+
+    public bool ToggleSuperResolution() => ApplySuperResolution(!SuperResolutionEnabled);
+
+    private bool ApplySuperResolution(bool enable)
+    {
+        if (!SuperResolutionSupported)
+        {
+            LastError = $"no driver super resolution on {Vendor} hardware";
+            Log.Warn(LastError);
+            return false;
+        }
+        var ext = new NvidiaExtension { Version = 1, Method = 2, Enable = enable ? 1u : 0u };
+        if (!SetExtension(NvidiaSuperResolution, ext, "RTX VSR")) return false;
+        SuperResolutionEnabled = enable;
+        return true;
+    }
 
     private bool ApplyHdr(bool enable)
     {

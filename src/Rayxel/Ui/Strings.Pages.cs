@@ -12,6 +12,9 @@ public static partial class Strings
     {
         ["ru"] = new()
         {
+            ["dVsr"] = "Нейросетевое увеличение в драйвере NVIDIA; качество задаётся в приложении NVIDIA",
+            ["naVsrHdr"] = "источник в HDR, а путь драйвера только для SDR",
+            ["naVsrFg"] = "не работает вместе с генерацией кадров",
             ["txEngine"] = "Движок трансляции",
             ["teleOff"] = "Выкл",
             ["teleLine"] = "Строка",
@@ -98,6 +101,9 @@ public static partial class Strings
         },
         ["en"] = new()
         {
+            ["dVsr"] = "Neural upscaling in the NVIDIA driver; its quality is set in the NVIDIA app",
+            ["naVsrHdr"] = "the source is HDR, and the driver’s path is for SDR only",
+            ["naVsrFg"] = "does not run together with frame generation",
             ["txEngine"] = "Streaming engine",
             ["teleOff"] = "Off",
             ["teleLine"] = "Line",
@@ -184,6 +190,9 @@ public static partial class Strings
         },
         ["uk"] = new()
         {
+            ["dVsr"] = "Нейромережеве збільшення в драйвері NVIDIA; якість задається в застосунку NVIDIA",
+            ["naVsrHdr"] = "джерело в HDR, а шлях драйвера лише для SDR",
+            ["naVsrFg"] = "не працює разом із генерацією кадрів",
             ["txEngine"] = "Рушій трансляції",
             ["teleOff"] = "Вимк",
             ["teleLine"] = "Рядок",
@@ -270,6 +279,9 @@ public static partial class Strings
         },
         ["de"] = new()
         {
+            ["dVsr"] = "Neuronale Hochskalierung im NVIDIA-Treiber; die Qualität wird in der NVIDIA-App eingestellt",
+            ["naVsrHdr"] = "die Quelle ist HDR, der Weg des Treibers nur für SDR",
+            ["naVsrFg"] = "läuft nicht zusammen mit Zwischenbildern",
             ["txEngine"] = "Übertragungsdienst",
             ["teleOff"] = "Aus",
             ["teleLine"] = "Zeile",
@@ -356,6 +368,9 @@ public static partial class Strings
         },
         ["es"] = new()
         {
+            ["dVsr"] = "Escalado neuronal en el controlador de NVIDIA; su calidad se ajusta en la app de NVIDIA",
+            ["naVsrHdr"] = "la fuente es HDR y la vía del controlador es solo para SDR",
+            ["naVsrFg"] = "no funciona junto con la generación de fotogramas",
             ["txEngine"] = "Motor de transmisión",
             ["teleOff"] = "Desactivada",
             ["teleLine"] = "Línea",

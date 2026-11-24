@@ -115,13 +115,14 @@ foreach (var arg in args)
     // Pins the starting mode, as --mode=1280x720@60. A comparison needs a control, and
     // "whatever was remembered from last time" is not one.
     else if (arg.StartsWith("--mode=", StringComparison.OrdinalIgnoreCase)) forcedMode = arg[7..];
-    // Pins the scaler for the same reason: --scaler=none|dlss|fsr.
+    // Pins the scaler for the same reason: --scaler=none|dlss|fsr|vsr.
     else if (arg.StartsWith("--scaler=", StringComparison.OrdinalIgnoreCase))
         forcedScaler = arg[9..].ToLowerInvariant() switch
         {
             "none" or "off" or "0" => 0,
             "dlss" or "1" => 1,
             "fsr" or "2" => 2,
+            "vsr" or "3" => 3,
             _ => -1
         };
     // And the network DLSS is asked for: --dlss-model=k|l|m.
@@ -2080,6 +2081,7 @@ void HandleKey(int vk, IntPtr h)
         case '1': pendingScaler = 0; break;
         case '2': pendingScaler = 1; break;
         case '3': pendingScaler = 2; break;
+        case '4': pendingScaler = 3; break;
         case 'G': if (model is { Screen: Screen.App }) model.ToggleFlyout(Flyout.Settings); break;
 
         case Win32.VK_F1: OpenMenuAt(h, 24, 24); break;
@@ -2139,12 +2141,16 @@ void SelectScaler(int want)
         case 0:
             if (renderer!.DlssEnabled) ToggleDlss();
             if (renderer.FsrEnabled) ToggleFsr();
+            if (renderer.Processor is { SuperResolutionEnabled: true }) ToggleVsr();
             break;
         case 1:
             if (!renderer!.DlssEnabled) ToggleDlss();
             break;
         case 2:
             if (!renderer!.FsrEnabled) ToggleFsr();
+            break;
+        case 3:
+            if (renderer!.Processor is not { SuperResolutionEnabled: true }) ToggleVsr();
             break;
         // An index with no backend behind it changes nothing, rather than falling through
         // to some other scaler as an unknown number used to.
@@ -2176,6 +2182,7 @@ void ToggleDlss()
             return;
         }
         if (renderer.FsrEnabled) { renderer.FsrEnabled = false; Log.Info("FSR off: DLSS takes the scaling path"); }
+        if (renderer.Processor is { SuperResolutionEnabled: true } vsr) { vsr.ToggleSuperResolution(); Log.Info("RTX VSR off: DLSS takes the scaling path"); }
         if (renderer.Processor is { HdrEnabled: true } p)
         {
             renderer.SetHdrOutput(false);
@@ -2206,6 +2213,7 @@ void ToggleFsr()
             return;
         }
         if (renderer.DlssEnabled) { renderer.DlssEnabled = false; Log.Info("DLSS off: FSR takes the scaling path"); }
+        if (renderer.Processor is { SuperResolutionEnabled: true } vsr) { vsr.ToggleSuperResolution(); Log.Info("RTX VSR off: FSR takes the scaling path"); }
         if (renderer.Processor is { HdrEnabled: true } p)
         {
             renderer.SetHdrOutput(false);
@@ -2216,6 +2224,26 @@ void ToggleFsr()
 
     renderer.FsrEnabled = want;
     Log.Info($"FSR now {(want ? "ON" : "OFF")}");
+}
+
+/// <summary>
+/// RTX Video Super Resolution, on the driver's path beside RTX Video HDR, which it can run
+/// with. It stands DLSS and FSR down, which want the picture for themselves. The extension
+/// is set on a processor that exists, so a refusal - another vendor's card, a driver that
+/// does not have it - leaves the choice where it was.
+/// </summary>
+void ToggleVsr()
+{
+    if (renderer?.Processor is not { Available: true } p) { Log.Warn("RTX VSR unavailable: no D3D11 video device"); return; }
+    bool want = !p.SuperResolutionEnabled;
+    if (want && renderer.SourceIsHdr) { Log.Warn("RTX VSR stays off: the source is HDR, and the driver's path is for SDR"); return; }
+    if (!p.ToggleSuperResolution()) { Log.Warn($"RTX VSR stays {(want ? "off" : "on")}: {p.LastError}"); return; }
+    if (want)
+    {
+        if (renderer.DlssEnabled) { renderer.DlssEnabled = false; Log.Info("DLSS off: RTX VSR takes the scaling path"); }
+        if (renderer.FsrEnabled) { renderer.FsrEnabled = false; Log.Info("FSR off: RTX VSR takes the scaling path"); }
+    }
+    Log.Info($"RTX VSR now {(want ? "ON" : "OFF")}");
 }
 
 void ToggleHdr()

@@ -130,7 +130,7 @@ source on it - or a card with what those figures are made of.
 | `S` | settings beside the picture |
 | `T` | telemetry: off → one line → card |
 | `F` | window ↔ borderless full screen |
-| `1` / `2` / `3` | no upscaling / DLSS / FSR; one that cannot be used opens the settings, which say why |
+| `1` / `2` / `3` / `4` | no upscaling / DLSS / FSR / RTX VSR; one that cannot be used opens the settings, which say why |
 | `↑` / `↓`, `Enter` | in an open list: walk its rows, take the one you are on; `Esc` closes the list |
 | `H` | RTX Video HDR |
 | `F11` | window → borderless full screen → topmost full screen |
@@ -157,7 +157,7 @@ Everything is optional; the app needs no arguments.
 | `--borderless` | start in borderless full screen |
 | `--tele` | start with the telemetry up |
 | `--mode=<w>x<h>@<fps>` | start in a specific mode, e.g. `--mode=1920x1080@120` |
-| `--scaler=none\|dlss\|fsr` | start with a specific upscaler |
+| `--scaler=none\|dlss\|fsr\|vsr` | start with a specific upscaler |
 | `--dlss-model=k\|l\|m` | the network DLSS is asked for |
 | `--fsr-model=full\|lite\|rdna2` | the network of FSR 4 to run, whatever card it is |
 | `--fsr-version=<n>` | a version AMD's library offers by itself, e.g. `3.1` |

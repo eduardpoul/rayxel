@@ -17,7 +17,7 @@ public sealed class AppSettings
 {
     public string Language { get; set; } = "ru";
 
-    /// <summary>The upscaler: 0 = none, 1 = DLSS, 2 = FSR.</summary>
+    /// <summary>The upscaler: 0 = none, 1 = DLSS, 2 = FSR, 3 = RTX VSR.</summary>
     public int Upscaler { get; set; }
 
     /// <summary>Frame generation: 0 none, 1 DLSS Frame Generation.</summary>

@@ -112,21 +112,24 @@ public sealed class Renderer : IDisposable
     public uint LastSyncRefreshCount { get; private set; }
 
     /// <summary>
-    /// The driver's video processor, which is where RTX Video HDR lives: it cannot be
-    /// applied to a texture, only switched on for a video stream. Null until
-    /// <see cref="Initialize"/> runs. While that filter is on, frames go through
-    /// VideoProcessorBlt instead of our own shader.
+    /// The driver's video processor, which is where RTX Video HDR and RTX Video Super
+    /// Resolution live: neither can be applied to a texture, only switched on for a video
+    /// stream. Null until <see cref="Initialize"/> runs. While either is on, frames go
+    /// through VideoProcessorBlt instead of our own shader.
     /// </summary>
     public VideoProcessor? Processor { get; private set; }
 
     /// <summary>
-    /// True while a frame should be routed through the video processor: RTX Video HDR is
-    /// on, and the source is an SDR one for it to work on. An HDR source is never the
-    /// driver's - shown as it is, it is ours to pass through untouched, and converted to
-    /// SDR the driver's conversion clips everything above about 100 nits to white
-    /// (measured on the HDR test pattern).
+    /// True while a frame should be routed through the video processor: RTX Video HDR or
+    /// RTX VSR is on, and the source is an SDR one for them to work on. An HDR source is
+    /// never the driver's - shown as it is, it is ours to pass through untouched, and
+    /// converted to SDR the driver's conversion clips everything above about 100 nits to
+    /// white (measured on the HDR test pattern).
     /// </summary>
-    public bool UseProcessor => Processor is { Available: true, HdrEnabled: true } && !SourceIsHdr;
+    public bool UseProcessor => Processor is { Available: true } p && (p.HdrEnabled || p.SuperResolutionEnabled) && !SourceIsHdr;
+
+    /// <summary>True while RTX Video Super Resolution has the frame: the driver enlarges it on the processor's path.</summary>
+    public bool UseVsr => UseProcessor && Processor!.SuperResolutionEnabled;
 
     /// <summary>DLSS Super Resolution, fed by <see cref="Flow"/>. Null until <see cref="Initialize"/> runs.</summary>
     public DlssScaler? Dlss { get; private set; }
@@ -1540,6 +1543,7 @@ public sealed class Renderer : IDisposable
         lock (_context)
         {
             bool dlssWas = DlssEnabled, fsrWas = FsrEnabled;
+            bool vsrWas = Processor?.SuperResolutionEnabled == true;
             bool ok = true;
 
             // The one in use first, exactly as it would have been shown: a frame that has
@@ -1576,8 +1580,25 @@ public sealed class Renderer : IDisposable
 
             DlssEnabled = false;
             FsrEnabled = false;
+            if (vsrWas) Processor!.ToggleSuperResolution();
             Render();
             ok &= SaveBackBuffer(Named("none"));
+
+            // The driver's RTX VSR on the same frame. Its filter reads its own copy of the
+            // frame, which is only kept up to date while the driver's path is in use.
+            if (Processor is { Available: true, SuperResolutionSupported: true } processor
+                && _vpTexture is not null && _videoTexture is not null && !SourceIsHdr)
+            {
+                _context.CopyResource(_vpTexture, _videoTexture);
+                if (processor.ToggleSuperResolution())
+                {
+                    // More than once: whether the filter is fully in effect on the first
+                    // frame after it is switched on is the driver's business.
+                    for (int i = 0; i < 4; i++) Render();
+                    ok &= SaveBackBuffer(Named("vsr"));
+                    processor.ToggleSuperResolution();
+                }
+            }
 
             // DLSS's networks beside each other. Each is given this same frame over and
             // over, as a picture in which nothing moves, until it has settled. That shows
@@ -1603,6 +1624,7 @@ public sealed class Renderer : IDisposable
 
             DlssEnabled = dlssWas;
             FsrEnabled = fsrWas;
+            if (vsrWas && Processor is { SuperResolutionEnabled: false } p) p.ToggleSuperResolution();
             return ok;
         }
     }
