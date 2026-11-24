@@ -81,52 +81,56 @@ number it shows is one it can actually measure.
 
 ## Getting started
 
-Download `Rayxel.exe` from the [latest release](../../releases/latest) and run it. It is a
-single self-contained executable: nothing to install, no .NET runtime needed. The first
-launch takes about a third of a second longer while it unpacks.
+Build the Windows folder with `powershell -File src/Rayxel/publish.ps1` (or take it from the
+[latest release](../../releases/latest)) and run `Rayxel.exe`. Everything is in one folder:
+`Rayxel.exe`, `rayxel-send.exe` (the program that streams this computer to another) and
+NVIDIA's DLSS networks beside them. Nothing to install, no .NET runtime needed.
 
-Rayxel picks the best capture device it can find, opens the fastest uncompressed mode, and
-remembers what you chose for next time.
+Rayxel opens on **Watch**, its list of sources: capture cards, and devices on the network
+it is paired with - a Steam Deck with the Rayxel plugin, or another computer streaming from
+Rayxel. The source used last is already starting behind it; **Back to the picture** or
+**Watch** on any row opens one full screen. With only one source it goes straight to the
+picture.
 
 **Press F11.** In a normal window the Windows compositor adds a whole frame — 8.3 ms at
-120 fps, more than any upscaler here costs. Borderless full screen reaches a
-hardware overlay plane instead. The telemetry card says which one you have: `Overlay` is
-good, `Composed` costs a frame — and while it is `Composed`, the one-line readout and a red
-badge on the control bar say so too.
+120 fps, more than any upscaler here costs. Borderless full screen reaches a hardware
+overlay plane instead. While the window is composed, a red badge over the picture says so,
+and a click on it is the fix.
 
-## Controls
+## The app
 
-Move the mouse over the picture to bring up the control bar:
+A menu down the left - **Watch**, **Stream**, **Settings** - whenever no picture is up:
 
-- **Capture mode** — resolution and rate, with a dot in the wire's colour: green when the
-  picture arrives uncompressed, amber when a codec carries it. Opens the list of modes,
-  where every mode says `raw` or `zip`.
-- **Scaling** — rows of settings, as in a game's graphics menu. The technique comes from a
-  dropdown that gives each one's cost per frame: off, DLSS, FSR. Point at a row, or walk
-  the list with the arrow keys, and what that row is appears beside it; one that cannot be
-  used stays in the list, greyed, and says why there. Under it is whatever belongs to the
-  one chosen: DLSS's model, or FSR's variant - 4.1.2, 4.1.2 Lite, 3.1. There is no
-  "automatic" among them: what runs until another is picked is the newest the card runs.
-  The box shows the one that is running. When the driver's own DLSS override names the
-  model, nothing chosen in Rayxel would be obeyed, so the box is shut and the reason is
-  written under it together with where in the NVIDIA app to switch that off. What concerns
-  a row as a whole is behind the **ⓘ** beside its label.
-- **Frame generation** — the same rows for the same kind of choice: the generator, and how
-  many frames it shows for each one that arrives. **Nothing is behind it yet**: it needs
-  Direct3D 12, so the generators are greyed and it can only be off. The info marks say
-  why, and what a multiplier would come to on this display.
-- **HDR** — for an SDR source, RTX Video HDR on or off; for an HDR source, shown as it is
-  or converted to SDR. It explains itself when it is unavailable.
-- **Audio, telemetry, full screen**, and **…** for device, audio routing, HDR brightness,
-  window mode and language.
+- **Watch** - where a picture comes from. Every source says whether it can be opened; a
+  paired device can be forgotten from its row, and one that has forgotten this computer
+  offers pairing again. **Pair a device…** finds devices that are discoverable and pairs with
+  one by the six-digit code it shows.
+- **Stream** - this computer as a source for Rayxel on another. It starts `rayxel-send.exe`,
+  which has no window and goes on when Rayxel closes; the page shows its state, the code
+  while someone pairs, the paired computers, and its options (controls from the watching
+  computer, start with Windows).
+- **Settings** - everything: devices and pairing, the picture (mode, upscaler and its model,
+  frame generation, HDR and its brightness), receiving over the network (codec, bitrate),
+  sound, window, language, telemetry.
+
+Over the picture there is nothing until the mouse moves. Then two small plates come up in
+the top corners for three seconds: on the left the way back to the sources and what is on
+the screen, on the right telemetry, settings and full screen. The gear opens the settings
+in a panel beside the picture, which keeps playing and shows every change at once. When
+the driver's own DLSS override names the model, the model's box is shut and the reason is
+written under it, with where in the NVIDIA app to switch that off.
+
+Telemetry is one line of icons and figures - what arrives, **FG** and what the screen shows
+with frame generation, the delay, our own work against the frame, and the network for a
+source on it - or a card with what those figures are made of.
 
 | Key | |
 |---|---|
-| `Esc` / `Tab` | show or hide the bar; `Esc` closes whatever is open first |
-| `T` | telemetry: off → one line → full card |
-| `M` | capture-mode list |
-| `1` / `2` / `3` | no upscaling / DLSS / FSR; one that cannot be used opens the list, which says why |
-| `G` | frame generation |
+| `Esc` | from the picture to the sources, from a page back to the picture; closes whatever is open first |
+| `S` | settings beside the picture |
+| `T` | telemetry: off → one line → card |
+| `F` | window ↔ borderless full screen |
+| `1` / `2` / `3` | no upscaling / DLSS / FSR; one that cannot be used opens the settings, which say why |
 | `↑` / `↓`, `Enter` | in an open list: walk its rows, take the one you are on; `Esc` closes the list |
 | `H` | RTX Video HDR |
 | `F11` | window → borderless full screen → topmost full screen |
@@ -170,7 +174,7 @@ Everything is optional; the app needs no arguments.
 | `--console` | attach to the terminal it was started from and print the log there |
 | `--verbose` | debug-level logging |
 | `--shot=<file.png>` | render for a few seconds, save the frame as a PNG, and exit |
-| `--screen=<name>` | force a state for inspection: `splash`, `devices`, `app`, `nosignal`, `busy`, `composed`, `modes`, `scaler`, `scaler-list`, `scaler-variants`, `scaler-info`, `scaler-variant-info`, `framegen`, `framegen-list`, `framegen-info`, `more`, `quit`, `pair`, `pair-pin`, `deck-forgot`, `deck-busy`, `deck-off`, `forget` |
+| `--screen=<name>` | force a state for inspection: `splash`, `sources`, `transmit`, `settings`, `app`, `plates`, `panel`, `tele-line`, `tele-card`, `nosignal`, `busy`, `composed`, `scaler-list`, `scaler-variants`, `scaler-info`, `scaler-variant-info`, `quit`, `pair`, `pair-pin`, `deck-forgot`, `deck-busy`, `deck-off`, `forget` |
 
 `--shot` saves the back buffer rather than the screen, so it works even when the window is
 covered or on a display nobody is looking at.

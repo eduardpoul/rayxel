@@ -62,18 +62,31 @@ public static class TelemetryOverlay
 
     // ── one line ─────────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Where the readout sits: the top-left corner, and below the plate that comes up there
+    /// with the pointer, following it down and back up as it fades.
+    /// </summary>
+    private static Vector2 Corner(AppModel model) =>
+        new(Layout.S(12), Layout.S(12) + model.BarFade * (ViewerOverlay.PlateHeight + Layout.S(8)));
+
+    /// <summary>
+    /// One line of icons and figures, no words: what arrives, what the screen shows with frame
+    /// generation, the delay, our own work against the frame, and for a source on the network
+    /// what the link carries. One size of type for all of it - the figures in white, their
+    /// units and icons quieter. What is wrong appears at the end while it is.
+    /// </summary>
     private static void Line(AppModel model)
     {
         var f = Widgets.F;
         var stats = model.Shown;   // held for a second, so the trailing digits settle
-        var mode = model.Pump.CurrentMode;
         bool live = Live(model);
 
-        ImGui.SetNextWindowPos(new Vector2(Layout.S(16)), ImGuiCond.Always);
-        ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(Layout.S(12), Layout.S(7)));
-        ImGui.PushStyleVar(ImGuiStyleVar.WindowRounding, Layout.S(Theme.RadiusControl));
-        ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, new Vector2(Layout.S(16), 0));
-        ImGui.PushStyleColor(ImGuiCol.WindowBg, Theme.Alpha(Theme.Layer, 0.92f));
+        ImGui.SetNextWindowPos(Corner(model), ImGuiCond.Always);
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(Layout.S(10), Layout.S(5)));
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowRounding, Layout.S(6));
+        ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, new Vector2(Layout.S(12), 0));
+        ImGui.PushStyleColor(ImGuiCol.WindowBg, Theme.Alpha(Theme.Layer, 0.86f));
+        ImGui.PushStyleColor(ImGuiCol.Border, Theme.Alpha(Theme.TextPrimary, 0.10f));
 
         if (ImGui.Begin("##teleline", Flags))
         {
@@ -81,55 +94,88 @@ public static class TelemetryOverlay
             // down shows here first. With frame generation, what the screen shows beside it -
             // counted, not the input times the factor: a frame that came late, and the
             // generated ones dropped to catch up, are not shown and are not counted.
-            string rate = live ? Strings.Num(stats.MeasuredFps, "0.0") : Strings.Num(model.Pump.CurrentFps, "0.##");
-            Widgets.Text(f.Caption, Theme.TextPrimary, mode is null ? "—" : $"{mode.Width}×{mode.Height}");
-            Item("tIn", $"{rate} {Strings.T("hz")}", Theme.TextPrimary);
+            string rate = live ? Strings.Num(stats.MeasuredFps, "0") : Strings.Num(model.Pump.CurrentFps, "0");
+            bool first = true;
+            Stat(ref first, Icon.Input, null, rate, "", Theme.TextPrimary);
             if (model.Renderer.UseFrameGen)
-                Item("tShown", live ? $"{Strings.Num(model.PicturesFps, "0.0")} {Strings.T("hz")}" : "n/a", Theme.AccentText);
+                Stat(ref first, null, "FG", live ? Strings.Num(model.PicturesFps, "0") : "—", "", Theme.TextPrimary, gap: Layout.S(8));
 
-            // One figure for everything between the source and our present that can be
-            // measured. What it is made of is the card's business.
-            Item("tDelay", double.IsNaN(model.DelayMs) ? "n/a" : Strings.Ms(model.DelayMs, "0.0"), Theme.TextPrimary);
+            Separator(ref first);
+            Stat(ref first, Icon.Stopwatch, null, double.IsNaN(model.DelayMs) ? "—" : Strings.Num(model.DelayMs, "0"), Strings.T("ms"),
+                 Theme.TextPrimary);
 
-            // What our own work takes out of the frame, as the bottom bar used to show it:
-            // the figure, what it is out of, and a short bar of the same.
+            // What our own work takes out of the frame: the figure, what it is out of, and a
+            // short bar of the same.
             double spent = model.ShownGpuMs + model.ShownCpuMs, budget = model.BudgetMs;
             bool budgeted = live && budget > 0;
             bool over = budgeted && spent > budget;
-            Item("tWork", budgeted
-                    ? string.Format(Strings.T("budgetOf"), Strings.Num(spent, "0.0"), Strings.Num(budget, "0.0"))
-                    : "n/a",
-                 over ? Theme.Critical : Theme.TextPrimary);
+            Stat(ref first, Icon.Chip, null, budgeted ? Strings.Num(spent, "0.0") : "—",
+                 budgeted ? $"/ {Strings.Num(budget, "0.0")}" : "", over ? Theme.Critical : Theme.TextPrimary);
             if (budgeted) InlineBar(spent / budget, over);
 
-            // The two things that are only worth a place while they are wrong.
-            if (model.FramesLost > 0) Item("tDropped", model.FramesLost.ToString(), Theme.Critical);
+            if (model.ShownNet is { } net)
+                Stat(ref first, Icon.Signal, null, Strings.Num(net.Mbps, "0"), Strings.T("mbit"), Theme.TextPrimary);
 
-            var (present, colour) = Present(model);
+            // The two things that are only worth a place while they are wrong.
+            if (model.FramesLost > 0)
+                Stat(ref first, Icon.Warning, null, model.FramesLost.ToString(), "", Theme.Critical);
+            var (present, _) = Present(model);
             if (present == "Composed")
             {
                 ImGui.SameLine();
-                Widgets.Text(f.Caption, colour, present);
+                float lineH = Widgets.Measure(f.Caption, "0").Y, r = Layout.S(6);
+                var at = ImGui.GetCursorScreenPos();
+                Icons.SeverityBadge(ImGui.GetWindowDrawList(), at + new Vector2(r, lineH / 2f), r, Theme.Caution, Theme.Stage, exclamation: true);
+                ImGui.Dummy(new Vector2(r * 2, lineH));
             }
         }
         ImGui.End();
 
-        ImGui.PopStyleColor();
+        ImGui.PopStyleColor(2);
         ImGui.PopStyleVar(3);
 
-        static void Item(string labelKey, string value, Vector4 colour)
+        // An icon - or a word, for FG - a figure, and its unit, as one item of the line.
+        static void Stat(ref bool first, Icon? icon, string? tag, string value, string unit, Vector4 colour, float gap = -1)
         {
+            var f = Widgets.F;
+            if (!first) ImGui.SameLine(0, gap >= 0 ? gap : -1);
+            first = false;
+
+            float lineH = Widgets.Measure(f.Caption, "0").Y, glyph = Layout.S(12), between = Layout.S(5);
+            var tagSize = tag is null ? Vector2.Zero : Widgets.Measure(f.Caption, tag);
+            var valueSize = Widgets.Measure(f.Caption, value);
+            var unitSize = unit.Length > 0 ? Widgets.Measure(f.Caption, unit) : Vector2.Zero;
+            float lead = icon is not null ? glyph : tagSize.X;
+            float width = lead + between + valueSize.X + (unit.Length > 0 ? Layout.S(3) + unitSize.X : 0);
+
+            var at = ImGui.GetCursorScreenPos();
+            var draw = ImGui.GetWindowDrawList();
+            if (icon is { } g) Icons.Draw(draw, g, at + new Vector2(0, (lineH - glyph) / 2f), glyph, Theme.TextTertiary);
+            else if (tag is not null) Widgets.DrawText(draw, f.Caption, at, Theme.AccentText, tag);
+            float x = at.X + lead + between;
+            Widgets.DrawText(draw, f.Caption, new Vector2(x, at.Y), colour, value);
+            if (unit.Length > 0)
+                Widgets.DrawText(draw, f.Caption, new Vector2(x + valueSize.X + Layout.S(3), at.Y), Theme.TextTertiary, unit);
+            ImGui.Dummy(new Vector2(width, lineH));
+        }
+
+        // A hairline between the rates and the rest.
+        static void Separator(ref bool first)
+        {
+            if (first) return;
             ImGui.SameLine();
-            Widgets.Text(Widgets.F.Caption, Theme.TextTertiary, Strings.T(labelKey));
-            ImGui.SameLine(0, Layout.S(4));
-            Widgets.Text(Widgets.F.Caption, colour, value);
+            float lineH = Widgets.Measure(Widgets.F.Caption, "0").Y;
+            var at = ImGui.GetCursorScreenPos();
+            ImGui.GetWindowDrawList().AddLine(at + new Vector2(0, lineH * 0.15f), at + new Vector2(0, lineH * 0.85f),
+                                              Theme.U32(Theme.Alpha(Theme.TextPrimary, 0.14f)));
+            ImGui.Dummy(new Vector2(1, lineH));
         }
 
         // A track the height of a rule, sitting on the middle of the text line.
         static void InlineBar(double fraction, bool over)
         {
-            ImGui.SameLine(0, Layout.S(8));
-            float width = Layout.S(48), track = Layout.S(4);
+            ImGui.SameLine(0, Layout.S(6));
+            float width = Layout.S(28), track = Layout.S(3);
             float lineH = Widgets.Measure(Widgets.F.Caption, "0").Y;
             var pos = ImGui.GetCursorScreenPos() + new Vector2(0, MathF.Round((lineH - track) / 2f) + 1f);
             var draw = ImGui.GetWindowDrawList();
@@ -149,17 +195,19 @@ public static class TelemetryOverlay
         var mode = model.Pump.CurrentMode;
         bool live = Live(model);
 
-        ImGui.SetNextWindowPos(new Vector2(Layout.S(16)), ImGuiCond.Always);
-        ImGui.SetNextWindowSize(new Vector2(Layout.S(360), 0), ImGuiCond.Always);
-        ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(Layout.S(16)));
+        ImGui.SetNextWindowPos(Corner(model), ImGuiCond.Always);
+        ImGui.SetNextWindowSize(new Vector2(Layout.S(320), 0), ImGuiCond.Always);
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(Layout.S(14)));
         ImGui.PushStyleVar(ImGuiStyleVar.WindowRounding, Layout.S(Theme.RadiusOverlay));
         ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, new Vector2(Layout.S(8), Layout.S(4)));
-        ImGui.PushStyleColor(ImGuiCol.WindowBg, Theme.Alpha(Theme.Layer, 0.94f));
+        ImGui.PushStyleColor(ImGuiCol.WindowBg, Theme.Alpha(Theme.Layer, 0.92f));
 
         if (ImGui.Begin("##telecard", Flags))
         {
             Header(model, mode);
             Features(model, mode);
+            ImGui.Dummy(new Vector2(0, Layout.S(4)));
+            Tiles(model, stats, live);
             Widgets.Divider(10f);
             Delay(model);
             ImGui.Dummy(new Vector2(0, Layout.S(8)));
@@ -191,6 +239,47 @@ public static class TelemetryOverlay
         float w = Widgets.Measure(f.Caption, mode.WireTag).X;
         Widgets.RightAlign(w);
         Widgets.Text(f.Caption, tagColour, mode.WireTag);
+    }
+
+    /// <summary>
+    /// The four figures that matter most, each on a small tile: what arrives, what the screen
+    /// shows with frame generation, the delay, and frames lost.
+    /// </summary>
+    private static void Tiles(AppModel model, PumpStats stats, bool live)
+    {
+        var f = Widgets.F;
+        float gap = Layout.S(6), width = (ImGui.GetContentRegionAvail().X - gap) / 2f, height = Layout.S(46);
+        var origin = ImGui.GetCursorScreenPos();
+        var draw = ImGui.GetWindowDrawList();
+
+        string inRate = live ? Strings.Num(stats.MeasuredFps, "0.0") : Strings.Num(model.Pump.CurrentFps, "0.##");
+        var tiles = new (string Label, string Value, string Unit, Vector4 Colour)[]
+        {
+            (Strings.T("tileIn"), inRate, Strings.T("hz"), Theme.TextPrimary),
+            model.Renderer.UseFrameGen
+                ? ($"FG ×{model.Renderer.FrameGenFactor}", live ? Strings.Num(model.PicturesFps, "0.0") : "—", Strings.T("hz"), Theme.AccentText)
+                : ("FG", Strings.T("fgStateOff"), "", Theme.TextTertiary),
+            (Strings.T("tileDelay"), double.IsNaN(model.DelayMs) ? "—" : Strings.Num(model.DelayMs, "0.0"), Strings.T("ms"), Theme.TextPrimary),
+            (Strings.T("tileDropped"), model.FramesLost.ToString(), "", model.FramesLost > 0 ? Theme.Critical : Theme.TextPrimary),
+        };
+
+        for (int i = 0; i < tiles.Length; i++)
+        {
+            var at = origin + new Vector2(i % 2 * (width + gap), i / 2 * (height + gap));
+            draw.AddRectFilled(at, at + new Vector2(width, height), Theme.U32(Theme.Alpha(Theme.TextPrimary, 0.045f)), Layout.S(Theme.RadiusControl));
+            var (label, value, unit, colour) = tiles[i];
+            var labelSize = Widgets.Measure(f.Caption, label);
+            Widgets.DrawText(draw, f.Caption, at + new Vector2(Layout.S(10), Layout.S(5)), Theme.TextTertiary, label);
+            var valueAt = at + new Vector2(Layout.S(10), Layout.S(5) + labelSize.Y + Layout.S(1));
+            Widgets.DrawText(draw, f.BodyStrong, valueAt, colour, value);
+            if (unit.Length > 0)
+            {
+                var valueSize = Widgets.Measure(f.BodyStrong, value);
+                var unitSize = Widgets.Measure(f.Caption, unit);
+                Widgets.DrawText(draw, f.Caption, valueAt + new Vector2(valueSize.X + Layout.S(4), valueSize.Y - unitSize.Y), Theme.TextTertiary, unit);
+            }
+        }
+        ImGui.Dummy(new Vector2(width * 2 + gap, height * 2 + gap));
     }
 
     /// <summary>Only what is actually on, in one quiet line. An inventory of what is available is not news.</summary>
@@ -306,9 +395,15 @@ public static class TelemetryOverlay
         Widgets.Text(f.Caption, model.FramesLost > 0 ? Theme.Critical : Theme.TextSecondary,
             $"{Strings.T("tDropped")} {model.FramesLost}");
 
+        // How the window reaches the screen, said only when it costs something - and then in
+        // words, not in DXGI's.
         var (present, colour) = Present(model);
-        Widgets.RightAlign(Widgets.Measure(f.Caption, present).X);
-        Widgets.Text(f.Caption, colour, present);
+        if (present == "Composed")
+        {
+            ImGui.PushTextWrapPos(ImGui.GetCursorPosX() + ImGui.GetContentRegionAvail().X);
+            Widgets.Wrapped(f.Caption, colour, Strings.T("infoComposedTitle"));
+            ImGui.PopTextWrapPos();
+        }
     }
 
     /// <summary>

@@ -7,8 +7,8 @@ namespace Rayxel.Ui;
 /// <summary>Routes the frame to whichever screen the app is on.</summary>
 public static class AppShell
 {
-    /// <summary>How long the bar stays up once the pointer stops moving and nothing is open.</summary>
-    private const double PanelIdleTimeoutMs = 5000;
+    /// <summary>How long the plates over the picture stay up once the pointer stops moving and nothing is open.</summary>
+    private const double PanelIdleTimeoutMs = 3000;
 
     /// <summary>Fluent's duration for a surface fading in or out.</summary>
     private const double FadeMs = 167;
@@ -23,20 +23,22 @@ public static class AppShell
                 Screens.Splash(model);
                 break;
 
-            case Screen.Devices:
-                Screens.DevicePicker(model);
+            case Screen.Sources:
+            case Screen.Transmit:
+            case Screen.Settings:
+                Pages.Draw(model);
                 break;
 
             default:
-                // The no-signal card replaces the video, but the bar stays reachable: the
-                // usual fix is to pick a different device or mode, and taking the controls
+                // The no-signal card replaces the video, but the plates stay reachable: the
+                // usual fix is to pick a different source or mode, and taking the controls
                 // away at exactly that moment would be perverse.
                 if (model.ForceNoSignal || model.ForceBusy || model.ForceRefusal is not null
                     || model.Pump.State is CaptureState.NoSignal or CaptureState.Lost)
                     Screens.NoSignal(model);
 
                 if (model.ShowTelemetry) TelemetryOverlay.Draw(model);
-                BottomBar.Draw(model);
+                ViewerOverlay.Draw(model);
                 if (model.Pump.InputCaptured) CaptureBadge.Draw(model);
                 break;
         }
@@ -131,7 +133,7 @@ public static class AppShell
         {
             // Nothing hides while something is open or being asked: whoever opened it is
             // in the middle of using it, even if the mouse is still.
-            if (model.Flyout != Flyout.None || model.ConfirmQuit || model.Pairing is not null) model.PanelIdleMs = 0;
+            if (model.Flyout != Flyout.None || model.ConfirmQuit || model.Pairing is not null || model.KeepPlates) model.PanelIdleMs = 0;
             else if (model.ShowBar)
             {
                 model.PanelIdleMs += deltaMs;
@@ -139,8 +141,8 @@ public static class AppShell
             }
         }
 
-        // A flyout does not outlive the bar it opened from.
-        if (!model.ShowBar) model.Flyout = Flyout.None;
+        // The settings panel belongs to the picture: it does not follow the app to a page.
+        if (model.Screen != Screen.App) model.Flyout = Flyout.None;
 
         float target = model.Screen == Screen.App && model.ShowBar ? 1f : 0f;
         float step = (float)(deltaMs / FadeMs);
@@ -154,14 +156,15 @@ public static class AppShell
         model.SplashElapsedMs += deltaMs;
         if (model.SplashElapsedMs < Screens.SplashDurationMs) return;
 
-        // Straight past the picker when there is nothing to pick between: a chooser with
-        // one row is a dialog asking permission to do the only possible thing. The same
-        // goes for a device named on the command line, however many others there are.
+        // Straight to the picture when there is nothing to choose between: a page of sources
+        // with one row asks permission to do the only possible thing. The same goes for a
+        // device named on the command line, however many others there are. Otherwise the
+        // app opens where the choice is - the remembered source already starting behind it.
         int choices = model.Devices.Count(d => !d.IsVirtual);
-        model.Screen = (choices > 1 || model.NoDevice) && !model.DeviceNamed ? Screen.Devices : Screen.App;
+        model.Screen = (choices > 1 || model.NoDevice) && !model.DeviceNamed ? Screen.Sources : Screen.App;
 
-        // The bar comes up with the first picture, so the first thing anyone sees is
-        // where the controls are — and then, five seconds later, that they go away.
+        // The plates come up with the first picture, so the first thing anyone sees is
+        // where the controls are — and then, a few seconds later, that they go away.
         model.ShowBar = true;
         model.PanelIdleMs = 0;
     }

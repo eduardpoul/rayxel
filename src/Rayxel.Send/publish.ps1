@@ -1,17 +1,17 @@
-# Builds the sender and its window as one folder, to copy to the machine that sends:
+# Builds the sender alone, rayxel-send, as one file to copy to the machine that sends:
 #
 #   powershell -File src/Rayxel.Send/publish.ps1                  -> publish/sender-win-x64
 #   powershell -File src/Rayxel.Send/publish.ps1 -Target linux-x64 -> publish/sender-linux-x64
 #
-# The folder holds rayxel-send (the sender, no window), rayxel-send-ui (its window, which
-# starts the sender from beside itself when it is not running) and PyroWave's library. On a
-# Steam Deck use the Decky plugin instead (src/rayxel-decky/build.sh): Game Mode shows no
-# desktop windows.
+# It has no window. On Windows its user interface is Rayxel's Stream page, and the Windows
+# build of Rayxel (src/Rayxel/publish.ps1) already carries rayxel-send.exe beside Rayxel.exe -
+# this is for a machine that only sends. On a Steam Deck use the Decky plugin
+# (src/rayxel-decky/build.sh), which packs the Linux build.
 #
-# Windows: both self-contained, compressed single files, no .NET needed on the machine. PyroWave's DLL
-# comes from src/pyrowave-windows/out when it has been built there.
-# Linux: the sender is NativeAOT, built in a Linux container (src/Rayxel.Send/Dockerfile),
-# the window self-contained; both need Docker and nothing else here.
+# Windows: a self-contained, compressed single file, no .NET needed on the machine. PyroWave's
+# DLL comes from src/pyrowave-windows/out when it has been built there.
+# Linux: NativeAOT, built in a Linux container (src/Rayxel.Send/Dockerfile); needs Docker and
+# nothing else here.
 
 param(
     [ValidateSet('win-x64', 'linux-x64')]
@@ -38,10 +38,6 @@ else {
     }
     finally { Pop-Location }
 }
-
-dotnet publish (Join-Path $src 'Rayxel.Send.App\Rayxel.Send.App.csproj') -c Release -r $Target `
-    --self-contained -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -o $out
-if ($LASTEXITCODE -ne 0) { throw "rayxel-send-ui did not build" }
 
 # Debug symbols are embedded or not wanted in a folder meant for copying.
 Get-ChildItem $out -Filter *.pdb | Remove-Item

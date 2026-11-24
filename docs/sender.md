@@ -12,11 +12,14 @@ repository as the reference it was ported from until the C# one has been proven 
 | `src/Rayxel.Send.Linux` | The Linux half: gamescope's picture through PipeWire, HEVC and AV1 through VA-API, the pointer from gamescope's X servers, a virtual gamepad, keyboard and mouse through uinput. P/Invoke into the system's own libraries. |
 | `src/Rayxel.Send.Windows` | The Windows half: a display by DXGI desktop duplication, HEVC and AV1 through Media Foundation's hardware encoders, keyboard and mouse through SendInput. |
 | `src/Rayxel.Send` | `rayxel-send`, the sender itself: no window, runs in the background, answers its user interfaces on the control socket. One project, two builds - `net10.0` with the Linux half (published with NativeAOT as one native file), `net10.0-windows` with the Windows half. |
-| `src/Rayxel.Send.App` | `rayxel-send-ui`, the sender's window (Avalonia), for Windows and Linux desktops: state, PIN, paired computers, settings. |
-| `src/rayxel-decky` | The Decky Loader plugin: the same, in the Deck's Quick Access menu, plus the systemd user service that keeps `rayxel-send` running. |
+| `src/rayxel-decky` | The Decky Loader plugin: the sender's state, PIN, paired computers and settings in the Deck's Quick Access menu, plus the systemd user service that keeps `rayxel-send` running. |
 
-Only the user interface differs between a desktop and a Deck; both talk to the same
-`rayxel-send` over the same socket.
+On Windows the sender's user interface is Rayxel itself: its **Stream** page starts
+`rayxel-send.exe` from beside `Rayxel.exe`, shows its state and PIN, lists the paired computers
+and switches its options, all over the same control socket. There used to be a separate window
+for it (Avalonia); one program for both directions replaced it. On a Steam Deck it is the Decky
+panel. On any other Linux machine `rayxel-send` runs without a window, as a systemd user service
+or by hand; its settings are in `~/.config/rayxel-send/settings.json`.
 
 ## Protocol version 2
 

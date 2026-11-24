@@ -5,10 +5,14 @@ using Rayxel.Settings;
 
 namespace Rayxel.Ui;
 
-public enum Screen { Splash, Devices, App }
+/// <summary>
+/// Where the app is: starting, one of its three pages - where a picture comes from, this computer
+/// as a sender, the settings - or the picture itself.
+/// </summary>
+public enum Screen { Splash, Sources, Transmit, Settings, App }
 
-/// <summary>What is open above the bottom bar. One at a time, like any Fluent flyout.</summary>
-public enum Flyout { None, Mode, Scaler, FrameGen, More }
+/// <summary>What is open over the picture: nothing, or the settings panel at its right edge.</summary>
+public enum Flyout { None, Settings }
 
 /// <summary>Which of the design's four states the app is in right now.</summary>
 public enum AppStatus { Nominal, Compressed, Partial, NoSignal }
@@ -187,6 +191,9 @@ public sealed class AppModel
     /// </summary>
     public float BarFade;
 
+    /// <summary>Diagnostic only: the plates over the picture stay up, for looking at them without moving the pointer.</summary>
+    public bool KeepPlates;
+
     public Flyout Flyout;
     public float OverlayNits = 230f;
 
@@ -231,6 +238,9 @@ public sealed class AppModel
 
     /// <summary>Pairing with a Steam Deck under way: its dialog is up while this is set.</summary>
     internal PairFlow? Pairing;
+
+    /// <summary>This computer as a sender: the program that sends, watched over its control socket.</summary>
+    internal SenderLink Sender { get; } = new();
 
     /// <summary>A sender was just paired: it joins the device list and is switched to.</summary>
     internal Action<Rayxel.Link.Security.Peer> Paired = _ => { };

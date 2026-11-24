@@ -394,7 +394,7 @@ try
         menuEntries = [];
         model.Active = active;
         model.NoDevice = true;
-        model.Screen = Screen.Devices;
+        model.Screen = Screen.Sources;
     };
     model.SetWindowKind = k => pendingWindowKind = k;
     model.Quit = () => quit = true;
@@ -436,27 +436,29 @@ try
         model.Screen = forcedScreen.ToLowerInvariant() switch
         {
             "splash" => Screen.Splash,
-            "devices" => Screen.Devices,
+            "devices" or "sources" => Screen.Sources,
+            "transmit" => Screen.Transmit,
+            "settings" => Screen.Settings,
             _ => Screen.App
         };
     if (forcedScreen == "nosignal") model.ForceNoSignal = true;
     if (forcedScreen == "busy") model.ForceBusy = true;
     if (forcedScreen == "composed") model.ForceComposed = true;
     // Opens the states that need a click to reach, so they can be checked without one.
-    if (forcedScreen == "modes") model.Flyout = Flyout.Mode;
-    if (forcedScreen == "scaler") model.Flyout = Flyout.Scaler;
-    if (forcedScreen == "framegen") model.Flyout = Flyout.FrameGen;
+    // Everything that used to be a flyout of its own is the settings panel now.
+    if (forcedScreen is "panel" or "modes" or "scaler" or "framegen" or "more") model.Flyout = Flyout.Settings;
     // The same two with the list of techniques dropped open and the keys on its last row:
     // what each one costs, and what one that cannot be used says about itself, is the thing
     // to inspect.
-    if (forcedScreen == "scaler-list") { model.Flyout = Flyout.Scaler; model.OpenTechniqueAt = int.MaxValue; }
-    if (forcedScreen == "framegen-list") { model.Flyout = Flyout.FrameGen; model.OpenTechniqueAt = int.MaxValue; }
-    if (forcedScreen == "scaler-variants") { model.Flyout = Flyout.Scaler; model.OpenVariantAt = int.MaxValue; }
+    if (forcedScreen == "scaler-list") { model.Flyout = Flyout.Settings; model.OpenTechniqueAt = int.MaxValue; }
+    if (forcedScreen == "scaler-variants") { model.Flyout = Flyout.Settings; model.OpenVariantAt = int.MaxValue; }
     // And with the technique's info tooltip up, which otherwise needs a pointer over its mark.
-    if (forcedScreen == "scaler-info") { model.Flyout = Flyout.Scaler; model.ShowTechniqueInfo = true; }
-    if (forcedScreen == "scaler-variant-info") { model.Flyout = Flyout.Scaler; model.ShowVariantInfo = true; }
-    if (forcedScreen == "framegen-info") { model.Flyout = Flyout.FrameGen; model.ShowTechniqueInfo = true; }
-    if (forcedScreen == "more") model.Flyout = Flyout.More;
+    if (forcedScreen == "scaler-info") { model.Flyout = Flyout.Settings; model.ShowTechniqueInfo = true; }
+    if (forcedScreen == "scaler-variant-info") { model.Flyout = Flyout.Settings; model.ShowVariantInfo = true; }
+    // The plates over the picture, as the pointer brings them up, and kept up.
+    if (forcedScreen == "plates") model.KeepPlates = true;
+    if (forcedScreen == "tele-card") { model.ShowTelemetry = true; model.TelemetryDetailed = true; }
+    if (forcedScreen == "tele-line") { model.ShowTelemetry = true; model.TelemetryDetailed = false; }
     if (forcedScreen == "quit") model.ConfirmQuit = true;
     // Pairing, at the list of senders (a real search) or at the PIN (nothing on the network).
     if (forcedScreen == "pair") model.Pairing = new PairFlow();
@@ -1279,7 +1281,7 @@ void RunLoop()
             {
                 Log.Warn($"scaler {want} ({asked.Short()}) is not available here; nothing changed");
                 model.Flyout = Flyout.None;
-                model.ToggleFlyout(Flyout.Scaler);
+                model.ToggleFlyout(Flyout.Settings);
                 model.OpenTechniqueAt = want;
             }
             else
@@ -1490,7 +1492,7 @@ void RunLoop()
         // again every few seconds: the rows say where each one is - found, gone, switched
         // off, or no longer paired - and one switched on meanwhile turns up by itself. The one
         // being watched keeps the answer it has.
-        if (model.Screen == Screen.Devices && pickerProbe is null && Environment.TickCount64 >= pickerNextMs)
+        if (model.Screen == Screen.Sources && pickerProbe is null && Environment.TickCount64 >= pickerNextMs)
         {
             pickerNextMs = Environment.TickCount64 + 4000;
             var decks = allDevices.Where(d => NetDevice.PeerOf(d) is not null
@@ -1991,7 +1993,7 @@ IntPtr WindowProcCore(IntPtr h, uint msg, IntPtr wParam, IntPtr lParam)
         // hotkey to be known first. Windows uses the low four bits of wParam itself, hence
         // the mask.
         case Win32.WM_SYSCOMMAND when ((int)wParam & 0xFFF0) == Win32.SC_APP_SETTINGS:
-            if (model is not null) { model.Flyout = Flyout.None; model.ToggleFlyout(Flyout.More); }
+            if (model is not null) { model.Flyout = Flyout.None; model.Screen = Screen.Settings; }
             return IntPtr.Zero;
 
         // Any real movement of the pointer over the picture brings the bar up for five
@@ -2037,14 +2039,20 @@ void HandleKey(int vk, IntPtr h)
             // A dropped-open list is nested inside its flyout, so it goes first.
             if (Widgets.ComboOpen) { Widgets.CloseCombo(); break; }
             if (model is not null && model.Flyout != Flyout.None) { model.Flyout = Flyout.None; break; }
-            // From the picker it goes back to the picture, if there is one to go back to.
-            if (model is { Screen: Screen.Devices } && pump?.State == CaptureState.Streaming) { model.Screen = Screen.App; break; }
-            if (model is not null) ToggleBar(model);
+            // From a page it goes back to the picture, if there is one to go back to; from the
+            // picture to the sources, which is where the way back to anything else is.
+            if (model is { Screen: Screen.Sources or Screen.Transmit or Screen.Settings })
+            {
+                if (!model.NoDevice && pump?.State is CaptureState.Streaming or CaptureState.NoSignal) model.Screen = Screen.App;
+                break;
+            }
+            if (model is { Screen: Screen.App }) model.Screen = Screen.Sources;
             break;
 
         case 0x09: if (model is not null) ToggleBar(model); break;   // Tab
         case 'T': model?.CycleTelemetry(); break;
-        case 'M': model?.ToggleFlyout(Flyout.Mode); break;
+        case 'M': case 'S': if (model is { Screen: Screen.App }) model.ToggleFlyout(Flyout.Settings); break;
+        case 'F': if (model is not null) pendingWindowKind = model.WindowKind == WindowKind.Windowed ? WindowKind.BorderlessFullscreen : WindowKind.Windowed; break;
         case 'H': pendingHdrToggle = true; break;
         // Optical flow: off, the vectors over the picture, the vectors alone.
         case 'O':
@@ -2072,7 +2080,7 @@ void HandleKey(int vk, IntPtr h)
         case '1': pendingScaler = 0; break;
         case '2': pendingScaler = 1; break;
         case '3': pendingScaler = 2; break;
-        case 'G': model?.ToggleFlyout(Flyout.FrameGen); break;
+        case 'G': if (model is { Screen: Screen.App }) model.ToggleFlyout(Flyout.Settings); break;
 
         case Win32.VK_F1: OpenMenuAt(h, 24, 24); break;
     }

@@ -932,10 +932,11 @@ public static partial class Strings
 
     static Strings()
     {
-        foreach (var (language, entries) in Additions)
-            if (Table.TryGetValue(language, out var target))
-                foreach (var (key, value) in entries)
-                    target[key] = value;
+        foreach (var additions in new[] { Additions, PagesAdditions })
+            foreach (var (language, entries) in additions)
+                if (Table.TryGetValue(language, out var target))
+                    foreach (var (key, value) in entries)
+                        target[key] = value;
     }
 
     public static readonly string[] Languages = ["ru", "en", "uk", "de", "es"];
@@ -962,7 +963,10 @@ public static partial class Strings
     /// than an empty string — an untranslated label is a visible bug, a blank one is not.
     /// </summary>
     public static string T(string key) =>
-        Table.TryGetValue(Current, out var lang) && lang.TryGetValue(key, out var value) ? value : key;
+        Table.TryGetValue(Current, out var lang) && lang.TryGetValue(key, out var value) ? value
+        // A key a translation lacks says it in English before it says it as a key.
+        : Table.TryGetValue("en", out var en) && en.TryGetValue(key, out var english) ? english
+        : key;
 
     /// <summary>
     /// "241 режим", "86 режимов", "54 режима".

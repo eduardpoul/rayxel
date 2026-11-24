@@ -6,7 +6,8 @@ namespace Rayxel.Ui;
 public enum Icon
 {
     ChevronDown, ChevronUp, Close, More, Volume, Muted, Pulse,
-    FullScreen, BackToWindow, Scale, Frames, Info, Warning, Camera, MonitorOff, Lock
+    FullScreen, BackToWindow, Scale, Frames, Info, Warning, Camera, MonitorOff, Lock,
+    Back, Gear, Broadcast, Monitor, Handheld, Plus, Input, Stopwatch, Chip, Signal
 }
 
 /// <summary>
@@ -125,6 +126,76 @@ public static class Icons
                 p.ArcTo(8, 5, 2.5f, MathF.PI, MathF.PI * 2f);
                 p.To(10.5f, 7);
                 p.Stroke();
+                break;
+
+            case Icon.Back:
+                p.Line3(10, 3, 5, 8, 10, 13);
+                break;
+
+            // A ring with eight short spokes: the gear Fluent draws for settings, in strokes.
+            case Icon.Gear:
+                p.Arc(8, 8, 2.4f, 0f, MathF.PI * 2f);
+                p.Line(8, 1.5f, 8, 3.5f); p.Line(8, 12.5f, 8, 14.5f);
+                p.Line(1.5f, 8, 3.5f, 8); p.Line(12.5f, 8, 14.5f, 8);
+                p.Line(3.4f, 3.4f, 4.8f, 4.8f); p.Line(11.2f, 11.2f, 12.6f, 12.6f);
+                p.Line(3.4f, 12.6f, 4.8f, 11.2f); p.Line(11.2f, 4.8f, 12.6f, 3.4f);
+                break;
+
+            // A point with waves going out on both sides: this computer sending.
+            case Icon.Broadcast:
+                p.Dot(8, 8.5f, 1.4f);
+                p.Arc(8, 8.5f, 3.6f, MathF.PI * 0.75f, MathF.PI * 1.25f);
+                p.Arc(8, 8.5f, 3.6f, -MathF.PI * 0.25f, MathF.PI * 0.25f);
+                p.Arc(8, 8.5f, 6.4f, MathF.PI * 0.75f, MathF.PI * 1.25f);
+                p.Arc(8, 8.5f, 6.4f, -MathF.PI * 0.25f, MathF.PI * 0.25f);
+                break;
+
+            case Icon.Monitor:
+                p.Rect(1.5f, 2.5f, 14.5f, 11.5f, 1.5f);
+                p.Line(5.5f, 14, 10.5f, 14);
+                p.Line(8, 11.5f, 8, 14);
+                break;
+
+            // A handheld: a wide body, the screen in the middle, a stick on each side.
+            case Icon.Handheld:
+                p.Rect(1, 4.5f, 15, 11.5f, 2.5f);
+                p.Rect(5.5f, 6, 10.5f, 10, 0.5f);
+                p.Dot(3.2f, 8, 0.8f);
+                p.Dot(12.8f, 8, 0.8f);
+                break;
+
+            case Icon.Plus:
+                p.Line(8, 3, 8, 13);
+                p.Line(3, 8, 13, 8);
+                break;
+
+            // What arrives: an arrow into a bar.
+            case Icon.Input:
+                p.Line(1.5f, 8, 9.5f, 8);
+                p.Line3(6.5f, 4.5f, 10, 8, 6.5f, 11.5f);
+                p.Line(13.5f, 2.5f, 13.5f, 13.5f);
+                break;
+
+            case Icon.Stopwatch:
+                p.Arc(8, 9, 5.5f, 0f, MathF.PI * 2f);
+                p.Line(8, 9, 8, 6.2f);
+                p.Line(6.2f, 1.8f, 9.8f, 1.8f);
+                break;
+
+            case Icon.Chip:
+                p.Rect(4, 4, 12, 12, 1.5f);
+                p.Line(6, 1.5f, 6, 4); p.Line(10, 1.5f, 10, 4);
+                p.Line(6, 12, 6, 14.5f); p.Line(10, 12, 10, 14.5f);
+                p.Line(1.5f, 6, 4, 6); p.Line(1.5f, 10, 4, 10);
+                p.Line(12, 6, 14.5f, 6); p.Line(12, 10, 14.5f, 10);
+                break;
+
+            // Four bars rising: the network.
+            case Icon.Signal:
+                p.Line(2.5f, 14, 2.5f, 11);
+                p.Line(6, 14, 6, 8.5f);
+                p.Line(9.5f, 14, 9.5f, 5.5f);
+                p.Line(13, 14, 13, 2.5f);
                 break;
         }
     }

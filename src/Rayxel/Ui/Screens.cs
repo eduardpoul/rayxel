@@ -87,136 +87,6 @@ public static class Screens
         EndCentred();
     }
 
-    public static void DevicePicker(AppModel model)
-    {
-        var f = Widgets.F;
-        Stage(model);
-
-        float width = Math.Min(Layout.S(480), model.Renderer.Width * 0.92f);
-        if (BeginCentred(model, "##devices", width, new Vector2(Layout.S(16), Layout.S(20)), Theme.Card))
-        {
-            ImGui.Indent(Layout.S(8));
-            Widgets.Text(f.Subtitle, Theme.TextPrimary, Strings.T("chooseDevice"));
-            ImGui.PushTextWrapPos(Widgets.ContentRight() - Layout.S(8));
-            Widgets.Text(f.Caption, Theme.TextTertiary, Strings.T("chooseHint"));
-            ImGui.PopTextWrapPos();
-            ImGui.Unindent(Layout.S(8));
-            ImGui.Dummy(new Vector2(0, Layout.S(8)));
-
-            ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, new Vector2(0, Layout.S(2)));
-            foreach (var device in model.Devices) DeviceRow(model, device);
-            ImGui.PopStyleVar();
-
-            ImGui.Dummy(new Vector2(0, Layout.S(8)));
-            ImGui.Indent(Layout.S(8));
-            var pairLabel = Strings.T("pairDevice");
-            if (Widgets.Button(pairLabel, new Vector2(Widgets.Measure(f.Body, pairLabel).X + Layout.S(32), Layout.S(32))))
-                model.Pairing ??= new PairFlow();
-            ImGui.Unindent(Layout.S(8));
-        }
-        EndCentred();
-    }
-
-    private static void DeviceRow(AppModel model, CaptureDeviceInfo device)
-    {
-        var f = Widgets.F;
-        model.Probed.TryGetValue(device.SymbolicLink, out var probe);
-        var peer = NetDevice.PeerOf(device);
-        // A paired Deck that has forgotten this computer: the row opens pairing again, which
-        // is the one thing that brings its picture back.
-        bool forgot = NetDevice.Forgot(device);
-
-        // A device never opened is shown as exactly that. Busy cannot be known without
-        // trying, so the row does not claim to know.
-        var (status, colour, detail, selectable) = probe switch
-        {
-            { Availability: DeviceAvailability.Ready } p =>
-                (Strings.T("dAvail"), Theme.Success, Details(p), true),
-            { Availability: DeviceAvailability.Busy } =>
-                (Strings.T("dBusyNow"), Theme.Caution, "", false),
-            { Availability: DeviceAvailability.Unusable } p =>
-                (Strings.T("dOffline"), Theme.Caution, Strings.Modes(p.Modes.Count), false),
-            { } p => (p.Problem ?? Strings.T("dOffline"), Theme.Caution, "", forgot),
-            _ => (NotChecked(device), Theme.TextTertiary, "", true)
-        };
-
-        bool current = model.Pump.Device.Is(device) && model.Pump.State == CaptureState.Streaming;
-        if (Widgets.ListRow($"##dev{device.Ordinal}", Layout.S(60), current, selectable, out var min, out var max, overlap: peer is not null))
-        {
-            if (forgot) model.Pairing ??= new PairFlow();
-            else
-            {
-                model.SwitchDevice(device);
-                model.Screen = Screen.App;
-            }
-        }
-
-        var draw = ImGui.GetWindowDrawList();
-        float inset = Layout.S(12), icon = Layout.S(20);
-        float height = max.Y - min.Y;
-        Icons.Draw(draw, device.IsVirtual ? Icon.MonitorOff : Icon.Camera,
-                   new Vector2(min.X + inset, min.Y + (height - icon) / 2f), icon,
-                   selectable ? Theme.TextSecondary : Theme.TextDisabled);
-
-        string title = NetDevice.DisplayName(device, model.Devices);
-        float x = min.X + inset + icon + Layout.S(12);
-        var name = Widgets.Measure(f.Body, title);
-        var line = Widgets.Measure(f.Caption, status);
-        float top = min.Y + (height - name.Y - line.Y - Layout.S(1)) / 2f;
-
-        Widgets.DrawText(draw, f.Body, new Vector2(x, top), selectable ? Theme.TextPrimary : Theme.TextDisabled, title);
-        Widgets.DrawText(draw, f.Caption, new Vector2(x, top + name.Y + Layout.S(1)), colour, status);
-        if (detail.Length > 0)
-            Widgets.DrawText(draw, f.Caption, new Vector2(x + line.X, top + name.Y + Layout.S(1)), Theme.TextTertiary, " · " + detail);
-
-        // A paired Deck can be forgotten from its row, whatever state it is in: one that is
-        // gone for good would otherwise stay in the list, since only the one being watched
-        // could be forgotten from the menu.
-        if (peer is not null)
-        {
-            string label = Strings.T("forgetShort");
-            var text = Widgets.Measure(f.Body, label);
-            var size = new Vector2(text.X + Layout.S(24), Layout.S(32));
-            var after = ImGui.GetCursorScreenPos();
-            ImGui.SetCursorScreenPos(new Vector2(max.X - Layout.S(8) - size.X, min.Y + (height - size.Y) / 2f));
-            if (Widgets.SubtleButton($"##forget{device.Ordinal}", size, false, out var at))
-                model.ConfirmForget = peer;
-            Widgets.DrawText(draw, f.Body, at + (size - text) / 2f, Theme.TextSecondary, label);
-            ImGui.SetCursorScreenPos(after);
-        }
-    }
-
-    private static string Details(DeviceProbe p)
-    {
-        var modes = Strings.Modes(p.Modes.Count);
-        return !p.Device.IsVirtual && p.Link.Known ? $"{modes} · {p.Link.LinkClass}" : modes;
-    }
-
-    private static string NotChecked(CaptureDeviceInfo d)
-    {
-        // A paired Deck is being looked for while the picker is up; its answer replaces this.
-        if (NetDevice.PeerOf(d) is not null) return Strings.T("deckLooking");
-
-        if (d.IsVirtual)
-            return Strings.Current switch
-            {
-                "ru" => "программная камера, без провода",
-                "uk" => "програмна камера, без дроту",
-                "de" => "Software-Kamera, ohne Leitung",
-                "es" => "cámara por software, sin cable",
-                _ => "software camera, no wire"
-            };
-
-        return Strings.Current switch
-        {
-            "ru" => "не проверено — занятость видна только при открытии",
-            "uk" => "не перевірено — зайнятість видно лише при відкритті",
-            "de" => "nicht geprüft — Belegung zeigt sich erst beim Öffnen",
-            "es" => "sin comprobar — la ocupación solo se ve al abrir",
-            _ => "not checked — busy only shows on opening"
-        };
-    }
-
     /// <summary>
     /// The card is there, the picture is not. Three causes, three cards: the source has
     /// gone quiet (it comes back by itself), another application holds the card (the user
@@ -285,7 +155,7 @@ public static class Screens
                 model.SwitchDevice(active.Device);
             ImGui.SameLine(0, gap);
             if (Widgets.Button(Strings.T("otherDevice"), size))
-                model.Screen = Screen.Devices;
+                model.Screen = Screen.Sources;
         }
         EndCentred();
     }
@@ -346,7 +216,7 @@ public static class Screens
                 model.SwitchDevice(active.Device);
             ImGui.SameLine(0, gap);
             if (Widgets.Button(Strings.T("otherDevice"), size))
-                model.Screen = Screen.Devices;
+                model.Screen = Screen.Sources;
         }
         EndCentred();
     }
