@@ -52,12 +52,12 @@ public enum DlssModel
 public sealed unsafe class DlssScaler : IDisposable
 {
     // NVSDK_NGX_Result. Anything else is 0xBAD00000 with a reason in the low bits.
-    private const uint Success = 1;
+    internal const uint Success = 1;
 
     // From nvsdk_ngx_defs.h.
     private const int FeatureSuperSampling = 1;
-    private const int EngineCustom = 0;
-    private const int SdkVersion = 0x15;
+    internal const int EngineCustom = 0;
+    internal const int SdkVersion = 0x15;
 
     // "MVLowRes": the vectors are as large as the picture going in, not the one coming out.
     private const int FlagMotionAtInputSize = 1 << 1;
@@ -73,12 +73,12 @@ public sealed unsafe class DlssScaler : IDisposable
 
     // What NGX knows this program as. NVIDIA issues ids to games; anything else passes one
     // of its own making, which only has to have the shape of a GUID.
-    private static ReadOnlySpan<byte> ProjectId => "dd901ba8-7697-49d9-ad14-59d1a44a7647"u8;
-    private static ReadOnlySpan<byte> EngineVersion => "1.0"u8;
+    internal static ReadOnlySpan<byte> ProjectId => "dd901ba8-7697-49d9-ad14-59d1a44a7647"u8;
+    internal static ReadOnlySpan<byte> EngineVersion => "1.0"u8;
 
     /// <summary>NVSDK_NGX_FeatureCommonInfo: where else to look for nvngx_dlss.dll, and where to send the log.</summary>
     [StructLayout(LayoutKind.Sequential)]
-    private struct CommonInfo
+    internal struct CommonInfo
     {
         public char** Paths;
         public uint PathCount;
@@ -220,7 +220,7 @@ public sealed unsafe class DlssScaler : IDisposable
     }
 
     /// <summary>Where NGX may keep what it writes. It refuses to start without a folder it can write to.</summary>
-    private static string DataPath => Path.Combine(Settings.AppSettings.Directory, "ngx");
+    internal static string DataPath => Path.Combine(Settings.AppSettings.Directory, "ngx");
 
     /// <summary>
     /// Loads NGX and asks it whether DLSS can run on this card and driver. Cheap to call
@@ -342,7 +342,7 @@ public sealed unsafe class DlssScaler : IDisposable
     /// 32-bit integers both travel.
     /// </para>
     /// </summary>
-    private static uint CallFromModule(void* function, ReadOnlySpan<nint> arguments)
+    internal static uint CallFromModule(void* function, ReadOnlySpan<nint> arguments)
     {
         const ushort Int64 = 20, UInt32 = 19;   // VT_I8, VT_UI4
         const int Cdecl = 1;                    // CC_CDECL
@@ -695,7 +695,7 @@ public sealed unsafe class DlssScaler : IDisposable
     }
 
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
-    private static void OnLog(byte* message, int level, int source)
+    internal static void OnLog(byte* message, int level, int source)
     {
         // Called from any of NGX's threads. Nothing may escape back into it.
         try
@@ -709,7 +709,7 @@ public sealed unsafe class DlssScaler : IDisposable
         catch { }
     }
 
-    private static string Describe(uint result) => result switch
+    internal static string Describe(uint result) => result switch
     {
         Success => "success",
         0xBAD00001 => "not supported on this system",
@@ -744,9 +744,10 @@ public sealed unsafe class DlssScaler : IDisposable
     /// other side reads up to.
     /// </para>
     /// </summary>
-    private readonly struct Parameters(IntPtr self)
+    internal readonly struct Parameters(IntPtr self)
     {
-        private const int SetResourceSlot = 2, SetIntSlot = 3, SetUIntSlot = 4, SetFloatSlot = 6, GetIntSlot = 11;
+        private const int SetPointerSlot = 0, SetResource12Slot = 1, SetResourceSlot = 2, SetIntSlot = 3, SetUIntSlot = 4,
+                          SetFloatSlot = 6, GetIntSlot = 11, GetUIntSlot = 12;
 
         private void* Slot(int index) => (*(void***)self)[index];
 
@@ -773,6 +774,24 @@ public sealed unsafe class DlssScaler : IDisposable
             fixed (byte* n = name)
                 ((delegate* unmanaged[Cdecl]<IntPtr, byte*, IntPtr, void>)Slot(SetResourceSlot))(
                     self, n, value?.NativePointer ?? IntPtr.Zero);
+        }
+
+        /// <summary>An ID3D12Resource, or a pointer to plain data such as a matrix, given by address.</summary>
+        public void Set(ReadOnlySpan<byte> name, IntPtr value, bool d3d12Resource)
+        {
+            fixed (byte* n = name)
+                ((delegate* unmanaged[Cdecl]<IntPtr, byte*, IntPtr, void>)Slot(d3d12Resource ? SetResource12Slot : SetPointerSlot))(
+                    self, n, value);
+        }
+
+        public bool Get(ReadOnlySpan<byte> name, out uint value)
+        {
+            uint read = 0;
+            uint result;
+            fixed (byte* n = name)
+                result = ((delegate* unmanaged[Cdecl]<IntPtr, byte*, uint*, uint>)Slot(GetUIntSlot))(self, n, &read);
+            value = read;
+            return result == Success;
         }
 
         public bool Get(ReadOnlySpan<byte> name, out int value)

@@ -317,6 +317,8 @@ public sealed class AppModel
     {
         s.Language = Strings.Current;
         s.Upscaler = ScalerIndex;
+        s.FrameGen = FrameGenIndex;
+        s.FrameMultiplier = FrameMultiplierId;
         // The switch has two meanings and each keeps its own setting.
         if (!Renderer.SourceIsHdr) s.Hdr = HdrOn;
         s.HdrSourceAsIs = Renderer.HdrAsIs;
@@ -499,10 +501,9 @@ public sealed class AppModel
     public bool ShowVariantInfo;
 
     /// <summary>
-    /// Frame generation, built exactly as the upscalers are — and with nothing behind it
-    /// yet. Rayxel presents through Direct3D 11 and every frame generator needs Direct3D
-    /// 12, so all of them say so and "off" is the only one that can be chosen. A backend
-    /// fills these in the same way as an upscaler; the multipliers are its variants.
+    /// Frame generation, built as the upscalers are: the multipliers are its variants. DLSS
+    /// Frame Generation runs on a Direct3D 12 device beside the program's own; FSR's has
+    /// nothing behind it yet and says so.
     /// </summary>
     public IReadOnlyList<Technique> FrameGenerators => _frameGenerators ??=
     [
@@ -527,11 +528,17 @@ public sealed class AppModel
             Short = () => "DLSS FG",
             Name = () => "DLSS Frame Generation",
             Description = () => Strings.T("dFgDlss"),
-            Unavailable = () => Strings.T("naFrameGen"),
+            CostMs = DlssFgCostMs,
+            Unavailable = DlssFrameGenUnavailable,
             VariantsLabel = "tvFrames",
             Variants = FrameMultipliers,
             Variant = () => FrameMultiplierId,
-            VariantInfo = FrameGenFacts
+            VariantInfo = FrameGenFacts,
+            SetVariant = id => { FrameMultiplierId = id; Touch(); },
+            // "auto" comes to a number of its own, which the box shows while it runs.
+            Running = () => Renderer.UseFrameGen && FrameMultiplierId == "auto"
+                ? (FrameMultipliers.First(v => v.Id == FrameGenOutput("auto").Factor.ToString()).Text, null)
+                : null
         },
         new()
         {
@@ -554,15 +561,36 @@ public sealed class AppModel
     private static readonly TechniqueVariant[] FrameMultipliers =
         [new("auto", "", "dlssAuto"), new("2", "×2"), new("3", "×3"), new("4", "×4")];
 
-    /// <summary>Always off until there is a generator to turn on.</summary>
-    public int FrameGenIndex => 0;
+    /// <summary>The generator asked for: 0 none, 1 DLSS Frame Generation.</summary>
+    public int FrameGenIndex => Renderer.FrameGenEnabled ? 1 : 0;
+
+    // What generating the frames between two real ones costs the GPU, measured with --bench
+    // on an RTX 5080 behind DLSS taking 1280x800 to 2304x1440: see DlssFrameGen.
+    private const double DlssFgCostMs = 1.9;
+
+    /// <summary>
+    /// Why DLSS Frame Generation cannot be chosen, as a sentence; null when it can. What the
+    /// generator says of itself is in English, for the log; what a user can act on - the
+    /// card, the DLL beside the program, an HDR path it cannot join - is said in their language.
+    /// </summary>
+    private string? DlssFrameGenUnavailable()
+    {
+        if (Renderer.FrameGen is not { } fg) return Strings.Sentence(Strings.T("naVendor"));
+        if (fg.Unsupported is { } why)
+            return why.Contains("NVIDIA") ? Strings.Sentence(Strings.T("naVendor"))
+                : why.Contains("nvngx_dlssg") ? Strings.T("fgNoDll")
+                : why;
+        if (Renderer.PassingHdrThrough) return Strings.T("fgNoHdrAsIs");
+        if (Renderer.UseProcessor) return Strings.T("fgNoRtxHdr");
+        return fg.LastError;
+    }
 
     public Technique FrameGenerator => FrameGenerators[FrameGenIndex];
 
     /// <summary>Asks for a generator by its index. Nothing listens until one exists.</summary>
     public Action<int> SelectFrameGen = _ => { };
 
-    /// <summary>The multiplier a generator would start with. Nothing reads it yet but the flyout.</summary>
+    /// <summary>The multiplier asked for: "auto", "2", "3" or "4". See <see cref="FrameGenOutput"/>.</summary>
     public string FrameMultiplierId = "2";
 
     /// <summary>
@@ -614,7 +642,7 @@ public sealed class AppModel
 
     // ── delay ────────────────────────────────────────────────────────────────────
 
-    private readonly DelayPart[] _delayParts = new DelayPart[4];
+    private readonly DelayPart[] _delayParts = new DelayPart[5];
     private int _delayPartCount;
 
     /// <summary>
@@ -653,6 +681,9 @@ public sealed class AppModel
             _delayParts[_delayPartCount++] = new("tCapture", Shown.PipelineDelayMs);
         }
         _delayParts[_delayPartCount++] = new("tWork", ours);
+        // Generated frames are shown ahead of the real one, which waits for them.
+        if (Renderer.UseFrameGen && Renderer.FrameGenDelayMs > 0)
+            _delayParts[_delayPartCount++] = new("tFg", Renderer.FrameGenDelayMs);
 
         double total = 0;
         foreach (var part in DelayParts) total += part.Ms;
