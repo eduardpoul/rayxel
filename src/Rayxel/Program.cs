@@ -32,6 +32,8 @@ string? netAddress = null;
 FlowView startFlow = FlowView.Off;
 string? shotPath = null;
 bool shotCompares = false;
+int clipFrames = 0;
+DateTime clipStarted = default;
 string? frameGenProbe = null;
 int frameGenProbeFactor = 2;
 // Frame generation as asked for on the command line: null leaves what was remembered.
@@ -74,6 +76,13 @@ foreach (var arg in args)
     // already running - the other is then run beside it - and --no-auto-hdr, so that they
     // are all the same kind of picture.
     else if (arg is "--compare") shotCompares = true;
+    // With --shot: the next frames that arrive kept as a clip, 120 of them or as many as
+    // asked, and then put through every way in turn - none, RTX VSR, DLSS K, L and M, FSR -
+    // each picture written to NAME-clip/WAY/0000.png and on. For how they cope with
+    // movement, which one frame held still cannot show. --clip or --clip=FRAMES.
+    else if (arg is "--clip") clipFrames = 120;
+    else if (arg.StartsWith("--clip=", StringComparison.OrdinalIgnoreCase))
+        clipFrames = int.TryParse(arg[7..], out int clipAsked) ? Math.Clamp(clipAsked, 2, 600) : 120;
     // Puts real frames through DLSS Frame Generation and writes one generated frame out
     // between the two it came from: --fg-probe=FILE.png. See FrameGenProbe.
     else if (arg.StartsWith("--fg-probe=", StringComparison.OrdinalIgnoreCase)) frameGenProbe = arg[11..];
@@ -421,7 +430,8 @@ try
             ?? (fsrVersionForced ? FsrModel.Library
                 : Enum.IsDefined((FsrModel)settings.FsrModel) ? (FsrModel)settings.FsrModel : FsrModel.Library);
     }
-    renderer.CompareScalers = shotCompares;
+    // A clip wants FSR built and ready beside DLSS by the time it is taken.
+    renderer.CompareScalers = shotCompares || clipFrames > 0;
 
     // Audio endpoints are listed once here and refreshed when the user opens a combo, so a
     // headset plugged in mid-session shows up without polling WASAPI every frame.
@@ -1537,7 +1547,35 @@ void RunLoop()
         // The probe ends the run once it has written its frames, or found it cannot.
         if (renderer.FrameGenProbe is { Done: true } && shotPath is null) quit = true;
 
-        if (shotPath is not null && presented > 400)
+        // A clip: kept from the frames as they come, once FSR is not still being built,
+        // then put through every way. A source that stops sending - a still menu over the
+        // network sends nothing - gives what it has after half a minute.
+        if (shotPath is not null && clipFrames > 0 && presented > 400)
+        {
+            var (taken, wanted) = renderer.ClipProgress;
+            if (clipStarted == default)
+            {
+                if (renderer.Fsr is not { Possible: true, Building: true })
+                {
+                    if (renderer.StartClip(clipFrames)) clipStarted = DateTime.UtcNow;
+                    else { Log.Error("clip: could not be started"); shotPath = null; quit = true; }
+                }
+            }
+            else if (wanted == 0)
+            {
+                Log.Error("clip: dropped - the source changed size while it was being kept");
+                shotPath = null;
+                quit = true;
+            }
+            else if (taken >= wanted || (DateTime.UtcNow - clipStarted).TotalSeconds > 30)
+            {
+                if (taken < wanted) Log.Warn($"clip: only {taken} of {wanted} frames came in 30 s");
+                renderer.SaveClip(shotPath);
+                shotPath = null;
+                quit = true;
+            }
+        }
+        else if (shotPath is not null && presented > 400)
         {
             if (shotCompares) renderer.SaveComparison(shotPath);
             else renderer.SaveBackBuffer(shotPath);

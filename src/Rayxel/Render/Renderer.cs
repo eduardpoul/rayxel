@@ -1074,6 +1074,7 @@ public sealed class Renderer : IDisposable
             _context.CopySubresourceRegion(_videoTexture, 0, 0, 0, 0, source, (uint)subresource);
             if (UseProcessor && _vpTexture is not null)
                 _context.CopySubresourceRegion(_vpTexture, 0, 0, 0, 0, source, (uint)subresource);
+            KeepForClip();
         }
     }
 
@@ -1098,6 +1099,7 @@ public sealed class Renderer : IDisposable
             _context.CopySubresourceRegion(_videoTexture, 0, 0, 0, 0, source, (uint)subresource, picture);
             if (UseProcessor && _vpTexture is not null)
                 _context.CopySubresourceRegion(_vpTexture, 0, 0, 0, 0, source, (uint)subresource, picture);
+            KeepForClip();
 
             if (!mark) return false;
             _uploadMark ??= _device.CreateQuery(new QueryDescription(QueryType.Event));
@@ -1643,6 +1645,230 @@ public sealed class Renderer : IDisposable
         }
     }
 
+    // The frames a clip is made of, as they arrived, and how many have been kept so far.
+    private ID3D11Texture2D[]? _clip;
+    private volatile int _clipCount;
+
+    /// <summary>
+    /// Frames kept for <see cref="SaveClip"/> so far, and how many it is to hold. Wanted
+    /// falls back to 0 when the clip had to be dropped: the source changed size on the way.
+    /// </summary>
+    public (int Taken, int Wanted) ClipProgress
+    {
+        get { lock (_context) return (_clipCount, _clip?.Length ?? 0); }
+    }
+
+    /// <summary>
+    /// Starts keeping the next <paramref name="frames"/> frames as they arrive, on the card,
+    /// for <see cref="SaveClip"/>. False when there is no picture yet to size them by, or
+    /// they do not fit.
+    /// </summary>
+    public bool StartClip(int frames)
+    {
+        lock (_context)
+        {
+            if (_videoTexture is null || _videoWidth <= 0 || TestPattern) return false;
+            DropClip();
+            var desc = _videoTexture.Description;
+            var clip = new ID3D11Texture2D[frames];
+            try
+            {
+                for (int i = 0; i < frames; i++) clip[i] = _device.CreateTexture2D(desc);
+            }
+            catch (Exception ex)
+            {
+                foreach (var t in clip) t?.Dispose();
+                Log.Warn($"clip: {frames} frames of {_videoWidth}x{_videoHeight} do not fit on the card: {ex.Message}");
+                return false;
+            }
+            _clip = clip;
+            _clipCount = 0;
+            Log.Info($"clip: keeping the next {frames} frames, {_videoWidth}x{_videoHeight} {_videoFormat}");
+            return true;
+        }
+    }
+
+    private void DropClip()
+    {
+        if (_clip is null) return;
+        foreach (var t in _clip) t?.Dispose();
+        _clip = null;
+        _clipCount = 0;
+    }
+
+    // With the context held, right after a frame has been copied in.
+    private void KeepForClip()
+    {
+        if (_clip is { } clip && _clipCount < clip.Length && _videoTexture is not null)
+        {
+            _context.CopyResource(clip[_clipCount], _videoTexture);
+            _clipCount++;
+        }
+    }
+
+    /// <summary>
+    /// The clip kept by <see cref="StartClip"/>, put through each way there is - as it
+    /// arrived, RTX VSR, DLSS's networks K, L and M, FSR - frame by frame in the order it
+    /// came, and every picture written into a folder of its own beside
+    /// <paramref name="path"/>: "name-clip/dlss-K/0000.png" and so on. Only the rectangle
+    /// the picture takes is written. Diagnostic only.
+    /// <para>
+    /// One frame held still shows what each makes of a picture at rest, which is the best
+    /// case for DLSS and FSR: they are given it over and over. Movement is where the ways
+    /// part - what smears, what flickers, what is drawn that was never sent - and here each
+    /// is given the same movement, from the same start.
+    /// </para>
+    /// </summary>
+    public bool SaveClip(string path)
+    {
+        string root = Path.Combine(Path.GetDirectoryName(path) ?? "", Path.GetFileNameWithoutExtension(path) + "-clip");
+
+        // Held throughout: nothing new comes in while the clip goes round.
+        lock (_context)
+        {
+            if (_clip is not { } clip || _clipCount == 0 || _videoTexture is null)
+            {
+                Log.Warn("clip: no frames were kept");
+                return false;
+            }
+
+            int frames = _clipCount;
+            bool dlssWas = DlssEnabled, fsrWas = FsrEnabled, compareWas = CompareScalers;
+            bool vsrWas = Processor?.SuperResolutionEnabled == true;
+            var modelWas = Dlss?.Model;
+            if (Processor is { HdrEnabled: true })
+                Log.Warn("clip: RTX Video HDR is on and takes the picture from DLSS and FSR; run with --no-auto-hdr");
+
+            void VsrOff()
+            {
+                if (Processor is { SuperResolutionEnabled: true } p) p.ToggleSuperResolution();
+            }
+
+            // Each way, and how it is switched on. Each starts from nothing it remembers.
+            var ways = new List<(string Name, Func<bool> On)>
+            {
+                ("none", () => { VsrOff(); DlssEnabled = false; FsrEnabled = false; return true; })
+            };
+            if (Processor is { Available: true, SuperResolutionSupported: true } && _vpTexture is not null && !SourceIsHdr)
+                ways.Add(("vsr", () =>
+                {
+                    DlssEnabled = false; FsrEnabled = false;
+                    return Processor!.SuperResolutionEnabled || Processor.ToggleSuperResolution();
+                }));
+            if (Dlss is { Possible: true } dlss)
+                foreach (var model in (DlssModel[])[DlssModel.K, DlssModel.L, DlssModel.M])
+                    ways.Add(("dlss-" + model, () =>
+                    {
+                        VsrOff(); FsrEnabled = false; DlssEnabled = true;
+                        dlss.Model = model;
+                        return true;
+                    }));
+            if (Fsr is { Possible: true, Building: false })
+                ways.Add(("fsr", () => { VsrOff(); DlssEnabled = false; FsrEnabled = true; return true; }));
+            else if (Fsr is { Possible: true })
+                Log.Warn("clip: FSR is still being built, so it is left out");
+
+            // The other temporal one is not to be fed alongside: each way stands alone.
+            CompareScalers = false;
+
+            void Feed(ID3D11Texture2D frame)
+            {
+                _context.CopyResource(_videoTexture!, frame);
+                if (UseProcessor && _vpTexture is not null) _context.CopyResource(_vpTexture, frame);
+                _uploadSerial++;
+            }
+
+            var (px, py, pw, ph) = FitPixels(_videoWidth, _videoHeight, Width, Height);
+            using var back = _swapChain.GetBuffer<ID3D11Texture2D>(0);
+            var desc = back.Description;
+            desc.Width = (uint)pw;
+            desc.Height = (uint)ph;
+            desc.Usage = ResourceUsage.Staging;
+            desc.BindFlags = BindFlags.None;
+            desc.CPUAccessFlags = CpuAccessFlags.Read;
+            desc.MiscFlags = ResourceOptionFlags.None;
+            using var staging = _device.CreateTexture2D(desc);
+            var area = new Box(px, py, 0, px + pw, py + ph, 1);
+
+            // Encoding is the slow part, so it runs beside the next frames, a few at a time.
+            var gate = new SemaphoreSlim(Math.Max(2, Environment.ProcessorCount / 2));
+            var writing = new List<Task>();
+            int failed = 0;
+            bool ok = true;
+            var started = System.Diagnostics.Stopwatch.StartNew();
+
+            try
+            {
+                foreach (var (name, on) in ways)
+                {
+                    if (!on())
+                    {
+                        Log.Warn($"clip: {name} could not be switched on, so it is left out");
+                        ok = false;
+                        continue;
+                    }
+
+                    // The first frame shown a few times before the run: DLSS and FSR are built
+                    // for it, and the driver brings RTX VSR in when it sees fit. What the motion
+                    // estimate saw last is then this frame, so the run's first one has not moved;
+                    // and whatever DLSS and FSR gathered on the way is let go.
+                    bool vsr = name == "vsr";
+                    for (int i = 0; i < (vsr ? 20 : 3); i++)
+                    {
+                        Feed(clip[0]);
+                        Render();
+                        if (vsr) Thread.Sleep(50);
+                    }
+                    Dlss?.ResetHistory();
+                    Fsr?.ResetHistory();
+
+                    // Named for the network that ran, which the driver may have chosen instead.
+                    string folder = name;
+                    if (name.StartsWith("dlss-", StringComparison.Ordinal) && Dlss?.ModelInUse is { } used && "dlss-" + used != name)
+                        folder = name + "-ran-" + used;
+                    string dir = Path.Combine(root, folder);
+                    Directory.CreateDirectory(dir);
+
+                    for (int i = 0; i < frames; i++)
+                    {
+                        Feed(clip[i]);
+                        Render();
+                        _context.CopySubresourceRegion(staging, 0, 0, 0, 0, back, 0, area);
+                        var pixels = new byte[pw * ph * 4];
+                        var map = _context.Map(staging, 0, MapMode.Read);
+                        try { ToBgra(map, pw, ph, SwapChainIsPq, VideoNits, pixels); }
+                        finally { _context.Unmap(staging, 0); }
+
+                        string file = Path.Combine(dir, $"{i:D4}.png");
+                        gate.Wait();
+                        writing.Add(Task.Run(() =>
+                        {
+                            try { EncodePng(pixels, pw, ph, file); }
+                            catch (Exception ex)
+                            {
+                                if (Interlocked.Increment(ref failed) == 1) Log.Warn($"clip: {file} not written: {ex.Message}");
+                            }
+                            finally { gate.Release(); }
+                        }));
+                    }
+                    Log.Info($"clip: {frames} frames through {folder}");
+                }
+                Task.WaitAll([.. writing]);
+            }
+            finally
+            {
+                CompareScalers = compareWas;
+                DlssEnabled = dlssWas;
+                FsrEnabled = fsrWas;
+                if (Dlss is { } d && modelWas is { } m) d.Model = m;
+                if (vsrWas != (Processor?.SuperResolutionEnabled == true)) Processor?.ToggleSuperResolution();
+            }
+
+            Log.Info($"clip: {frames} frames of {pw}x{ph}, {ways.Count} ways, written to {root} in {started.Elapsed.TotalSeconds:F1} s");
+            return ok && failed == 0;
+        }
+    }
+
     /// <summary>The estimated motion as numbers, beside a diagnostic capture; see <see cref="OpticalFlow.Save"/>.</summary>
     public bool SaveFlow(string path)
     {
@@ -1661,17 +1887,37 @@ public sealed class Renderer : IDisposable
         }
     }
 
-    private static unsafe void WritePng(MappedSubresource map, int width, int height, bool pq, float nits, string path)
+    private static void WritePng(MappedSubresource map, int width, int height, bool pq, float nits, string path)
     {
-        using var bmp = new Bitmap(width, height, PixelFormat.Format32bppArgb);
-        var rect = new Rectangle(0, 0, width, height);
-        var dst = bmp.LockBits(rect, ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
-        try
+        var pixels = new byte[width * height * 4];
+        ToBgra(map, width, height, pq, nits, pixels);
+        EncodePng(pixels, width, height, path);
+    }
+
+    private static unsafe void EncodePng(byte[] pixels, int width, int height, string path)
+    {
+        fixed (byte* p = pixels)
         {
-            for (int y = 0; y < height; y++)
+            using var bmp = new Bitmap(width, height, width * 4, PixelFormat.Format32bppRgb, (nint)p);
+            bmp.Save(path, ImageFormat.Png);
+        }
+    }
+
+    /// <summary>
+    /// The back buffer's 10-bit pixels as 8-bit BGRA, the way a PNG holds them, with the
+    /// output encoding undone. Rows in parallel: a whole screen is millions of pixels.
+    /// </summary>
+    private static unsafe void ToBgra(MappedSubresource map, int width, int height, bool pq, float nits, byte[] pixels)
+    {
+        nint data = map.DataPointer;
+        long pitch = map.RowPitch;
+        fixed (byte* dst0 = pixels)
+        {
+            nint dst = (nint)dst0;
+            Parallel.For(0, height, y =>
             {
-                var src = (uint*)((byte*)map.DataPointer + y * (long)map.RowPitch);
-                var row = (byte*)dst.Scan0 + y * (long)dst.Stride;
+                var src = (uint*)((byte*)data + y * pitch);
+                var row = (byte*)dst + y * (long)width * 4;
                 for (int x = 0; x < width; x++)
                 {
                     uint v = src[x];
@@ -1699,11 +1945,8 @@ public sealed class Renderer : IDisposable
                     row[x * 4 + 2] = ToByte(r);
                     row[x * 4 + 3] = 255;
                 }
-            }
+            });
         }
-        finally { bmp.UnlockBits(dst); }
-
-        bmp.Save(path, ImageFormat.Png);
 
         static byte ToByte(float f) => (byte)Math.Clamp(f * 255f + 0.5f, 0, 255);
 
@@ -1874,6 +2117,8 @@ public sealed class Renderer : IDisposable
         _videoTexture?.Dispose(); _videoTexture = null;
         _vpTexture?.Dispose(); _vpTexture = null;
         _videoFormat = Format.Unknown;
+        // Frames of another size or format cannot be put back into these.
+        DropClip();
     }
 
     public void Dispose()

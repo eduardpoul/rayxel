@@ -159,6 +159,9 @@ public sealed unsafe class DlssScaler : IDisposable
 
     private DlssModel _builtModel;
 
+    /// <summary>Lets go of what the frames so far added up to: the next one starts afresh.</summary>
+    public void ResetHistory() => _reset = true;
+
     /// <summary>What it is doing, for the log and the readout: sizes, the mode they fall under, the network.</summary>
     public string Description => _feature == IntPtr.Zero
         ? "not running"
