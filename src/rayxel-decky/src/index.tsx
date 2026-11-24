@@ -1,6 +1,8 @@
 import {
   ButtonItem,
   ConfirmModal,
+  DialogButton,
+  Field,
   PanelSection,
   PanelSectionRow,
   ToggleField,
@@ -21,7 +23,6 @@ import {
   setAutostart,
   setDiscoverable,
   setEnabled,
-  stopService,
   useOverview,
   watchOverview,
   type Answer,
@@ -44,6 +45,8 @@ const stateColours: Record<string, string> = {
 
 const dim: CSSProperties = { opacity: 0.7, fontSize: "12px", lineHeight: "16px" };
 const warn: CSSProperties = { color: "#ffb86c", fontSize: "12px", lineHeight: "16px" };
+// As wide as its word and no wider, so it fits beside a computer's name.
+const forgetButton: CSSProperties = { minWidth: 0, width: "auto", padding: "0 16px", height: "32px", lineHeight: "32px" };
 
 function useNow(intervalMs: number): number {
   const [now, setNow] = useState(Date.now());
@@ -70,19 +73,37 @@ function stateWord(status: SenderStatus | null): string {
   }
 }
 
-function stateDetail(status: SenderStatus | null): string {
-  if (!status) return t("notRunningDetail");
+/**
+ * The line under the state: a sentence, or while streaming its figures as parts, each kept
+ * whole - "4 fps" never breaks between its number and its unit.
+ */
+function StateDetail({ status }: { status: SenderStatus | null }) {
+  const parts = stateDetail(status);
+  return (
+    <>
+      {parts.map((part, i) => (
+        <span key={i} style={{ whiteSpace: parts.length > 1 ? "nowrap" : "normal" }}>
+          {i > 0 ? " · " : ""}
+          {part}
+        </span>
+      ))}
+    </>
+  );
+}
+
+function stateDetail(status: SenderStatus | null): string[] {
+  if (!status) return [t("notRunningDetail")];
   switch (status.state) {
     case "off":
-      return t("dOff");
+      return [t("dOff")];
     case "discoverable":
-      return t("dDiscoverable");
+      return [t("dDiscoverable")];
     case "pairing":
-      return f("dPairing", status.pairing?.viewerName ?? "");
+      return [f("dPairing", status.pairing?.viewerName ?? "")];
     case "streaming":
       break;
     default:
-      return status.viewers.length === 0 ? t("dWaitingNone") : t("dWaiting");
+      return [status.viewers.length === 0 ? t("dWaitingNone") : t("dWaiting")];
   }
 
   const parts: string[] = [];
@@ -98,7 +119,7 @@ function stateDetail(status: SenderStatus | null): string {
     if (stream.encodeMs > 0) parts.push(f("encodeMs", num(stream.encodeMs, 1)));
     if (stream.inputActive) parts.push(t("inputOn"));
   }
-  return parts.join(" · ");
+  return parts;
 }
 
 function describe(answer: Answer): string {
@@ -175,32 +196,9 @@ function Content() {
     );
   }
 
-  function confirmStop(body: string) {
-    showModal(
-      <ConfirmModal
-        strTitle={t("stopCaptureTitle")}
-        strDescription={body}
-        strOKButtonText={t("stopAnyway")}
-        strCancelButtonText={t("cancel")}
-        bDestructiveWarning={true}
-        onOK={() => void run(() => stopService(true))}
-      />,
-    );
-  }
-
-  // Ending the program, which switching off does not. While it holds the game's picture
-  // that can take gamescope and the game down, so then it is said plainly and asked first.
-  async function stop() {
-    if (status?.captureHeld) {
-      confirmStop(t("stopCaptureBody"));
-      return;
-    }
-    const answer = await run(() => stopService(false));
-    // The backend asks for force in two cases: a capture was opened meanwhile, or the
-    // sender runs but does not answer, so cannot say whether it holds one.
-    if (answer?.code === "needs_force")
-      confirmStop(answer.captureHeld === true ? t("stopCaptureBody") : t("stopNoAnswerBody"));
-  }
+  // There is no button that ends the program: switching off stops streaming and answering,
+  // and ending it while it holds the game's picture can take gamescope and the game down.
+  // Whether it starts with the Deck is the one other thing to decide, below.
 
   async function changeAutostart(value: boolean) {
     setAutostartShown(value);
@@ -221,7 +219,9 @@ function Content() {
             <div style={{ fontSize: "22px", fontWeight: 700, color: stateColours[status?.state ?? "off"] }}>
               {stateWord(status)}
             </div>
-            <div style={{ ...dim, marginTop: "2px" }}>{stateDetail(status)}</div>
+            <div style={{ ...dim, marginTop: "2px" }}>
+              <StateDetail status={status} />
+            </div>
             {status?.problem && <div style={{ ...warn, marginTop: "4px" }}>{status.problem}</div>}
           </div>
         </PanelSectionRow>
@@ -245,10 +245,13 @@ function Content() {
       </PanelSection>
 
       {pairing && (
-        <PanelSection title={f("pairWants", pairing.viewerName)}>
+        // A short title - a section title is set in capitals and a computer's name can be
+        // long - and who is asking on a line of its own under it.
+        <PanelSection title={t("pairTitle")}>
           <PanelSectionRow>
             {pairing.pin ? (
               <div style={{ textAlign: "center", padding: "4px 0 8px" }}>
+                <div style={{ fontSize: "16px", marginBottom: "2px" }}>{f("pairWants", pairing.viewerName)}</div>
                 <div style={dim}>{t("pairTypePin")}</div>
                 <div
                   style={{
@@ -266,7 +269,8 @@ function Content() {
               </div>
             ) : (
               <div style={{ textAlign: "center", padding: "12px 0" }}>
-                <div style={{ fontSize: "16px" }}>{t("pairExchanging")}</div>
+                <div style={{ fontSize: "16px", marginBottom: "2px" }}>{f("pairWants", pairing.viewerName)}</div>
+                <div style={dim}>{t("pairExchanging")}</div>
                 <div style={dim}>{f("pairExpires", countdown(pairing.expiresMs - now))}</div>
               </div>
             )}
@@ -286,16 +290,25 @@ function Content() {
               <div style={dim}>{t("pairedNone")}</div>
             </PanelSectionRow>
           ) : (
+            // The name and when it was last here on the left, a small button on the right that
+            // stays inside the panel: Decky's inline button item is as wide as a full-width
+            // one and runs past the panel's edge.
             status.viewers.map((viewer) => (
               <PanelSectionRow key={viewer.id}>
-                <ButtonItem
+                <Field
                   label={viewer.name || viewer.id}
                   description={viewer.id === watchingId ? t("watchingNow") : lastSeen(viewer.lastSeenMs, now)}
-                  disabled={busy}
-                  onClick={() => confirmForget(viewer)}
+                  childrenContainerWidth="min"
+                  bottomSeparator="none"
                 >
-                  {t("forget")}
-                </ButtonItem>
+                  <DialogButton
+                    style={forgetButton}
+                    disabled={busy}
+                    onClick={() => confirmForget(viewer)}
+                  >
+                    {t("forget")}
+                  </DialogButton>
+                </Field>
               </PanelSectionRow>
             ))
           )}
@@ -323,18 +336,6 @@ function Content() {
         </PanelSectionRow>
       </PanelSection>
 
-      {running && (
-        <PanelSection>
-          <PanelSectionRow>
-            <ButtonItem layout="below" disabled={busy} onClick={() => void stop()}>
-              {t("stopSender")}
-            </ButtonItem>
-          </PanelSectionRow>
-          <PanelSectionRow>
-            <div style={dim}>{t("stopHint")}</div>
-          </PanelSectionRow>
-        </PanelSection>
-      )}
     </>
   );
 }

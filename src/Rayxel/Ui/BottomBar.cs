@@ -775,9 +775,9 @@ public static class BottomBar
 
         var devices = model.Devices.Where(d => Selectable(model, d)).ToList();
         int current = Math.Max(0, devices.FindIndex(d => model.Pump.Device.Is(d)));
-        var names = devices.Select(d => d.FriendlyName).ToList();
+        var names = devices.Select(d => NetDevice.DisplayName(d, model.Devices)).ToList();
 
-        if (names.Count > 0 && Widgets.Combo("##device", model.Pump.Device.FriendlyName, names, current, out int chosen))
+        if (names.Count > 0 && Widgets.Combo("##device", NetDevice.DisplayName(model.Pump.Device, model.Devices), names, current, out int chosen))
             model.SwitchDevice(devices[chosen]);
 
         // Pairing a Deck, and for a paired one, forgetting it. Forgetting here is this
@@ -795,8 +795,8 @@ public static class BottomBar
             var forgetLabel = Strings.T("pairForget");
             if (Widgets.Button(forgetLabel, new Vector2(Widgets.Measure(f.Body, forgetLabel).X + Layout.S(32), Layout.S(32))))
             {
-                NetLinks.Store.Remove(peer.Id);
-                model.RefreshDevices();
+                model.ConfirmForget = peer;
+                model.Flyout = Flyout.None;
             }
         }
 

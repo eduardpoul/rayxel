@@ -78,10 +78,14 @@ public static class TelemetryOverlay
         if (ImGui.Begin("##teleline", Flags))
         {
             // The rate measured, not the one the mode promises: a source that has slowed
-            // down shows here first.
+            // down shows here first. With frame generation, what the screen shows beside it -
+            // counted, not the input times the factor: a frame that came late, and the
+            // generated ones dropped to catch up, are not shown and are not counted.
             string rate = live ? Strings.Num(stats.MeasuredFps, "0.0") : Strings.Num(model.Pump.CurrentFps, "0.##");
-            Widgets.Text(f.Caption, Theme.TextPrimary,
-                mode is null ? "—" : $"{mode.Width}×{mode.Height} · {rate} {Strings.T("hz")}");
+            Widgets.Text(f.Caption, Theme.TextPrimary, mode is null ? "—" : $"{mode.Width}×{mode.Height}");
+            Item("tIn", $"{rate} {Strings.T("hz")}", Theme.TextPrimary);
+            if (model.Renderer.UseFrameGen)
+                Item("tShown", live ? $"{Strings.Num(model.PicturesFps, "0.0")} {Strings.T("hz")}" : "n/a", Theme.AccentText);
 
             // One figure for everything between the source and our present that can be
             // measured. What it is made of is the card's business.
@@ -202,7 +206,7 @@ public static class TelemetryOverlay
         });
         if (model.FrameGenIndex != 0)
             parts.Add(model.Renderer.UseFrameGen
-                ? $"{model.FrameGenerator.Short()} ×{model.Renderer.FrameGenFactor}"
+                ? $"{model.FrameGenerator.Short()} ×{model.Renderer.FrameGenFactor} → {Strings.Num(model.PicturesFps, "0")} {Strings.T("hz")}"
                 : model.FrameGenerator.Short());
         if (model.HdrOn) parts.Add($"HDR {model.OverlayNits:0} {Strings.T("nits")}");
         if (mode?.HasCodecInPath == true) parts.Add($"{(mode.WireCodec ?? "codec").ToLowerInvariant()} decode");

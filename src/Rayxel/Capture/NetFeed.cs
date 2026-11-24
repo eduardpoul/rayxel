@@ -49,6 +49,13 @@ internal interface INetSink
     void NetAlive();
 
     void NetFailed(string detail);
+
+    /// <summary>
+    /// The sender turned this computer away: switched off, showing its picture to another
+    /// computer, or no longer paired with this one. Said each time it happens; a picture or
+    /// a sign of life afterwards ends it.
+    /// </summary>
+    void NetRefused(Link.Wire.RefuseReason reason);
 }
 
 /// <summary>
@@ -300,7 +307,10 @@ internal sealed class NetFeed : IDisposable, IPictureSink
                     // The sender has turned this session away while it ran: switched off, or
                     // given to another computer. Said once; the session is begun again later.
                     if (NetWire.TryReadRefuse(data, out uint refused, out var reason) && refused == _session)
+                    {
                         Log.Info($"{_peer?.Name ?? "the sender"}: {ViewerHandshake.Describe(reason)}");
+                        _sink.NetRefused(reason);
+                    }
                     continue;
                 }
                 _lastHeardNs = arrived;
@@ -364,6 +374,7 @@ internal sealed class NetFeed : IDisposable, IPictureSink
             {
                 // The sender has forgotten this computer, or holds another key: only pairing again helps.
                 Log.Error($"{_peer!.Name}: {ex.Message}");
+                _sink.NetRefused(ex.Reason!.Value);
                 _sink.NetFailed(ex.Message);
                 return false;
             }
@@ -371,6 +382,7 @@ internal sealed class NetFeed : IDisposable, IPictureSink
             {
                 if (said != ex.Message) Log.Info($"{_peer!.Name}: {ex.Message}; asking again");
                 said = ex.Message;
+                if (ex.Reason is { } reason) _sink.NetRefused(reason);
                 for (int i = 0; i < 20 && _running; i++) Thread.Sleep(100);
             }
         }

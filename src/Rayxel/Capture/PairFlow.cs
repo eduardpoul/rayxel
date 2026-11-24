@@ -22,6 +22,19 @@ internal sealed class PairFlow : IDisposable
 
     public PairFlow() => Scan();
 
+    /// <summary>A flow standing at the PIN, with nothing on the network behind it: for --screen=pair-pin, to look at.</summary>
+    public static PairFlow AtPin(string senderName, string typed)
+    {
+        var flow = new PairFlow(scan: false) { SenderName = senderName, Pin = typed };
+        flow._stage = Stages.EnterPin;
+        return flow;
+    }
+
+    private PairFlow(bool scan)
+    {
+        if (scan) Scan();
+    }
+
     public Stages Stage => _stage;
 
     public IReadOnlyList<FoundSender> Found
@@ -36,6 +49,12 @@ internal sealed class PairFlow : IDisposable
 
     /// <summary>The last PIN typed did not match; the user may try again.</summary>
     public bool WrongPin { get; private set; }
+
+    /// <summary>
+    /// Counts the attempts at the PIN. The dialog gives its input a new identity with each,
+    /// which is how ImGui is made to forget the digits of the one before.
+    /// </summary>
+    public int Attempt { get; private set; }
 
     /// <summary>What the user has typed so far. Only the UI thread touches it.</summary>
     public string Pin = "";
@@ -114,6 +133,7 @@ internal sealed class PairFlow : IDisposable
                 if (!await client.ConfirmAsync(typed, cancel))
                 {
                     WrongPin = true;
+                    Attempt++;
                     Pin = "";
                     _stage = Stages.EnterPin;
                     return;

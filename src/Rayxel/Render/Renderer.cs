@@ -267,6 +267,15 @@ public sealed class Renderer : IDisposable
     private readonly bool[] _fgTimed = new bool[QueryDepth];
     private long _renderedSerial;
 
+    /// <summary>
+    /// Distinct pictures put on the screen so far: each new real frame, and with frame
+    /// generation each generated one. A frame presented again - the display is faster than
+    /// the source - does not count. Divided by time, what the screen actually shows.
+    /// </summary>
+    public long PicturesShown { get; private set; }
+
+    private long _lastShownKey = -1;
+
     /// <summary>GPU milliseconds the last generating took, measured as the time the picture waited for it.</summary>
     public double LastFrameGenMs { get; private set; }
 
@@ -1224,6 +1233,15 @@ public sealed class Renderer : IDisposable
                 _context.RSSetViewport(0, 0, Width, Height);
             }
             if (!holding) _renderedSerial = _uploadSerial;
+
+            // Which picture this one is: a place in the queue with generation, the real frame
+            // without. A new one counts towards what the screen shows.
+            long shownKey = fg && _fgCount > 0 ? (_fgSerial << 4) | (uint)Math.Min(_fgShown, _fgCount - 1) : (_renderedSerial << 4) | 15;
+            if (shownKey != _lastShownKey && _renderedSerial != 0)
+            {
+                _lastShownKey = shownKey;
+                PicturesShown++;
+            }
 
             if (fg && _fgCount > 0)
             {

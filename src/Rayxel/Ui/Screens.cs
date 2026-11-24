@@ -121,6 +121,10 @@ public static class Screens
     {
         var f = Widgets.F;
         model.Probed.TryGetValue(device.SymbolicLink, out var probe);
+        var peer = NetDevice.PeerOf(device);
+        // A paired Deck that has forgotten this computer: the row opens pairing again, which
+        // is the one thing that brings its picture back.
+        bool forgot = NetDevice.Forgot(device);
 
         // A device never opened is shown as exactly that. Busy cannot be known without
         // trying, so the row does not claim to know.
@@ -132,15 +136,19 @@ public static class Screens
                 (Strings.T("dBusyNow"), Theme.Caution, "", false),
             { Availability: DeviceAvailability.Unusable } p =>
                 (Strings.T("dOffline"), Theme.Caution, Strings.Modes(p.Modes.Count), false),
-            { } p => (p.Problem ?? Strings.T("dOffline"), Theme.Caution, "", false),
+            { } p => (p.Problem ?? Strings.T("dOffline"), Theme.Caution, "", forgot),
             _ => (NotChecked(device), Theme.TextTertiary, "", true)
         };
 
         bool current = model.Pump.Device.Is(device) && model.Pump.State == CaptureState.Streaming;
-        if (Widgets.ListRow($"##dev{device.Ordinal}", Layout.S(60), current, selectable, out var min, out var max))
+        if (Widgets.ListRow($"##dev{device.Ordinal}", Layout.S(60), current, selectable, out var min, out var max, overlap: peer is not null))
         {
-            model.SwitchDevice(device);
-            model.Screen = Screen.App;
+            if (forgot) model.Pairing ??= new PairFlow();
+            else
+            {
+                model.SwitchDevice(device);
+                model.Screen = Screen.App;
+            }
         }
 
         var draw = ImGui.GetWindowDrawList();
@@ -150,15 +158,32 @@ public static class Screens
                    new Vector2(min.X + inset, min.Y + (height - icon) / 2f), icon,
                    selectable ? Theme.TextSecondary : Theme.TextDisabled);
 
+        string title = NetDevice.DisplayName(device, model.Devices);
         float x = min.X + inset + icon + Layout.S(12);
-        var name = Widgets.Measure(f.Body, device.FriendlyName);
+        var name = Widgets.Measure(f.Body, title);
         var line = Widgets.Measure(f.Caption, status);
         float top = min.Y + (height - name.Y - line.Y - Layout.S(1)) / 2f;
 
-        Widgets.DrawText(draw, f.Body, new Vector2(x, top), selectable ? Theme.TextPrimary : Theme.TextDisabled, device.FriendlyName);
+        Widgets.DrawText(draw, f.Body, new Vector2(x, top), selectable ? Theme.TextPrimary : Theme.TextDisabled, title);
         Widgets.DrawText(draw, f.Caption, new Vector2(x, top + name.Y + Layout.S(1)), colour, status);
         if (detail.Length > 0)
             Widgets.DrawText(draw, f.Caption, new Vector2(x + line.X, top + name.Y + Layout.S(1)), Theme.TextTertiary, " · " + detail);
+
+        // A paired Deck can be forgotten from its row, whatever state it is in: one that is
+        // gone for good would otherwise stay in the list, since only the one being watched
+        // could be forgotten from the menu.
+        if (peer is not null)
+        {
+            string label = Strings.T("forgetShort");
+            var text = Widgets.Measure(f.Body, label);
+            var size = new Vector2(text.X + Layout.S(24), Layout.S(32));
+            var after = ImGui.GetCursorScreenPos();
+            ImGui.SetCursorScreenPos(new Vector2(max.X - Layout.S(8) - size.X, min.Y + (height - size.Y) / 2f));
+            if (Widgets.SubtleButton($"##forget{device.Ordinal}", size, false, out var at))
+                model.ConfirmForget = peer;
+            Widgets.DrawText(draw, f.Body, at + (size - text) / 2f, Theme.TextSecondary, label);
+            ImGui.SetCursorScreenPos(after);
+        }
     }
 
     private static string Details(DeviceProbe p)
@@ -169,6 +194,9 @@ public static class Screens
 
     private static string NotChecked(CaptureDeviceInfo d)
     {
+        // A paired Deck is being looked for while the picker is up; its answer replaces this.
+        if (NetDevice.PeerOf(d) is not null) return Strings.T("deckLooking");
+
         if (d.IsVirtual)
             return Strings.Current switch
             {
@@ -200,13 +228,22 @@ public static class Screens
         var f = Widgets.F;
         Stage(model);
 
+        // A sender on the network that says why it will not stream gets a card for that
+        // reason; the generic ones below speak of cables and other applications.
+        if (model.Refusal is { } refusal && (model.ForceRefusal is not null || model.Pump.Device.Bus == DeviceBus.Network))
+        {
+            Refused(model, refusal);
+            return;
+        }
+
         bool busy = model.DeviceBusy;
         bool lost = !busy && model.Pump.State == CaptureState.Lost && !model.ForceNoSignal;
+        bool network = model.Pump.Device.Bus == DeviceBus.Network;
         string name = model.Pump.Device.FriendlyName;
 
         var (icon, title, body) = busy ? (Icon.Lock, Strings.T("busyTitle"), string.Format(Strings.T("busyBody"), name))
-                                : lost ? (Icon.MonitorOff, Strings.T("lostTitle"), string.Format(Strings.T("lostBody"), name))
-                                : (Icon.MonitorOff, Strings.T("nsTitle"), Strings.T("nsBody"));
+                                : lost ? (Icon.MonitorOff, Strings.T("lostTitle"), string.Format(Strings.T(network ? "deckLostBody" : "lostBody"), name))
+                                : (Icon.MonitorOff, Strings.T("nsTitle"), Strings.T(network ? "deckNsBody" : "nsBody"));
 
         if (BeginCentred(model, "##nosignal", Layout.S(440), new Vector2(Layout.S(24)), Theme.Card))
         {
@@ -245,6 +282,67 @@ public static class Screens
 
             if (Widgets.Button(Strings.T(busy ? "retryNow" : "retry"), size, accent: true)
                 && model.Active is { } active)
+                model.SwitchDevice(active.Device);
+            ImGui.SameLine(0, gap);
+            if (Widgets.Button(Strings.T("otherDevice"), size))
+                model.Screen = Screen.Devices;
+        }
+        EndCentred();
+    }
+
+    /// <summary>
+    /// A Steam Deck that answers but will not stream, and why. It has forgotten this computer
+    /// (or holds another key): asking again changes nothing, so the card offers pairing again
+    /// and nothing is retried behind it. It shows its picture to another computer, or its
+    /// sending is switched off: the session is asked for again by itself, and the picture
+    /// appears the moment the Deck says yes.
+    /// </summary>
+    private static void Refused(AppModel model, Link.Wire.RefuseReason refusal)
+    {
+        var f = Widgets.F;
+        string name = model.Pump.Device.FriendlyName;
+        bool forgot = refusal is Link.Wire.RefuseReason.NotPaired or Link.Wire.RefuseReason.BadProof;
+
+        var (icon, title, body) = refusal switch
+        {
+            Link.Wire.RefuseReason.Busy => (Icon.Lock, string.Format(Strings.T("deckBusyTitle"), name), Strings.T("deckBusyBody")),
+            Link.Wire.RefuseReason.Disabled => (Icon.MonitorOff, string.Format(Strings.T("deckOffTitle"), name), Strings.T("deckOffBody")),
+            _ => (Icon.Lock, string.Format(Strings.T("deckForgotTitle"), name), Strings.T("deckForgotBody"))
+        };
+
+        if (BeginCentred(model, "##refused", Layout.S(440), new Vector2(Layout.S(24)), Theme.Card))
+        {
+            float glyph = Layout.S(24);
+            Icons.Draw(ImGui.GetWindowDrawList(), icon, ImGui.GetCursorScreenPos(), glyph, Theme.TextSecondary);
+            ImGui.Dummy(new Vector2(glyph, glyph + Layout.S(8)));
+
+            Widgets.Text(f.Subtitle, Theme.TextPrimary, title);
+            ImGui.Dummy(new Vector2(0, Layout.S(2)));
+            Widgets.Wrapped(f.Body, Theme.TextSecondary, body);
+
+            if (!forgot)
+            {
+                ImGui.Dummy(new Vector2(0, Layout.S(8)));
+                var pos = ImGui.GetCursorScreenPos();
+                float ring = Layout.S(16);
+                ProgressRing(ImGui.GetWindowDrawList(), pos + new Vector2(ring / 2f), ring / 2f - 1f);
+                ImGui.SetCursorScreenPos(pos + new Vector2(ring + Layout.S(8), 0));
+                ImGui.PushTextWrapPos(0);
+                Widgets.Text(f.Caption, Theme.TextTertiary, Strings.T("deckAsking"));
+                ImGui.PopTextWrapPos();
+            }
+
+            ImGui.Dummy(new Vector2(0, Layout.S(16)));
+            float gap = Layout.S(8);
+            float half = (ImGui.GetContentRegionAvail().X - gap) / 2f;
+            var size = new Vector2(half, Layout.S(32));
+
+            if (forgot)
+            {
+                if (Widgets.Button(Strings.T("pairAgain"), size, accent: true))
+                    model.Pairing ??= new PairFlow();
+            }
+            else if (Widgets.Button(Strings.T("retryNow"), size, accent: true) && model.Active is { } active)
                 model.SwitchDevice(active.Device);
             ImGui.SameLine(0, gap);
             if (Widgets.Button(Strings.T("otherDevice"), size))

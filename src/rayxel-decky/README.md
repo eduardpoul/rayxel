@@ -1,8 +1,10 @@
 # Rayxel for Decky
 
 A Quick Access panel for the Steam Deck side of Rayxel: switch the sender on and off, make
-the Deck discoverable, read the pairing PIN, forget paired PCs, and choose whether the PC's
-controller, keyboard and mouse may play here.
+the Deck discoverable, read the pairing code, forget paired computers, choose whether a
+computer's controller, keyboard and mouse may play here, and whether the sender starts with
+the Deck. Its words are the viewer's: what Rayxel on the PC calls pairing, a paired computer
+and discoverable, the panel calls the same, in all five languages.
 
 The sender itself, `rayxel-send`, is not run by Decky. The plugin installs it as a systemd
 user service, `rayxel-send.service`, and talks to it over its control socket
@@ -13,8 +15,9 @@ failing leaves a stream running.
 
 Ending the sender while it holds gamescope's capture can crash gamescope, and the running
 game with it. So the panel's switch never ends the program: **Off** only tells the sender to
-stop streaming and stop answering. **Stop sender** at the bottom ends the program itself;
-while it holds the game's picture the panel says so and asks first.
+stop streaming and stop answering. There is no button that ends it: whether it runs at all
+is whether it starts with the Deck. The backend still has a guarded stop (`stop_service`),
+which asks for force while the sender holds the game's picture.
 
 ## Building
 

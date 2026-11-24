@@ -319,8 +319,7 @@ try
         // with a stand-in that is never opened, so nothing is retried behind the picker.
         if (deviceSelector is not null) return 1;
         noDevice = true;
-        active = new DeviceProbe(new CaptureDeviceInfo(-1, Strings.T("noDevice"), NoDeviceLink),
-                                 DeviceAvailability.Unreadable, [], LinkBudget.Unknown, "no usable device");
+        active = NoDeviceProbe();
     }
 
     Log.Info($"using: {active.Device.FriendlyName}  ({active.Device.ShortId})");
@@ -378,6 +377,24 @@ try
             pendingDeviceSwitch = paired;
             model.Screen = Screen.App;
         }
+    };
+    model.Forget = peer =>
+    {
+        bool watching = pump!.Device.SymbolicLink == NetDevice.LinkScheme + peer.Id;
+        NetLinks.Store.Remove(peer.Id);
+        Log.Info($"forgot {peer.Name} ({peer.Id})");
+        model.RefreshDevices();
+        model.Probed.Remove(NetDevice.LinkScheme + peer.Id);
+        if (!watching) return;
+
+        // The one being watched: its picture stops - it is no longer this computer's to
+        // show - and the stand-in takes its place, as when the window opens with nothing.
+        pump.SwitchTo(NoDeviceProbe().Device);
+        active = NoDeviceProbe();
+        menuEntries = [];
+        model.Active = active;
+        model.NoDevice = true;
+        model.Screen = Screen.Devices;
     };
     model.SetWindowKind = k => pendingWindowKind = k;
     model.Quit = () => quit = true;
@@ -441,6 +458,14 @@ try
     if (forcedScreen == "framegen-info") { model.Flyout = Flyout.FrameGen; model.ShowTechniqueInfo = true; }
     if (forcedScreen == "more") model.Flyout = Flyout.More;
     if (forcedScreen == "quit") model.ConfirmQuit = true;
+    // Pairing, at the list of senders (a real search) or at the PIN (nothing on the network).
+    if (forcedScreen == "pair") model.Pairing = new PairFlow();
+    if (forcedScreen == "pair-pin") model.Pairing = PairFlow.AtPin("Steam Deck", "703");
+    // A Deck's refusals, each with its own card, and the question before forgetting one.
+    if (forcedScreen == "deck-forgot") model.ForceRefusal = Rayxel.Link.Wire.RefuseReason.NotPaired;
+    if (forcedScreen == "deck-busy") model.ForceRefusal = Rayxel.Link.Wire.RefuseReason.Busy;
+    if (forcedScreen == "deck-off") model.ForceRefusal = Rayxel.Link.Wire.RefuseReason.Disabled;
+    if (forcedScreen == "forget" && NetDevice.PeerOf(pump.Device) is { } forgetting) model.ConfirmForget = forgetting;
 
     if (!noDevice)
     {
@@ -1161,6 +1186,9 @@ void RunLoop()
     var frameClock = System.Diagnostics.Stopwatch.StartNew();
     var sampleClock = System.Diagnostics.Stopwatch.StartNew();
     var retryClock = System.Diagnostics.Stopwatch.StartNew();
+    Task<DeviceProbe>? netRetry = null;
+    Task<List<DeviceProbe>>? pickerProbe = null;
+    long pickerNextMs = 0; // the first look as soon as the picker is up
     var benchClock = System.Diagnostics.Stopwatch.StartNew();
     bool benchRecording = false;
     TimeSpan benchCpuStart = TimeSpan.Zero;
@@ -1175,7 +1203,7 @@ void RunLoop()
     var displayClock = System.Diagnostics.Stopwatch.StartNew();
     var saveClock = System.Diagnostics.Stopwatch.StartNew();
     string lastSavedJson = settings.ToJson();
-    long presented = 0, lastLoggedPresent = 0;
+    long presented = 0, lastLoggedPresent = 0, lastLoggedPictures = 0;
     long lastTimedArrival = 0, newFramesPresented = 0, lastLoggedNewFrames = 0;
     double appCpuMs = 0;
     // Frames that took us longer than a whole frame period to get from arrival to Present.
@@ -1434,13 +1462,58 @@ void RunLoop()
         // A lost device does not come back on its own — the read loop has stopped — so it
         // is retried on the cadence the no-signal card promises. "No signal" is different
         // and needs nothing: the reader is alive and recovers by itself when frames resume.
-        if (pump.State == CaptureState.Lost && retryClock.ElapsedMilliseconds >= 3000)
+        // Not the stand-in, which is never opened, and not a Deck that has forgotten this
+        // computer: asking it again only gets the same no, and fills its log with them.
+        // A Deck on the network is looked for off this thread: one that is gone takes a
+        // couple of seconds not to answer, and the window would freeze for each of them.
+        // Only once it answers is it switched to here.
+        if (pump.State == CaptureState.Lost && !model.NoDevice && !pump.Forgotten && retryClock.ElapsedMilliseconds >= 3000)
         {
             retryClock.Restart();
             Log.Info($"retrying '{pump.Device.FriendlyName}'");
-            try { SwitchDevice(pump.Device); } catch (Exception ex) { Log.Error("retry failed", ex); }
+            if (pump.Device.Bus == DeviceBus.Network)
+            {
+                if (netRetry is null)
+                {
+                    var looking = pump.Device;
+                    netRetry = Task.Run(() => CaptureDevice.Probe(looking));
+                }
+            }
+            else
+            {
+                try { SwitchDevice(pump.Device); } catch (Exception ex) { Log.Error("retry failed", ex); }
+            }
         }
         else if (pump.State != CaptureState.Lost) retryClock.Restart();
+
+        // While the device picker is up, every paired Deck is looked for, off this thread and
+        // again every few seconds: the rows say where each one is - found, gone, switched
+        // off, or no longer paired - and one switched on meanwhile turns up by itself. The one
+        // being watched keeps the answer it has.
+        if (model.Screen == Screen.Devices && pickerProbe is null && Environment.TickCount64 >= pickerNextMs)
+        {
+            pickerNextMs = Environment.TickCount64 + 4000;
+            var decks = allDevices.Where(d => NetDevice.PeerOf(d) is not null
+                                              && !(d.Is(pump.Device) && pump.State == CaptureState.Streaming)).ToList();
+            if (decks.Count > 0) pickerProbe = Task.Run(() => decks.Select(CaptureDevice.Probe).ToList());
+        }
+        if (pickerProbe is { IsCompleted: true } pickerLooked)
+        {
+            pickerProbe = null;
+            if (pickerLooked.IsCompletedSuccessfully)
+                foreach (var p in pickerLooked.Result) Remember(p);
+        }
+
+        if (netRetry is { IsCompleted: true } looked)
+        {
+            netRetry = null;
+            if (looked.IsCompletedSuccessfully && looked.Result.Device.Is(pump.Device) && pump.State == CaptureState.Lost)
+            {
+                Remember(looked.Result);
+                if (looked.Result.IsReady)
+                    try { SwitchDevice(pump.Device); } catch (Exception ex) { Log.Error("retry failed", ex); }
+            }
+        }
 
         // The video simply freezing on the last frame is the one failure a user cannot
         // diagnose from the picture, so it gets said out loud the moment it happens.
@@ -1530,6 +1603,9 @@ void RunLoop()
             double uniqueFps = (newFramesPresented - lastLoggedNewFrames) / seconds;
             lastLoggedPresent = presented;
             lastLoggedNewFrames = newFramesPresented;
+            double picturesFps = (renderer!.PicturesShown - lastLoggedPictures) / seconds;
+            lastLoggedPictures = renderer.PicturesShown;
+            model.PicturesFps = picturesFps;
 
             double budgetMs = pump.CurrentFps > 0 ? 1000.0 / pump.CurrentFps : 0;
 
@@ -1564,7 +1640,7 @@ void RunLoop()
 
             // What frame generation is doing, when it is on.
             if (renderer.UseFrameGen)
-                Log.Info($"fg   x{renderer.FrameGenFactor}  generating {renderer.LastFrameGenMs,5:0.00}ms  " +
+                Log.Info($"fg   x{renderer.FrameGenFactor}  shown {picturesFps,6:0.0}fps  generating {renderer.LastFrameGenMs,5:0.00}ms  " +
                          $"adds {renderer.FrameGenDelayMs,5:0.00}ms  dropped for an early frame {frameGenCaughtUp}");
             else if (renderer.FrameGenEnabled && renderer.FrameGenBlocked is { } blocked)
                 Log.Info($"fg   asked for, not running: {blocked}");
@@ -1650,6 +1726,13 @@ static MenuEntry? PickInitialMode(DeviceProbe probe)
         .FirstOrDefault();
     return best is null ? null : new MenuEntry(best, best.MaxFps);
 }
+
+/// <summary>
+/// The stand-in the pump points at when there is no device to show: never opened, so nothing
+/// is retried behind the device picker.
+/// </summary>
+static DeviceProbe NoDeviceProbe() =>
+    new(new CaptureDeviceInfo(-1, Strings.T("noDevice"), NoDeviceLink), DeviceAvailability.Unreadable, [], LinkBudget.Unknown, "no usable device");
 
 static List<MenuEntry> BuildMenuEntries(List<CaptureMode> modes)
 {

@@ -134,6 +134,32 @@ public sealed class FramePump : IDisposable, INetSink
         "another application is already streaming from this device - Windows allows the "
         + "open, but the hardware feeds only one consumer at a time";
 
+    // Why a sender on the network last turned this computer away, as its number; -1 for none.
+    // Kept across a restart of the same device - a retry, or the switch after pairing again -
+    // and dropped when another device starts.
+    private int _refusal = -1;
+    private CaptureDeviceInfo? _lastStartedDevice;
+
+    /// <summary>
+    /// Why the sender being watched turned this computer away, while it does: switched off,
+    /// busy with another computer, or no longer paired with this one. Null once a picture or
+    /// a sign of life arrives, and for anything that is not a sender on the network.
+    /// </summary>
+    public Link.Wire.RefuseReason? Refusal
+    {
+        get
+        {
+            int value = Volatile.Read(ref _refusal);
+            return value < 0 ? null : (Link.Wire.RefuseReason)value;
+        }
+    }
+
+    /// <summary>
+    /// The sender no longer knows this computer, or holds another key for it. Asking again
+    /// changes nothing: only pairing again does, so the device is not retried.
+    /// </summary>
+    public bool Forgotten => Refusal is Link.Wire.RefuseReason.NotPaired or Link.Wire.RefuseReason.BadProof;
+
     /// <summary>
     /// Current state, with a watchdog folded in: a device that is open and erroring is
     /// visibly broken, but a device that is open and simply silent looks identical to a
@@ -328,6 +354,9 @@ public sealed class FramePump : IDisposable, INetSink
         Volatile.Write(ref LastArrivalQpc, 0);
         Volatile.Write(ref _lastAliveTicks, 0);
         Volatile.Write(ref _startedTicks, Stopwatch.GetTimestamp());
+        // A refusal belongs to the device it came from, not to the next one started.
+        if (_lastStartedDevice?.Is(Device) != true) Volatile.Write(ref _refusal, -1);
+        _lastStartedDevice = Device;
         StateDetail = null;
         _state = CaptureState.Starting;
 
@@ -358,6 +387,7 @@ public sealed class FramePump : IDisposable, INetSink
     {
         if (!_running) return false;
         _state = CaptureState.Streaming;
+        Volatile.Write(ref _refusal, -1);
 
         // The sender may deliver another size than was asked for: gamescope fits the request
         // into its own picture and never scales up. Rebuilding the surface belongs to the
@@ -382,9 +412,15 @@ public sealed class FramePump : IDisposable, INetSink
 
     void INetSink.NetLost(long frames) => Interlocked.Add(ref _framesDropped, frames);
 
-    void INetSink.NetAlive() => Volatile.Write(ref _lastAliveTicks, Stopwatch.GetTimestamp());
+    void INetSink.NetAlive()
+    {
+        Volatile.Write(ref _lastAliveTicks, Stopwatch.GetTimestamp());
+        Volatile.Write(ref _refusal, -1);
+    }
 
     void INetSink.NetFailed(string detail) => Fail(CaptureState.Lost, detail);
+
+    void INetSink.NetRefused(Link.Wire.RefuseReason reason) => Volatile.Write(ref _refusal, (int)reason);
 
     /// <summary>
     /// Does what the network thread could only ask for. Called every frame from the thread

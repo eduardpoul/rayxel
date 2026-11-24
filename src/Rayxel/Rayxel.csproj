@@ -71,6 +71,18 @@
           CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <!-- NVIDIA's networks, 310.9.16 and signed by NVIDIA: nvngx_dlss.dll for DLSS Super
+       Resolution, nvngx_dlssg.dll for DLSS Frame Generation. Beside the executable, where NGX
+       looks for them - never inside the single file. Without the first DLSS falls back on the
+       driver's copy, which it lends only while its override is on; without the second there
+       is no frame generation at all (the driver's own, 310.2, refuses every frame). -->
+  <ItemGroup>
+    <None Include="Native\dlss\nvngx_dlss.dll" Link="nvngx_dlss.dll"
+          CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+    <None Include="Native\dlss\nvngx_dlssg.dll" Link="nvngx_dlssg.dll"
+          CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+  </ItemGroup>
+
   <!-- The link with a Steam Deck: the wire protocol, pairing and its keys, finding senders.
        Shared with the sender and its user interfaces. -->
   <ItemGroup>

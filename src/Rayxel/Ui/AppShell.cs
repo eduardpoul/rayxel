@@ -31,7 +31,7 @@ public static class AppShell
                 // The no-signal card replaces the video, but the bar stays reachable: the
                 // usual fix is to pick a different device or mode, and taking the controls
                 // away at exactly that moment would be perverse.
-                if (model.ForceNoSignal || model.ForceBusy
+                if (model.ForceNoSignal || model.ForceBusy || model.ForceRefusal is not null
                     || model.Pump.State is CaptureState.NoSignal or CaptureState.Lost)
                     Screens.NoSignal(model);
 
@@ -43,6 +43,7 @@ public static class AppShell
 
         QuitDialog(model);
         PairDialog.Draw(model);
+        PairDialog.DrawForget(model);
     }
 
     /// <summary>

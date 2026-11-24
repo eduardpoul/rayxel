@@ -170,7 +170,7 @@ Everything is optional; the app needs no arguments.
 | `--console` | attach to the terminal it was started from and print the log there |
 | `--verbose` | debug-level logging |
 | `--shot=<file.png>` | render for a few seconds, save the frame as a PNG, and exit |
-| `--screen=<name>` | force a state for inspection: `splash`, `devices`, `app`, `nosignal`, `busy`, `composed`, `modes`, `scaler`, `scaler-list`, `scaler-variants`, `scaler-info`, `scaler-variant-info`, `framegen`, `framegen-list`, `framegen-info`, `more`, `quit` |
+| `--screen=<name>` | force a state for inspection: `splash`, `devices`, `app`, `nosignal`, `busy`, `composed`, `modes`, `scaler`, `scaler-list`, `scaler-variants`, `scaler-info`, `scaler-variant-info`, `framegen`, `framegen-list`, `framegen-info`, `more`, `quit`, `pair`, `pair-pin`, `deck-forgot`, `deck-busy`, `deck-off`, `forget` |
 
 `--shot` saves the back buffer rather than the screen, so it works even when the window is
 covered or on a display nobody is looking at.

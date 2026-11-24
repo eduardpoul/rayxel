@@ -144,6 +144,12 @@ public sealed class AppModel
     // makes a panel of numbers unreadable and looks like something is wrong.
     public PumpStats Shown = new();
 
+    /// <summary>
+    /// Pictures the screen showed over the last second: the real frames, and with frame
+    /// generation the generated ones too. Set once a second by the frame loop.
+    /// </summary>
+    public double PicturesFps;
+
     /// <summary>The same, for what a frame's age is made of; null unless the source is on the network.</summary>
     public NetStats? ShownNet;
     public double ShownCpuMs;
@@ -231,6 +237,21 @@ public sealed class AppModel
 
     /// <summary>Lists the devices again, after a pairing was made or forgotten.</summary>
     public Action RefreshDevices = () => { };
+
+    /// <summary>A paired sender whose forgetting waits for a yes: its dialog is up while this is set.</summary>
+    internal Rayxel.Link.Security.Peer? ConfirmForget;
+
+    /// <summary>
+    /// Forgets a paired sender: its key goes and it leaves the device list. Being watched, it
+    /// stops, and the device picker comes up.
+    /// </summary>
+    internal Action<Rayxel.Link.Security.Peer> Forget = _ => { };
+
+    /// <summary>Diagnostic only: a sender's refusal card - forgot this computer, busy, off - without the sender refusing.</summary>
+    public Rayxel.Link.Wire.RefuseReason? ForceRefusal;
+
+    /// <summary>Why the sender being watched turns this computer away, if it does.</summary>
+    public Rayxel.Link.Wire.RefuseReason? Refusal => ForceRefusal ?? Pump.Refusal;
 
     public void PanelActivity() => PanelIdleMs = 0;
 

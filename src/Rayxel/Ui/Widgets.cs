@@ -584,14 +584,17 @@ public static class Widgets
     /// <summary>
     /// A full-width list row: transparent at rest, a faint fill under the pointer, and when
     /// selected that fill plus the accent pill on the left edge — Fluent's list selection.
-    /// The caller draws the content into the returned rectangle.
+    /// The caller draws the content into the returned rectangle - and with
+    /// <paramref name="overlap"/>, may put a button of its own on the row that takes the
+    /// pointer from it.
     /// </summary>
-    public static bool ListRow(string id, float height, bool selected, bool enabled, out Vector2 min, out Vector2 max)
+    public static bool ListRow(string id, float height, bool selected, bool enabled, out Vector2 min, out Vector2 max, bool overlap = false)
     {
         float width = ImGui.GetContentRegionAvail().X;
         min = ImGui.GetCursorScreenPos();
         max = min + new Vector2(width, height);
 
+        if (overlap) ImGui.SetNextItemAllowOverlap();
         bool clicked = ImGui.InvisibleButton(id, new Vector2(width, height)) && enabled;
         bool hovered = ImGui.IsItemHovered() && enabled;
         bool held = ImGui.IsItemActive() && enabled;

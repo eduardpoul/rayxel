@@ -152,7 +152,7 @@ public static class NetDevice
         {
             if (PeerOf(device) is not { } peer)
             {
-                problem = $"'{device.FriendlyName}' is no longer paired with this computer";
+                problem = Ui.Strings.T("deckForgotten");
                 return false;
             }
             if (Locate(peer) is { } found)
@@ -160,8 +160,7 @@ public static class NetDevice
                 endPoint = found.EndPoint;
                 return true;
             }
-            problem = $"{peer.Name} was not found on the network" +
-                      (peer.LastAddress.Length > 0 ? $" (last seen at {peer.LastAddress})" : "");
+            problem = Ui.Strings.T("deckNotFound");
             return false;
         }
 
@@ -194,28 +193,87 @@ public static class NetDevice
         }
     }
 
+    // Paired senders that were last found to have forgotten this computer: their row in the
+    // device list opens pairing instead of trying to connect.
+    private static readonly HashSet<string> ForgottenIds = [];
+
+    /// <summary>
+    /// True when the paired sender a device stands for was last found to no longer know this
+    /// computer: connecting is refused until it is paired again.
+    /// </summary>
+    internal static bool Forgot(CaptureDeviceInfo device)
+    {
+        if (PeerOf(device) is not { } peer) return false;
+        lock (ForgottenIds) return ForgottenIds.Contains(peer.Id);
+    }
+
+    private static void NoteForgotten(string id, bool forgot)
+    {
+        lock (ForgottenIds)
+        {
+            if (forgot) ForgottenIds.Add(id);
+            else ForgottenIds.Remove(id);
+        }
+    }
+
+    /// <summary>
+    /// A device's name as lists show it: its own, and where two share it - two Decks are both
+    /// "Steam Deck" until one is renamed - what tells them apart: a sender's last address, or
+    /// for anything else its place in the list.
+    /// </summary>
+    internal static string DisplayName(CaptureDeviceInfo device, IReadOnlyList<CaptureDeviceInfo> all)
+    {
+        bool shared = all.Any(d => !d.Is(device) && string.Equals(d.FriendlyName, device.FriendlyName, StringComparison.CurrentCultureIgnoreCase));
+        if (!shared) return device.FriendlyName;
+        if (PeerOf(device) is { } peer)
+        {
+            string where = IPEndPoint.TryParse(peer.LastAddress, out var at) ? at.Address.ToString() : peer.Id[..6];
+            return $"{device.FriendlyName} · {where}";
+        }
+        return $"{device.FriendlyName} ({device.Ordinal + 1})";
+    }
+
     /// <summary>
     /// Asks the sender whether it is there, and describes what it offers. Costs the Deck
     /// nothing: it answers a ping without starting to capture.
     /// </summary>
     public static DeviceProbe Probe(CaptureDeviceInfo device)
     {
-        // A paired sender answers a broadcast for it, and says whether it is switched on.
+        // A paired sender answers a broadcast for it, and says whether it is switched on and
+        // whether it still knows this computer.
         if (PeerOf(device) is { } peer)
         {
-            if (Locate(peer, fresh: true) is not { } found)
-                return new DeviceProbe(device, DeviceAvailability.Unreadable, [], LinkBudget.Unknown,
-                    $"{peer.Name} was not found on the network - is it on, and is the Rayxel sender running there?");
-            if (!found.Flags.HasFlag(Link.Wire.AnnounceFlags.Enabled))
-                return new DeviceProbe(device, DeviceAvailability.Unreadable, [], LinkBudget.Unknown,
-                    $"{peer.Name} is switched off - switch the sender on there");
-            Log.Info($"{peer.Name} found at {found.EndPoint}" + (found.Streaming ? ", streaming to another computer" : ""));
+            var found = Locate(peer, fresh: true);
+            Link.Wire.RefuseReason? refused = null;
+
+            // A sender that has forgotten this computer answers the broadcast only while it
+            // may be found. Asked directly at its last address it says why it will not talk -
+            // which is the difference between "gone" and "pair again".
+            if (found is null && IPEndPoint.TryParse(peer.LastAddress, out var last))
+                (found, refused) = AskDirectly(peer, last);
+
+            string? trouble = null;
+            if (refused is Link.Wire.RefuseReason.NotPaired or Link.Wire.RefuseReason.BadProof
+                || found is { KnowsYou: false })
+                trouble = Ui.Strings.T("deckForgot");
+            else if (refused is Link.Wire.RefuseReason.Disabled
+                     || found is not null && !found.Flags.HasFlag(Link.Wire.AnnounceFlags.Enabled))
+                trouble = Ui.Strings.T("deckOff");
+            else if (found is null)
+                trouble = Ui.Strings.T("deckNotFound");
+
+            NoteForgotten(peer.Id, trouble == Ui.Strings.T("deckForgot"));
+            if (trouble is not null)
+            {
+                Log.Info($"{peer.Name}: {trouble}" + (peer.LastAddress.Length > 0 ? $" (last seen at {peer.LastAddress})" : ""));
+                return new DeviceProbe(device, DeviceAvailability.Unreadable, [], LinkBudget.Unknown, trouble);
+            }
+            Log.Info($"{peer.Name} found at {found!.EndPoint}" + (found.Streaming ? ", streaming" : ""));
             return new DeviceProbe(device, DeviceAvailability.Ready, Modes(found.Model), LinkBudget.Unknown, null);
         }
 
         if (PeerOf(device) is null && device.Hardware.Instance.StartsWith(LinkInstance, StringComparison.Ordinal))
-            return new DeviceProbe(device, DeviceAvailability.Unreadable, [], LinkBudget.Unknown,
-                                   $"'{device.FriendlyName}' is no longer paired with this computer");
+            return new DeviceProbe(device, DeviceAvailability.Unreadable, [], LinkBudget.Unknown, Ui.Strings.T("deckForgotten"));
 
         if (!TryGetEndPoint(device, out var endPoint, out string problem))
             return new DeviceProbe(device, DeviceAvailability.Unreadable, [], LinkBudget.Unknown, problem);
@@ -259,6 +317,47 @@ public static class NetDevice
             });
         }
         return modes;
+    }
+
+    /// <summary>
+    /// Begins a session with a paired sender at its last address and lets it lapse: what the
+    /// sender answers says whether it is there, switched on and still paired with this
+    /// computer. Nothing is streamed - a sender starts only when the session is greeted.
+    /// Found, when it took the session or was merely busy; and the refusal, when it gave one.
+    /// </summary>
+    private static (FoundSender? Found, Link.Wire.RefuseReason? Refused) AskDirectly(Peer peer, IPEndPoint at)
+    {
+        try
+        {
+            using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            socket.Connect(at);
+            uint session = (uint)Random.Shared.Next(1, int.MaxValue);
+            using (ViewerHandshake.Connect(socket, NetLinks.Identity, peer, session, timeoutMs: 700)) { }
+            return (Remember(peer, at, Link.Wire.AnnounceFlags.Enabled), null);
+        }
+        catch (LinkRefusedException ex) when (ex.Reason is Link.Wire.RefuseReason.Busy)
+        {
+            return (Remember(peer, at, Link.Wire.AnnounceFlags.Enabled | Link.Wire.AnnounceFlags.Streaming), null);
+        }
+        catch (LinkRefusedException ex)
+        {
+            return (null, ex.Reason);
+        }
+        catch (Exception ex)
+        {
+            // Nobody there, or a key kept here that will not compute: either way not found.
+            Log.Debug($"asking {peer.Name} at {at} directly failed: {ex.Message}");
+            return (null, null);
+        }
+
+        // It answered as the one paired with: kept where it was found, like a broadcast's answer.
+        static FoundSender Remember(Peer peer, IPEndPoint at, Link.Wire.AnnounceFlags flags)
+        {
+            var found = new FoundSender(at, peer.Id, peer.Name, peer.Model, flags | Link.Wire.AnnounceFlags.KnowsYou,
+                                        byte.MaxValue, Environment.TickCount64);
+            lock (Located) Located[peer.Id] = (found, Environment.TickCount64);
+            return found;
+        }
     }
 
     /// <summary>Round trip to the sender in milliseconds, or -1 when it does not answer.</summary>
