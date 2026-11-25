@@ -36,6 +36,8 @@ int clipFrames = 0;
 DateTime clipStarted = default;
 // A clip read from a file in place of one kept from the source, and what is done with it.
 string? clipFile = null;
+// Or the frames kept from the source written to a file, and nothing else done with them.
+string? clipKeep = null;
 string[]? clipWays = null, clipFlow = null;
 string? clipTruth = null;
 bool clipVectors = false, clipTimed = false;
@@ -102,6 +104,16 @@ foreach (var arg in args)
     // frames every time, and they can be frames whose motion is known. --clip=FRAMES says
     // how many to read.
     else if (arg.StartsWith("--clip-file=", StringComparison.OrdinalIgnoreCase)) clipFile = arg[12..];
+    // The next frames that arrive - 120, or as many as --clip=FRAMES says - written to a
+    // .y4m file as they came, and that is all: a stretch of a game played once, to be put
+    // through the ways afterwards with --clip-file, as often as wanted and with the source
+    // left alone. --clip-keep=X.y4m.
+    else if (arg.StartsWith("--clip-keep=", StringComparison.OrdinalIgnoreCase))
+    {
+        clipKeep = arg[12..];
+        shotPath ??= clipKeep;
+        if (clipFrames == 0) clipFrames = 120;
+    }
     // Only these of the ways, by the names of their folders: --clip-ways=none,dlss-L,fsr.
     else if (arg.StartsWith("--clip-ways=", StringComparison.OrdinalIgnoreCase))
         clipWays = arg[12..].Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
@@ -502,7 +514,7 @@ try
     // One from a file with its ways named only waits for FSR when FSR is one of them.
     renderer.CompareScalers = clipFile is not null
         ? clipWays is null || clipWays.Contains("fsr", StringComparer.OrdinalIgnoreCase)
-        : shotCompares || clipFrames > 0;
+        : shotCompares || (clipFrames > 0 && clipKeep is null);
 
     // Audio endpoints are listed once here and refreshed when the user opens a combo, so a
     // headset plugged in mid-session shows up without polling WASAPI every frame.
@@ -1690,7 +1702,17 @@ void RunLoop()
             else if (taken >= wanted || (DateTime.UtcNow - clipStarted).TotalSeconds > 30)
             {
                 if (taken < wanted) Log.Warn($"clip: only {taken} of {wanted} frames came in 30 s");
-                renderer.SaveClip(shotPath);
+                // To a file as they came, at the rate they came at; or through the ways, with
+                // the same narrowing as for a clip from a file: only some of the ways, and
+                // those that go by motion once for each estimate of it.
+                if (clipKeep is not null)
+                    renderer.WriteClip(clipKeep, taken / Math.Max(0.001, (DateTime.UtcNow - clipStarted).TotalSeconds));
+                else
+                    renderer.SaveClip(shotPath, new ClipOptions
+                    {
+                        Ways = clipWays, Flow = clipFlow,
+                        Vectors = clipVectors, VectorsEvery = clipVectorsEvery, Timed = clipTimed
+                    });
                 shotPath = null;
                 quit = true;
             }

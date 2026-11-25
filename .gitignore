@@ -28,3 +28,5 @@ logs/
 
 # Diagnostic captures from --shot
 *.png.tmp
+# Pictures and clips kept to look at, not part of the project
+shots/

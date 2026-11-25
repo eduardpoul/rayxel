@@ -187,8 +187,11 @@ instead of played, every picture written to `NAME-clip/<way>/0000.png` and on:
 `--clip-ways=none,vsr,dlss-L,fsr` (which of them), `--clip-flow=fast,medium,max,zero` (each
 way that goes by motion once for each estimate of it; `zero` is no motion given),
 `--clip-vectors[=N]` (the vectors themselves, of every Nth frame), `--clip-time` (what each
-estimate costs the GPU), `--clip=<frames>` (how many to read). `tools/flow` has the scripts
-that make clips whose motion is known and check all of this against them.
+estimate costs the GPU), `--clip=<frames>` (how many to read). With `--shot` and
+`--clip[=<frames>]` and no file, the next frames of the source itself are kept and put
+through the same - a stretch of a game as it is played. `--clip-keep=<file.y4m>` only
+writes those frames to a file as they came, to be a `--clip-file` afterwards. `tools/flow`
+has the scripts that make clips whose motion is known and check all of this against them.
 
 ## Building
 

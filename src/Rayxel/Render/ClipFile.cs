@@ -184,6 +184,86 @@ public sealed partial class Renderer
         }
     }
 
+    /// <summary>
+    /// Diagnostic: the clip kept by <see cref="StartClip"/> written to a file of the kind
+    /// <see cref="LoadClip"/> reads, the frames as they arrived. A stretch of a game played
+    /// once can then be put through anything afterwards, as often as wanted and with
+    /// nothing connected. An 8-bit picture only.
+    /// </summary>
+    public bool WriteClip(string path, double rate)
+    {
+        lock (_context)
+        {
+            if (_clip is not { } clip || _clipCount == 0)
+            {
+                Log.Warn("clip: no frames were kept");
+                return false;
+            }
+            var desc = clip[0].Description;
+            if (desc.Format != Format.NV12)
+            {
+                Log.Warn($"clip: a {desc.Format} picture cannot be written to a file, only an 8-bit one");
+                return false;
+            }
+
+            int width = (int)desc.Width, height = (int)desc.Height, half = width / 2;
+            try
+            {
+                var staged = desc;
+                staged.Usage = ResourceUsage.Staging;
+                staged.BindFlags = BindFlags.None;
+                staged.CPUAccessFlags = CpuAccessFlags.Read;
+                staged.MiscFlags = ResourceOptionFlags.None;
+                using var staging = _device.CreateTexture2D(staged);
+
+                if (Path.GetDirectoryName(Path.GetFullPath(path)) is { Length: > 0 } dir) Directory.CreateDirectory(dir);
+                using var file = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.Read, 1 << 20);
+                int perSecond = Math.Max(1, (int)Math.Round(rate));
+                file.Write(Encoding.ASCII.GetBytes($"YUV4MPEG2 W{width} H{height} F{perSecond}:1 Ip A1:1 C420mpeg2\n"));
+                byte[] mark = Encoding.ASCII.GetBytes("FRAME\n");
+                byte[] u = new byte[half * (height / 2)], v = new byte[u.Length];
+
+                for (int i = 0; i < _clipCount; i++)
+                {
+                    _context.CopyResource(staging, clip[i]);
+                    var map = _context.Map(staging, 0, MapMode.Read);
+                    try
+                    {
+                        file.Write(mark);
+                        unsafe
+                        {
+                            byte* top = (byte*)map.DataPointer;
+                            for (int y = 0; y < height; y++)
+                                file.Write(new ReadOnlySpan<byte>(top + y * (long)map.RowPitch, width));
+                            // The colour lies below the brightness, its two planes side by
+                            // side in each pair of bytes; the file has them one after the other.
+                            byte* below = top + (long)map.RowPitch * height;
+                            for (int y = 0; y < height / 2; y++)
+                            {
+                                byte* line = below + y * (long)map.RowPitch;
+                                for (int x = 0; x < half; x++)
+                                {
+                                    u[y * half + x] = line[x * 2];
+                                    v[y * half + x] = line[x * 2 + 1];
+                                }
+                            }
+                        }
+                        file.Write(u);
+                        file.Write(v);
+                    }
+                    finally { _context.Unmap(staging, 0); }
+                }
+                Log.Info($"clip: {_clipCount} frames of {width}x{height} at {perSecond} a second written to {path}");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log.Error($"clip: {path} could not be written: {ex.Message}");
+                return false;
+            }
+        }
+    }
+
     /// <summary>Frames a second of the clip <see cref="LoadClip"/> read, as its file says; 30 when it does not.</summary>
     public double ClipRate { get; private set; } = 30;
 
