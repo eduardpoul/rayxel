@@ -136,9 +136,17 @@ internal sealed class NetFeed : IDisposable, IPictureSink
     /// <summary>This machine's clock in nanoseconds. Media Foundation's is the same one in 100 ns units.</summary>
     private static long NowNs() => (long)(Stopwatch.GetTimestamp() * NsPerTick);
 
+    // A codec and a bitrate of its own, for a stream that is not the one being watched: the
+    // settings' choice is for that one.
+    private readonly NetWire.Codec? _fixedCodec;
+    private readonly int _fixedKbps;
+
     public NetFeed(IPEndPoint sender, Peer? peer, int width, int height, int fps,
-                   IMFDXGIDeviceManager deviceManager, ID3D11Device device, INetSink sink, Func<bool> focused)
+                   IMFDXGIDeviceManager deviceManager, ID3D11Device device, INetSink sink, Func<bool> focused,
+                   NetWire.Codec? codec = null, int kbps = 0)
     {
+        _fixedCodec = codec;
+        _fixedKbps = kbps;
         _focused = focused;
         _sender = sender;
         _peer = peer;
@@ -158,7 +166,7 @@ internal sealed class NetFeed : IDisposable, IPictureSink
     /// </summary>
     private NetWire.Codec WantedCodec()
     {
-        var codec = NetDevice.Codec;
+        var codec = _fixedCodec ?? NetDevice.Codec;
         if (codec != NetWire.Codec.PyroWave || PyroWaveDecoder.Problem is not { } problem) return codec;
         if (!_pyroWaveRefusalSaid)
         {
@@ -173,8 +181,13 @@ internal sealed class NetFeed : IDisposable, IPictureSink
     /// or whatever the governor has come to.
     /// </summary>
     private int Wanted(NetWire.Codec codec) =>
-        codec == NetWire.Codec.PyroWave ? NetDevice.PyroWaveKbps
+        _fixedKbps > 0 ? _fixedKbps
+        : codec == NetWire.Codec.PyroWave ? NetDevice.PyroWaveKbps
         : NetDevice.Adaptive ? _governor.Current : NetDevice.BitrateKbps;
+
+    // Whether the governor sets the bitrate: not for PyroWave, whose figure is fixed, nor for
+    // a stream given one of its own.
+    private bool Governed(NetWire.Codec codec) => _fixedKbps <= 0 && NetDevice.Adaptive && codec != NetWire.Codec.PyroWave;
 
     /// <summary>What the frames arriving are, or "-" before the first. Read by the pump to say so.</summary>
     public string ArrivingCodec => _arrivingName;
@@ -238,7 +251,7 @@ internal sealed class NetFeed : IDisposable, IPictureSink
 
             Log.Info($"asking {_sender} for {_width}x{_height} {NetDevice.CodecName(_askedCodec)}, " +
                      $"{_askedKbps / 1000.0:0.#} Mbit/s at {_fps} fps" +
-                     (NetDevice.Adaptive && _askedCodec != NetWire.Codec.PyroWave
+                     (Governed(_askedCodec)
                          ? $", following the link up to {NetDevice.AdaptiveCeilingKbps / 1000.0:0.#}" : ""));
 
             while (_running)
@@ -257,7 +270,7 @@ internal sealed class NetFeed : IDisposable, IPictureSink
                     nextHello = now;
                 }
                 // PyroWave's figure is fixed; the governor is for the codecs it was made for.
-                bool governed = NetDevice.Adaptive && codec != NetWire.Codec.PyroWave;
+                bool governed = Governed(codec);
                 if (governed) _governor.Judge(now, NetDevice.AdaptiveCeilingKbps);
                 int wanted = Wanted(codec);
                 if (wanted != _askedKbps)

@@ -12,6 +12,15 @@ public static partial class Strings
     {
         ["ru"] = new()
         {
+            ["tileNow"] = "На экране",
+            ["tileStarting"] = "подключение…",
+            ["tileNoSignal"] = "нет сигнала",
+            ["tileBusyCard"] = "занята другой программой",
+            ["tileBusyNet"] = "смотрит другой компьютер",
+            ["tileOff"] = "трансляция выключена",
+            ["tileNotFound"] = "не найден",
+            ["tileForgot"] = "нужно связать заново",
+            ["tileFailed"] = "нет картинки",
             ["dVsr"] = "Нейросетевое увеличение в драйвере NVIDIA; качество задаётся в приложении NVIDIA",
             ["naVsrHdr"] = "источник в HDR, а путь драйвера только для SDR",
             ["naVsrFg"] = "не работает вместе с генерацией кадров",
@@ -101,6 +110,15 @@ public static partial class Strings
         },
         ["en"] = new()
         {
+            ["tileNow"] = "On screen",
+            ["tileStarting"] = "connecting…",
+            ["tileNoSignal"] = "no signal",
+            ["tileBusyCard"] = "in use by another program",
+            ["tileBusyNet"] = "another computer is watching",
+            ["tileOff"] = "streaming is off",
+            ["tileNotFound"] = "not found",
+            ["tileForgot"] = "needs pairing again",
+            ["tileFailed"] = "no picture",
             ["dVsr"] = "Neural upscaling in the NVIDIA driver; its quality is set in the NVIDIA app",
             ["naVsrHdr"] = "the source is HDR, and the driver’s path is for SDR only",
             ["naVsrFg"] = "does not run together with frame generation",
@@ -190,6 +208,15 @@ public static partial class Strings
         },
         ["uk"] = new()
         {
+            ["tileNow"] = "На екрані",
+            ["tileStarting"] = "підключення…",
+            ["tileNoSignal"] = "немає сигналу",
+            ["tileBusyCard"] = "зайнята іншою програмою",
+            ["tileBusyNet"] = "дивиться інший комп’ютер",
+            ["tileOff"] = "трансляцію вимкнено",
+            ["tileNotFound"] = "не знайдено",
+            ["tileForgot"] = "треба зв’язати знову",
+            ["tileFailed"] = "немає зображення",
             ["dVsr"] = "Нейромережеве збільшення в драйвері NVIDIA; якість задається в застосунку NVIDIA",
             ["naVsrHdr"] = "джерело в HDR, а шлях драйвера лише для SDR",
             ["naVsrFg"] = "не працює разом із генерацією кадрів",
@@ -279,6 +306,15 @@ public static partial class Strings
         },
         ["de"] = new()
         {
+            ["tileNow"] = "Auf dem Schirm",
+            ["tileStarting"] = "verbinde…",
+            ["tileNoSignal"] = "kein Signal",
+            ["tileBusyCard"] = "von einem anderen Programm belegt",
+            ["tileBusyNet"] = "ein anderer Computer schaut zu",
+            ["tileOff"] = "Übertragung aus",
+            ["tileNotFound"] = "nicht gefunden",
+            ["tileForgot"] = "neu koppeln nötig",
+            ["tileFailed"] = "kein Bild",
             ["dVsr"] = "Neuronale Hochskalierung im NVIDIA-Treiber; die Qualität wird in der NVIDIA-App eingestellt",
             ["naVsrHdr"] = "die Quelle ist HDR, der Weg des Treibers nur für SDR",
             ["naVsrFg"] = "läuft nicht zusammen mit Zwischenbildern",
@@ -368,6 +404,15 @@ public static partial class Strings
         },
         ["es"] = new()
         {
+            ["tileNow"] = "En pantalla",
+            ["tileStarting"] = "conectando…",
+            ["tileNoSignal"] = "sin señal",
+            ["tileBusyCard"] = "en uso por otro programa",
+            ["tileBusyNet"] = "otro ordenador está mirando",
+            ["tileOff"] = "la transmisión está apagada",
+            ["tileNotFound"] = "no encontrado",
+            ["tileForgot"] = "hay que volver a vincular",
+            ["tileFailed"] = "sin imagen",
             ["dVsr"] = "Escalado neuronal en el controlador de NVIDIA; su calidad se ajusta en la app de NVIDIA",
             ["naVsrHdr"] = "la fuente es HDR y la vía del controlador es solo para SDR",
             ["naVsrFg"] = "no funciona junto con la generación de fotogramas",

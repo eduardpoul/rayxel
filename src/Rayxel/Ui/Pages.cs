@@ -200,8 +200,11 @@ internal static class Pages
         var f = Widgets.F;
         Title(Strings.T("watchTitle"), Strings.T("watchSub"));
 
-        // What is on the screen right now, and the way back to it.
-        if (!model.NoDevice && model.Pump.State is CaptureState.Streaming or CaptureState.NoSignal or CaptureState.Starting)
+        // Every source as a small live picture, the one on the screen first; a click opens it.
+        if (model.Previews is not null && model.Devices.Count > 0)
+            Tiles(model);
+        // Without them, what is on the screen right now, and the way back to it.
+        else if (!model.NoDevice && model.Pump.State is CaptureState.Streaming or CaptureState.NoSignal or CaptureState.Starting)
         {
             if (BeginCard("##now"))
             {
@@ -258,6 +261,147 @@ internal static class Pages
         ImGui.Dummy(new Vector2(0, Layout.S(24)));
     }
 
+    /// <summary>
+    /// The sources as tiles, a live picture in each: as many to a row as fit at a readable
+    /// size, none wider than a thumbnail should be.
+    /// </summary>
+    private static void Tiles(AppModel model)
+    {
+        var watching = Watching(model);
+        var devices = model.Devices
+            .OrderBy(d => watching is not null && d.Is(watching) ? 0 : 1)
+            .ThenBy(d => d.Bus == DeviceBus.Network ? 1 : 0)
+            .ToList();
+
+        float avail = ImGui.GetContentRegionAvail().X;
+        float gap = Layout.S(12);
+        int perRow = Math.Clamp((int)((avail + gap) / (Layout.S(220) + gap)), 1, devices.Count);
+        float width = MathF.Floor(Math.Min(Layout.S(300), (avail - gap * (perRow - 1)) / perRow));
+        float pictureHeight = MathF.Round(width * 9f / 16f);
+        var size = new Vector2(width, pictureHeight + Layout.S(52));
+
+        var origin = ImGui.GetCursorScreenPos();
+        int rows = (devices.Count + perRow - 1) / perRow;
+        for (int i = 0; i < devices.Count; i++)
+        {
+            var at = origin + new Vector2(i % perRow * (size.X + gap), i / perRow * (size.Y + gap));
+            Tile(model, devices[i], watching, at, size, pictureHeight);
+        }
+        ImGui.SetCursorScreenPos(origin + new Vector2(0, rows * (size.Y + gap) - gap));
+        ImGui.Dummy(new Vector2(avail, Layout.S(24)));
+    }
+
+    // The source on the screen, while there is one.
+    private static CaptureDeviceInfo? Watching(AppModel model) =>
+        !model.NoDevice && model.Pump.State is CaptureState.Streaming or CaptureState.NoSignal or CaptureState.Starting
+            ? model.Pump.Device : null;
+
+    /// <summary>
+    /// One source's tile: its picture filling the top, its name and what it is doing below.
+    /// The one on the screen is outlined in the accent colour and marked so.
+    /// </summary>
+    private static void Tile(AppModel model, CaptureDeviceInfo device, CaptureDeviceInfo? watching, Vector2 min, Vector2 size,
+                             float pictureHeight)
+    {
+        var f = Widgets.F;
+        var draw = ImGui.GetWindowDrawList();
+        bool current = watching is not null && device.Is(watching);
+        bool forgot = NetDevice.Forgot(device);
+        var feed = current ? null : model.Previews?.For(device);
+        var surface = current ? model.Renderer.ActivePreview : feed?.Surface;
+        var state = feed?.State ?? PreviewState.Starting;
+
+        bool network = device.Bus == DeviceBus.Network;
+        var (status, colour) = current ? (CurrentMode(model), Theme.TextSecondary)
+            : forgot ? (Strings.T("tileForgot"), Theme.Caution)
+            : state switch
+            {
+                // What it will show when opened, as the one on the screen says what it shows.
+                PreviewState.Live => (feed?.Opens is { } opens ? ModeText(opens.Width, opens.Height, opens.MaxFps) : Strings.T("dAvail"),
+                                      Theme.TextSecondary),
+                PreviewState.NoSignal => (Strings.T("tileNoSignal"), Theme.Caution),
+                PreviewState.Busy => (Strings.T(network ? "tileBusyNet" : "tileBusyCard"), Theme.Caution),
+                PreviewState.Off => (Strings.T("tileOff"), Theme.Caution),
+                PreviewState.NotFound => (Strings.T("tileNotFound"), Theme.TextTertiary),
+                PreviewState.Forgotten => (Strings.T("tileForgot"), Theme.Caution),
+                PreviewState.Failed => (Strings.T("tileFailed"), Theme.TextTertiary),
+                _ => (Strings.T("tileStarting"), Theme.TextTertiary)
+            };
+        // A picture that has stopped stays up, as the last thing the source showed.
+        bool picture = surface is { TextureId: not 0 } && (current || state is PreviewState.Live or PreviewState.NoSignal);
+
+        ImGui.SetCursorScreenPos(min);
+        ImGui.PushID(device.SymbolicLink);
+        bool clicked = ImGui.InvisibleButton("##tile", size);
+        bool hovered = ImGui.IsItemHovered();
+        ImGui.PopID();
+        if (hovered) ImGui.SetMouseCursor(ImGuiMouseCursor.Hand);
+
+        var max = min + size;
+        var pictureMax = new Vector2(max.X, min.Y + pictureHeight);
+        float radius = Layout.S(Theme.RadiusOverlay);
+        draw.AddRectFilled(min, max, Theme.U32(hovered ? new Vector4(0.2f, 0.2f, 0.2f, 1f) : Theme.Card), radius);
+        draw.AddRectFilled(min, pictureMax, Theme.U32(Theme.Stage), radius, ImDrawFlags.RoundCornersTop);
+
+        if (picture)
+        {
+            // Filling the frame: what does not fit its proportions is cut from the edges.
+            float aspect = surface!.Width / (float)surface.Height, frame = size.X / pictureHeight;
+            Vector2 uv0 = Vector2.Zero, uv1 = Vector2.One;
+            if (aspect > frame) { uv0.X = (1f - frame / aspect) / 2f; uv1.X = 1f - uv0.X; }
+            else { uv0.Y = (1f - aspect / frame) / 2f; uv1.Y = 1f - uv0.Y; }
+            // A step dimmer until pointed at, so the one under the pointer is the bright one.
+            uint tint = hovered || current ? 0xFFFFFFFFu : Theme.U32(new Vector4(0.88f, 0.88f, 0.88f, 1f));
+            draw.AddImageRounded(surface.TextureId, min, pictureMax, uv0, uv1, tint, radius, ImDrawFlags.RoundCornersTop);
+        }
+        else
+        {
+            float glyph = Layout.S(28);
+            var centre = (min + pictureMax) / 2f;
+            Icons.Draw(draw, GlyphOf(device), centre - new Vector2(glyph / 2f), glyph, Theme.TextDisabled);
+        }
+
+        if (current)
+        {
+            string now = Strings.T("tileNow");
+            var text = Widgets.Measure(f.Caption, now);
+            var pillMin = min + new Vector2(Layout.S(8));
+            var pillMax = pillMin + text + new Vector2(Layout.S(16), Layout.S(6));
+            draw.AddRectFilled(pillMin, pillMax, Theme.U32(Theme.Accent), Layout.S(Theme.RadiusControl));
+            Widgets.DrawText(draw, f.Caption, pillMin + new Vector2(Layout.S(8), Layout.S(3)), Theme.TextOnAccent, now);
+        }
+
+        var stroke = current ? Theme.Accent : hovered ? Theme.SurfaceStroke : Theme.ControlStroke;
+        draw.AddRect(min, max, Theme.U32(stroke), radius, ImDrawFlags.None, current ? Layout.S(2) : 1f);
+
+        // The name and its state, cut short at the tile's edge rather than running past it.
+        float inset = Layout.S(12);
+        string title = NetDevice.DisplayName(device, model.Devices);
+        var name = Widgets.Measure(f.Body, title);
+        var line = Widgets.Measure(f.Caption, status);
+        float top = pictureMax.Y + (max.Y - pictureMax.Y - name.Y - line.Y - Layout.S(1)) / 2f;
+        draw.PushClipRect(new Vector2(min.X + inset, pictureMax.Y), new Vector2(max.X - inset, max.Y), true);
+        Widgets.DrawText(draw, f.Body, new Vector2(min.X + inset, top), Theme.TextPrimary, title);
+        Widgets.DrawText(draw, f.Caption, new Vector2(min.X + inset, top + name.Y + Layout.S(1)), colour, status);
+        draw.PopClipRect();
+
+        if (clicked) Open(model, device, forgot, current);
+    }
+
+    // What the source on the screen is sending: its size and rate.
+    private static string CurrentMode(AppModel model) =>
+        model.Pump.CurrentMode is { } mode ? ModeText(mode.Width, mode.Height, model.Pump.CurrentFps) : Strings.T("tileStarting");
+
+    private static string ModeText(int width, int height, double fps) => $"{width}×{height} · {fps:0} fps";
+
+    private static Icon GlyphOf(CaptureDeviceInfo device)
+    {
+        var peer = NetDevice.PeerOf(device);
+        return device.IsVirtual ? Icon.MonitorOff
+            : peer is not null ? (peer.Model == "Steam Deck" ? Icon.Handheld : Icon.Monitor)
+            : Icon.Camera;
+    }
+
     private static void EmptyRow(string text)
     {
         var f = Widgets.F;
@@ -300,6 +444,10 @@ internal static class Pages
             { } p => (p.Problem ?? Strings.T("dOffline"), Theme.Caution, "", forgot),
             _ => (NotChecked(device), Theme.TextTertiary, "", true)
         };
+        // Unless its tile has tried: a card whose picture is in its tile is free.
+        if (probe is null && device.Bus != DeviceBus.Network
+            && model.Previews?.For(device)?.State is PreviewState.Live or PreviewState.NoSignal)
+            (status, colour) = (Strings.T("dAvail"), Theme.Success);
 
         bool current = model.Pump.Device.Is(device) && !model.NoDevice
                        && model.Pump.State is CaptureState.Streaming or CaptureState.NoSignal or CaptureState.Starting;
@@ -309,10 +457,7 @@ internal static class Pages
 
         var draw = ImGui.GetWindowDrawList();
         float inset = Layout.S(12), icon = Layout.S(20);
-        var glyph = device.IsVirtual ? Icon.MonitorOff
-            : peer is not null ? (peer.Model == "Steam Deck" ? Icon.Handheld : Icon.Monitor)
-            : Icon.Camera;
-        Icons.Draw(draw, glyph, new Vector2(min.X + inset, min.Y + (row - icon) / 2f), icon,
+        Icons.Draw(draw, GlyphOf(device), new Vector2(min.X + inset, min.Y + (row - icon) / 2f), icon,
                    selectable ? Theme.TextSecondary : Theme.TextDisabled);
 
         string title = NetDevice.DisplayName(device, model.Devices);

@@ -294,6 +294,14 @@ public static class NetDevice
     /// list — is what the app reports once the stream is running: a docked Deck has a
     /// larger picture than any of these and simply sends the nearest fit.
     /// </summary>
+    /// <summary>
+    /// The mode a sender is asked for when it is opened to watch: the largest it offers. A
+    /// tile asks for the same, so that going from the tile to the whole screen keeps the
+    /// sender's capture as it is - a Deck's capture is made for one size, and a new size means
+    /// stopping it, which is what gamescope can least afford.
+    /// </summary>
+    internal static CaptureMode WatchMode(CaptureDeviceInfo device) => Modes(PeerOf(device)?.Model ?? "Steam Deck")[0];
+
     private static List<CaptureMode> Modes(string model)
     {
         var nv12 = VideoFormat.FromSubtype(VideoFormatGuids.NV12);

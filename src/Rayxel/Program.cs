@@ -213,6 +213,8 @@ if (netMbit is { } netAsked)
 
 Renderer? renderer = null;
 FramePump? pump = null;
+// The live tiles of the sources page: every source but the one watched, read while it is open.
+SourcePreviews? previews = null;
 AppModel? model = null;
 DeviceProbe? active = null;
 List<MenuEntry> menuEntries = [];
@@ -360,8 +362,9 @@ try
 
     pump = new FramePump(active.Device, renderer);
     pump.AttachD3D(renderer.Device);
+    if (pump.DxgiManager is { } manager) previews = new SourcePreviews(renderer, manager);
 
-    model = new AppModel { Renderer = renderer, Pump = pump };
+    model = new AppModel { Renderer = renderer, Pump = pump, Previews = previews };
     model.Devices = allDevices;
     model.Probed = probed;
     model.Active = active;
@@ -528,6 +531,7 @@ finally
     // exactly what the user did most recently.
     if (model is not null) { model.CaptureInto(settings); settings.Save(); }
     model?.Audio.Dispose();
+    previews?.Dispose();
     pump?.Dispose();
     renderer?.FrameGenProbe?.Dispose();
     renderer?.Dispose();
@@ -1260,6 +1264,10 @@ void RunLoop()
             pendingDeviceSwitch = null;
             try { SwitchDevice(target); } catch (Exception ex) { Log.Error("device switch failed", ex); }
         }
+
+        // The sources page's live tiles: read while it is open, and let go the moment it is not.
+        try { previews?.Update(allDevices, model.NoDevice ? null : pump.Device, model.Screen == Screen.Sources); }
+        catch (Exception ex) { Log.Error("source previews failed", ex); }
         if (pendingAudioRestart)
         {
             pendingAudioRestart = false;
@@ -1761,10 +1769,7 @@ static MenuEntry? ForcedMode(DeviceProbe probe, string? spec)
 
 static MenuEntry? PickInitialMode(DeviceProbe probe)
 {
-    var best = probe.BestRaw ?? probe.Renderable
-        .OrderByDescending(m => m.MaxFps)
-        .ThenByDescending(m => m.Width * m.Height)
-        .FirstOrDefault();
+    var best = probe.Opening;
     return best is null ? null : new MenuEntry(best, best.MaxFps);
 }
 
@@ -1797,6 +1802,8 @@ void SwitchDevice(CaptureDeviceInfo target)
 {
     // Release ours first. Two capture sources open at once is exactly the contention this
     // is trying to escape, and on a shared USB controller it can cost the other one frames.
+    // The sources page's tiles hold every other source, the one wanted among them.
+    previews?.StopAll();
     pump!.Stop();
 
     var fresh = Remember(CaptureDevice.Probe(target));

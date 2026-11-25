@@ -1138,6 +1138,104 @@ public sealed class Renderer : IDisposable
         }
     }
 
+    // ---- previews: the sources' pictures as small live tiles -----------------------------
+
+    private readonly List<PreviewSurface> _previews = [];
+    private long _activePreviewSerial = -1;
+
+    /// <summary>
+    /// The picture coming in now, as a tile, kept up to date while <see cref="ShowActivePreview"/>
+    /// is on: the source being watched needs no reading of its own.
+    /// </summary>
+    public PreviewSurface ActivePreview { get; } = new();
+
+    /// <summary>Whether <see cref="ActivePreview"/> follows the picture. Each new frame then costs a small conversion.</summary>
+    public bool ShowActivePreview { get; set; }
+
+    /// <summary>Takes a surface into the ones turned into pictures as their frames come.</summary>
+    public void AddPreview(PreviewSurface preview)
+    {
+        lock (_context) _previews.Add(preview);
+    }
+
+    /// <summary>Drops a surface and lets go of what it holds; frames sent to it afterwards are ignored.</summary>
+    public void RemovePreview(PreviewSurface preview)
+    {
+        lock (_context)
+        {
+            _previews.Remove(preview);
+            preview.Release();
+        }
+    }
+
+    /// <summary>
+    /// One frame of a source that is not the one watched, for its tile. From the thread that
+    /// reads that source; only the picture's own rectangle of the texture is taken.
+    /// </summary>
+    public void UploadPreview(PreviewSurface preview, ID3D11Texture2D source, int subresource, int width, int height,
+                              bool tenBit, bool hdr)
+    {
+        lock (_context)
+        {
+            if (preview.Released || !preview.EnsureVideo(_device, width, height, tenBit)) return;
+            _context.CopySubresourceRegion(preview.Video!, 0, 0, 0, 0, source, (uint)subresource,
+                                           new Box(0, 0, 0, width, height, 1));
+            preview.Hdr = hdr;
+            preview.Serial++;
+            preview.LastFrameMs = Environment.TickCount64;
+        }
+    }
+
+    // With the context held, before the frame is drawn: every tile with a new frame made
+    // into its picture, smaller sizes and all.
+    private void RefreshPreviews()
+    {
+        if (ShowActivePreview && _lumaView is not null && _chromaView is not null && _videoWidth > 0
+            && _uploadSerial != _activePreviewSerial)
+        {
+            _activePreviewSerial = _uploadSerial;
+            if (ConvertPreview(ActivePreview, _lumaView, _chromaView, _videoWidth, _videoHeight, SourceIsHdr))
+                ActivePreview.LastFrameMs = Environment.TickCount64;
+        }
+
+        foreach (var preview in _previews)
+        {
+            if (preview.Serial == preview.ConvertedSerial || preview.LumaView is null || preview.ChromaView is null) continue;
+            preview.ConvertedSerial = preview.Serial;
+            ConvertPreview(preview, preview.LumaView, preview.ChromaView, preview.VideoWidth, preview.VideoHeight, preview.Hdr);
+        }
+    }
+
+    private bool ConvertPreview(PreviewSurface target, ID3D11ShaderResourceView luma, ID3D11ShaderResourceView chroma,
+                                int width, int height, bool hdr)
+    {
+        if (!target.EnsureRgb(_device, width, height)) return false;
+        BindPipeline();
+        _context.OMSetRenderTargets(target.RgbTarget!);
+        _context.RSSetViewport(0, 0, target.RgbWidth, target.RgbHeight);
+        // The video path's own conversion, always to SDR: the interface that draws the tile
+        // encodes it for the screen as it does its own colours.
+        var mapped = _context.Map(_constants, 0, MapMode.WriteDiscard);
+        unsafe
+        {
+            var p = (float*)mapped.DataPointer;
+            p[0] = -1f; p[1] = 1f; p[2] = 2f; p[3] = -2f;
+            ((uint*)p)[4] = 0;
+            ((uint*)p)[5] = 0;
+            p[6] = VideoNits;
+            ((uint*)p)[7] = hdr ? 2u : 0u;
+        }
+        _context.Unmap(_constants, 0);
+        _context.PSSetShaderResource(0, luma);
+        _context.PSSetShaderResource(1, chroma);
+        _context.OMSetBlendState(null);
+        _context.Draw(4, 0);
+        _context.OMSetRenderTargets((ID3D11RenderTargetView?)null);
+        _context.GenerateMips(target.RgbView!);
+        target.Ready = true;
+        return true;
+    }
+
     /// <summary>Renders one frame: black background, letterboxed video, HUD on top.</summary>
     public void Render()
     {
@@ -1193,6 +1291,8 @@ public sealed class Renderer : IDisposable
                     FrameGenProbe!.Feed(_context, _rgbIntermediate!, motion, _videoWidth, _videoHeight);
                 }
             }
+
+            RefreshPreviews();
 
             _context.OMSetRenderTargets(_backBufferView);
             _context.RSSetViewport(0, 0, Width, Height);
@@ -2131,6 +2231,8 @@ public sealed class Renderer : IDisposable
         Flow?.Dispose();
         _rgbIntermediateSrv?.Dispose(); _rgbIntermediateRtv?.Dispose(); _rgbIntermediate?.Dispose();
         ReleaseVideoResources();
+        foreach (var preview in _previews) preview.Release();
+        ActivePreview.Release();
         _hudView?.Dispose(); _hudTexture?.Dispose();
         _alphaBlend?.Dispose(); _sampler?.Dispose(); _constants?.Dispose();
         _ps?.Dispose(); _vs?.Dispose();

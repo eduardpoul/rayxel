@@ -134,6 +134,9 @@ public sealed class AppModel
     public required Renderer Renderer { get; init; }
     public required FramePump Pump { get; init; }
 
+    /// <summary>The sources page's live tiles; null where Media Foundation could not be bound to the GPU.</summary>
+    public SourcePreviews? Previews { get; init; }
+
     public List<CaptureDeviceInfo> Devices { get; set; } = [];
     public Dictionary<string, DeviceProbe> Probed { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public DeviceProbe? Active { get; set; }

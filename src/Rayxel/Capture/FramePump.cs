@@ -222,6 +222,9 @@ public sealed class FramePump : IDisposable, INetSink
     /// Binds our D3D device to Media Foundation so decoded frames land in video memory
     /// as textures instead of being copied through system memory first.
     /// </summary>
+    /// <summary>Media Foundation's way to our Direct3D device, for whatever else reads a source onto it.</summary>
+    public IMFDXGIDeviceManager? DxgiManager => _dxgiManager;
+
     public void AttachD3D(ID3D11Device device)
     {
         // Vortice's wrapper keeps the reset token that MFCreateDXGIDeviceManager hands

@@ -39,6 +39,18 @@ public sealed record DeviceProbe(
         .ThenByDescending(m => m.Width * m.Height)
         .FirstOrDefault();
 
+    /// <summary>The mode the device is opened in when it is chosen: <see cref="BestRaw"/>, or else the fastest, then largest, it can draw.</summary>
+    public CaptureMode? Opening => OpeningOf(Modes);
+
+    /// <summary>The same choice from a mode list alone, for whatever has read one without probing.</summary>
+    public static CaptureMode? OpeningOf(IEnumerable<CaptureMode> modes)
+    {
+        var renderable = modes.Where(m => m.IsRenderable).ToList();
+        return renderable.Where(m => m.Transport == WireTransport.Raw)
+                         .OrderByDescending(m => m.MaxFps).ThenByDescending(m => m.Width * m.Height).FirstOrDefault()
+               ?? renderable.OrderByDescending(m => m.MaxFps).ThenByDescending(m => m.Width * m.Height).FirstOrDefault();
+    }
+
     /// <summary>True when the device can hand us 10-bit pixels, which is what HDR capture needs.</summary>
     public bool SupportsTenBit => Renderable.Any(m => m.Format.IsHighBitDepth);
 
