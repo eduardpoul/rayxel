@@ -162,6 +162,7 @@ Everything is optional; the app needs no arguments.
 | `--fsr-model=full\|lite\|rdna2` | the network of FSR 4 to run, whatever card it is |
 | `--fsr-version=<n>` | a version AMD's library offers by itself, e.g. `3.1` |
 | `--fsr-dir=<folder>` | where to look for AMD's library first |
+| `--flow-quality=fast\|medium\|max` | how much work goes into the motion DLSS, FSR and frame generation go by |
 | `--framegen=dlss\|off` | start with DLSS Frame Generation on or off |
 | `--fg=2\|3\|4\|auto` | frames shown for each real one; `auto` is the most the display can show |
 | `--fg-probe=<file.png>` | put frames through frame generation, write one set out, and exit (`--fg-probe-x=2\|3\|4`) |
@@ -173,11 +174,21 @@ Everything is optional; the app needs no arguments.
 | `--bench[=<seconds>]` | measure for a fixed time (default 20 s), log percentiles, and exit |
 | `--console` | attach to the terminal it was started from and print the log there |
 | `--verbose` | debug-level logging |
+| `--window=<w>x<h>` | the size the window opens at, inside its frame |
+| `--clip-file=<file.y4m>` | play a clip from a file (8-bit 4:2:0, as `ffmpeg -pix_fmt yuv420p X.y4m` writes it) in place of a source, round and round; nothing is connected |
 | `--shot=<file.png>` | render for a few seconds, save the frame as a PNG, and exit |
 | `--screen=<name>` | force a state for inspection: `splash`, `sources`, `transmit`, `settings`, `app`, `plates`, `panel`, `tele-line`, `tele-card`, `nosignal`, `busy`, `composed`, `scaler-list`, `scaler-variants`, `scaler-info`, `scaler-variant-info`, `quit`, `pair`, `pair-pin`, `deck-forgot`, `deck-busy`, `deck-off`, `forget` |
 
 `--shot` saves the back buffer rather than the screen, so it works even when the window is
 covered or on a display nobody is looking at.
+
+With `--shot` and `--clip-file` together, any of these has the clip put through the upscalers
+instead of played, every picture written to `NAME-clip/<way>/0000.png` and on:
+`--clip-ways=none,vsr,dlss-L,fsr` (which of them), `--clip-flow=fast,medium,max,zero` (each
+way that goes by motion once for each estimate of it; `zero` is no motion given),
+`--clip-vectors[=N]` (the vectors themselves, of every Nth frame), `--clip-time` (what each
+estimate costs the GPU), `--clip=<frames>` (how many to read). `tools/flow` has the scripts
+that make clips whose motion is known and check all of this against them.
 
 ## Building
 
@@ -247,6 +258,18 @@ and why.
   Rayxel estimates the motion, supplies a flat depth, and cannot supply the shift, so DLSS
   here steadies and cleans the picture rather than recovering detail that was never sent,
   and it smears where the estimate is wrong.
+- **A better estimate of motion buys little.** The estimate has three settings (**…** →
+  motion vectors): one vector for every 4x4 block, for every 2x2, or for every pixel. On
+  clips whose motion is known the finer two are two to three times as exact where there is
+  detail (a median error of 0.03-0.06 px against 0.11-0.14) and cost two to three times
+  as much (0.33, 0.74 and 0.93 ms a 1280x800 frame on an RTX 5080). What DLSS and FSR make
+  of it changes far less: about +0.5 dB on moving detail, anything from +1 to -1 dB on
+  things that cross the picture depending on what is behind them, nothing measurable on a
+  clip of real video, and still text over a moving picture comes out a little worse than
+  with the coarse estimate. With the true
+  vectors in place of any estimate the same clips gain 1 to 3 dB on moving things, so what
+  is left to win is at the outlines of things, where no estimate here knows which of two
+  is in front.
 - **DLSS needs an NVIDIA RTX card and a copy of `nvngx_dlss.dll`,** which is not part of
   Rayxel. The driver uses one placed beside `Rayxel.exe` (it comes with NVIDIA's DLSS SDK),
   or its own copy - which it only lends to a program it does not know while DLSS override

@@ -34,6 +34,18 @@ string? shotPath = null;
 bool shotCompares = false;
 int clipFrames = 0;
 DateTime clipStarted = default;
+// A clip read from a file in place of one kept from the source, and what is done with it.
+string? clipFile = null;
+string[]? clipWays = null, clipFlow = null;
+string? clipTruth = null;
+bool clipVectors = false, clipTimed = false;
+int clipVectorsEvery = 1;
+long clipLoadedAt = -1;
+int clipShown = -1;
+var clipClock = new System.Diagnostics.Stopwatch();
+FlowQuality? forcedFlowQuality = null;
+int windowWidth = 1600, windowHeight = 900;
+bool windowSized = false;
 string? frameGenProbe = null;
 int frameGenProbeFactor = 2;
 // Frame generation as asked for on the command line: null leaves what was remembered.
@@ -83,6 +95,45 @@ foreach (var arg in args)
     else if (arg is "--clip") clipFrames = 120;
     else if (arg.StartsWith("--clip=", StringComparison.OrdinalIgnoreCase))
         clipFrames = int.TryParse(arg[7..], out int clipAsked) ? Math.Clamp(clipAsked, 2, 600) : 120;
+    // A clip read from a file - --clip-file=X.y4m, 8-bit 4:2:0 as ffmpeg writes it - in place
+    // of a source, and none is opened at all. By itself it is played round and round through
+    // whatever is switched on, to be watched. With --shot and any of the --clip-... below it
+    // is put through the ways instead, as --clip does a clip kept from a source: the same
+    // frames every time, and they can be frames whose motion is known. --clip=FRAMES says
+    // how many to read.
+    else if (arg.StartsWith("--clip-file=", StringComparison.OrdinalIgnoreCase)) clipFile = arg[12..];
+    // Only these of the ways, by the names of their folders: --clip-ways=none,dlss-L,fsr.
+    else if (arg.StartsWith("--clip-ways=", StringComparison.OrdinalIgnoreCase))
+        clipWays = arg[12..].Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+    // The ways that go by motion run once for each of these estimates of it:
+    // --clip-flow=fast,medium,max, and zero for no motion given at all.
+    else if (arg.StartsWith("--clip-flow=", StringComparison.OrdinalIgnoreCase))
+        clipFlow = arg[12..].Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+    // For --clip-flow=truth: the folder with the clip's real motion, NNNN.flow for each frame.
+    else if (arg.StartsWith("--clip-truth=", StringComparison.OrdinalIgnoreCase)) clipTruth = arg[13..];
+    // The vectors of each of those written out frame by frame, or of every Nth frame.
+    else if (arg is "--clip-vectors") clipVectors = true;
+    else if (arg.StartsWith("--clip-vectors=", StringComparison.OrdinalIgnoreCase))
+    {
+        clipVectors = true;
+        clipVectorsEvery = int.TryParse(arg[15..], out int every) ? Math.Max(1, every) : 1;
+    }
+    // And what each of them costs the GPU, in the log.
+    else if (arg is "--clip-time") clipTimed = true;
+    // How much work goes into the motion estimate: --flow-quality=fast|medium|max.
+    else if (arg.StartsWith("--flow-quality=", StringComparison.OrdinalIgnoreCase))
+        forcedFlowQuality = arg[15..].ToLowerInvariant() switch
+        {
+            "fast" => FlowQuality.Fast, "medium" => FlowQuality.Medium, "max" => FlowQuality.Max, _ => null
+        };
+    // The size the window opens at, inside its frame: --window=1920x1080.
+    else if (arg.StartsWith("--window=", StringComparison.OrdinalIgnoreCase))
+    {
+        string[] size = arg[9..].Split('x', 'X');
+        if (size.Length == 2 && int.TryParse(size[0], out int w) && int.TryParse(size[1], out int h) && w >= 320 && h >= 200)
+            (windowWidth, windowHeight, windowSized) = (w, h, true);
+        else Log.Warn($"{arg}: expected a size like 1920x1080");
+    }
     // Puts real frames through DLSS Frame Generation and writes one generated frame out
     // between the two it came from: --fg-probe=FILE.png. See FrameGenProbe.
     else if (arg.StartsWith("--fg-probe=", StringComparison.OrdinalIgnoreCase)) frameGenProbe = arg[11..];
@@ -283,9 +334,16 @@ try
         return 0;
     }
 
+    // A clip from a file wants no source: the stand-in, which is never opened.
+    if (clipFile is not null)
+    {
+        deviceSelector = null;
+        active = NoDeviceProbe();
+    }
+
     // Last used device, if it is still here. A remembered choice is only a preference:
     // if the card was unplugged or is now busy, fall through to choosing afresh.
-    if (deviceSelector is null && settings.DeviceLink is { Length: > 0 } link)
+    if (clipFile is null && deviceSelector is null && settings.DeviceLink is { Length: > 0 } link)
     {
         var remembered = allDevices.FirstOrDefault(d =>
             string.Equals(d.SymbolicLink, link, StringComparison.OrdinalIgnoreCase));
@@ -319,7 +377,8 @@ try
     foreach (var p in probed.Values) Report(p);
 
     bool noDevice = false;
-    if (active is null || !active.IsReady)
+    if (clipFile is not null) { noDevice = true; active ??= NoDeviceProbe(); }
+    else if (active is null || !active.IsReady)
     {
         var busy = probed.Values.Count(p => p.Availability == DeviceAvailability.Busy);
         Log.Error(busy > 0
@@ -339,7 +398,7 @@ try
     menuEntries = BuildMenuEntries(active.Modes);
     Log.Info($"{menuEntries.Count} renderable modes offered in the menu");
 
-    const int WindowWidth = 1600, WindowHeight = 900;
+    int WindowWidth = windowWidth, WindowHeight = windowHeight;
     hwnd = Win32.CreateAppWindow("Rayxel", wndProc, WindowWidth, WindowHeight,
                                  AppIcon.Large, AppIcon.Small);
     Layout.DisplayHeight = Win32.MonitorHeight(hwnd);
@@ -358,7 +417,12 @@ try
     renderer.TestPatternHdr = testPatternHdr;
     renderer.SourceRange = forcedSourceRange >= 0 ? forcedSourceRange : Math.Clamp(settings.SourceRange, 0, 2);
     renderer.HdrAsIs = forcedHdrAsIs ?? settings.HdrSourceAsIs;
-    if (renderer.Flow is { } startingFlow) startingFlow.View = startFlow;
+    if (renderer.Flow is { } startingFlow)
+    {
+        startingFlow.View = startFlow;
+        startingFlow.Quality = forcedFlowQuality
+            ?? (Enum.IsDefined((FlowQuality)settings.FlowQuality) ? (FlowQuality)settings.FlowQuality : FlowQuality.Fast);
+    }
 
     pump = new FramePump(active.Device, renderer);
     pump.AttachD3D(renderer.Device);
@@ -368,7 +432,8 @@ try
     model.Devices = allDevices;
     model.Probed = probed;
     model.Active = active;
-    model.DeviceNamed = deviceSelector is not null;
+    // A clip from a file is what was asked for, as a device named outright is: no picker first.
+    model.DeviceNamed = deviceSelector is not null || clipFile is not null;
     model.NoDevice = noDevice;
     model.DisplayHz = Win32.MonitorRefreshHz(hwnd);
     model.SelectScaler = want => { pendingScaler = want; model!.Touch(); };
@@ -434,7 +499,10 @@ try
                 : Enum.IsDefined((FsrModel)settings.FsrModel) ? (FsrModel)settings.FsrModel : FsrModel.Library);
     }
     // A clip wants FSR built and ready beside DLSS by the time it is taken.
-    renderer.CompareScalers = shotCompares || clipFrames > 0;
+    // One from a file with its ways named only waits for FSR when FSR is one of them.
+    renderer.CompareScalers = clipFile is not null
+        ? clipWays is null || clipWays.Contains("fsr", StringComparer.OrdinalIgnoreCase)
+        : shotCompares || clipFrames > 0;
 
     // Audio endpoints are listed once here and refreshed when the user opens a combo, so a
     // headset plugged in mid-session shows up without polling WASAPI every frame.
@@ -445,7 +513,8 @@ try
         : AudioEndpoints.MatchTo(active.Device)?.Id;
     pendingAudioRestart = !noDevice && HasSound(active.Device);
 
-    if (settings.Borderless) pendingWindowKind = WindowKind.BorderlessFullscreen;
+    // A size asked for outright is a window of that size, whatever was remembered.
+    if (settings.Borderless && !windowSized) pendingWindowKind = WindowKind.BorderlessFullscreen;
     if (forcedScreen is not null)
         model.Screen = forcedScreen.ToLowerInvariant() switch
         {
@@ -523,6 +592,8 @@ try
 catch (Exception ex)
 {
     Log.Error("fatal", ex);
+    // Where it happened is most of what there is to know about it.
+    if (ex.StackTrace is { } trace) Log.Error(trace);
     return 2;
 }
 finally
@@ -1558,7 +1629,48 @@ void RunLoop()
         // A clip: kept from the frames as they come, once FSR is not still being built,
         // then put through every way. A source that stops sending - a still menu over the
         // network sends nothing - gives what it has after half a minute.
-        if (shotPath is not null && clipFrames > 0 && presented > 400)
+        // A clip from a file: read once the window is up.
+        bool clipRuns = clipFile is not null && shotPath is not null
+                        && (clipWays is not null || clipFlow is not null || clipVectors || clipTimed);
+        if (clipFile is not null && clipLoadedAt < 0 && presented > 20)
+        {
+            if (renderer.LoadClip(clipFile, clipFrames > 0 ? clipFrames : 600))
+            {
+                clipLoadedAt = presented;
+                clipStarted = DateTime.UtcNow;
+                clipClock.Restart();
+            }
+            else { shotPath = null; quit = true; }
+        }
+        else if (clipFile is not null && clipLoadedAt >= 0 && !clipRuns)
+        {
+            // Played: the frame the clock has reached, round and round.
+            int length = renderer.ClipProgress.Taken;
+            int at = length > 0 ? (int)(clipClock.Elapsed.TotalSeconds * renderer.ClipRate) % length : 0;
+            if (at != clipShown)
+            {
+                clipShown = at;
+                renderer.ShowClipFrame(at);
+            }
+        }
+
+        if (clipRuns)
+        {
+            // Put through the ways: after a moment for the scaler asked for to come in on
+            // the clip's first frame, and for FSR to be built beside it.
+            if (clipLoadedAt >= 0 && presented > clipLoadedAt + 60
+                && (renderer.Fsr is not { Possible: true, Building: true } || (DateTime.UtcNow - clipStarted).TotalSeconds > 120))
+            {
+                renderer.SaveClip(shotPath!, new ClipOptions
+                {
+                    Ways = clipWays, Flow = clipFlow, TruthFolder = clipTruth,
+                    Vectors = clipVectors, VectorsEvery = clipVectorsEvery, Timed = clipTimed
+                });
+                shotPath = null;
+                quit = true;
+            }
+        }
+        else if (shotPath is not null && clipFile is null && clipFrames > 0 && presented > 400)
         {
             var (taken, wanted) = renderer.ClipProgress;
             if (clipStarted == default)
@@ -1678,7 +1790,7 @@ void RunLoop()
 
             Log.Info(
                 $"#{m?.TypeIndex,-3} {m?.Width}x{m?.Height} {pump.ActiveSubtype,-5} " +
-                $"{FramePump.DescribeTransport(m!),-38} " +
+                $"{(m is null ? "no source" : FramePump.DescribeTransport(m)),-38} " +
                 $"budget {budgetMs,5:0.00}ms  age {age}  " +
                 $"cpu {appCpuMs,5:0.00}  gpu {renderer!.LastGpuMs,5:0.00}  " +
                 $"free {budgetMs - appCpuMs - renderer.LastGpuMs,5:0.00}ms  " +
