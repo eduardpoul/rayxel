@@ -175,8 +175,8 @@ function Content() {
     }
   }
 
-  // Off is the sender's own switch: it stops streaming and answering, and the program, and
-  // with it gamescope's capture, stays as it is.
+  // Off is the sender's own switch: it stops streaming and answering. The program stays as it
+  // is; gamescope's capture is let go, the safe way, once nobody has watched for 30 s.
   async function switchTo(on: boolean) {
     setWantEnabled(on);
     await run(() => setEnabled(on));

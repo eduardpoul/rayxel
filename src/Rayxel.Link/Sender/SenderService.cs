@@ -23,9 +23,12 @@ namespace Rayxel.Link.Sender;
 /// </para>
 /// <para>
 /// One viewer at a time. The capture is this program's, not the viewer's: opened for the
-/// first viewer and then kept, viewer or no viewer, because stopping one is what can bring
-/// gamescope down (see <see cref="ICaptureSource"/>). Switching the sender off stops the
-/// stream and keeps the capture; only ending the program lets it go.
+/// first viewer and kept while viewers come and go, because each stop is a moment that can
+/// bring gamescope down (see <see cref="ICaptureSource"/>). With nobody watching for
+/// <see cref="IdleCaptureNs"/> it is let go all the same - paused, settled, closed, the safe
+/// way - since a sender left switched on would otherwise spend the battery on a picture
+/// nobody sees. Switching the sender off stops the stream, and the capture follows once the
+/// same time has passed.
 /// </para>
 /// </summary>
 public sealed class SenderService : IDisposable
@@ -98,6 +101,14 @@ public sealed class SenderService : IDisposable
     private CaptureFormat _format;
     private ICaptureSource? _leaving;          // paused, waiting out SettleMs before it is disposed
     private long _leavingSinceNs;
+    private long _idleSinceNs;                 // when the last viewer left a capture that is still held; 0 while one watches
+
+    // How long a capture is kept with nobody watching. Held, it costs the source a second
+    // picture of every frame and this program a copy of each - on a Deck's battery, for
+    // nothing, if the sender was left on and the viewer is gone for good. Long enough that a
+    // viewer that drops out and comes back, or goes from a tile to the whole screen, finds it
+    // still there; after it, the next viewer waits the second a new one takes to start.
+    private const long IdleCaptureNs = 30_000_000_000;
     private (SocketAddress Address, string Text, uint Session, Wire.HelloMessage Hello, SecureChannel? Channel, Peer? Peer)? _waiting;
     private byte[]? _kept;                     // the newest picture, for a viewer that comes while the screen is still
     private int _keptStride;
@@ -186,8 +197,8 @@ public sealed class SenderService : IDisposable
 
         LinkLog.Info($"rayxel-send {Version} on {_platform.Name}: '{Name}', id {_identity.IdText}");
         LinkLog.Info($"listening: UDP port {_settings.Port}, source '{Source}', send buffer {socket.SendBufferSize / 1024} kB");
-        LinkLog.Info("           nothing is captured until the first viewer asks, and from then on the capture stays");
-        LinkLog.Info("           attached until this program ends");
+        LinkLog.Info("           nothing is captured until the first viewer asks; the capture is kept while viewers");
+        LinkLog.Info($"           come and go, and let go after {IdleCaptureNs / 1_000_000_000} s with nobody watching");
         for (int i = 0; i < Wire.CodecCount; i++)
         {
             var codec = (Wire.Codec)i;
@@ -834,7 +845,7 @@ public sealed class SenderService : IDisposable
         });
     }
 
-    /// <summary>The viewer is gone or being replaced. The capture stays as it is.</summary>
+    /// <summary>The viewer is gone or being replaced. The capture stays as it is, until the tick finds it idle.</summary>
     private void StopStream(string why)
     {
         if (_viewer is not { } viewer) return;
@@ -1207,6 +1218,20 @@ public sealed class SenderService : IDisposable
                 StopStream("the viewer went quiet");
                 changed = true;
             }
+
+            // Nobody watching for a while: the capture goes, the safe way, as for a new size.
+            if (_viewer is null && _capture is not null && _waiting is null)
+            {
+                if (_idleSinceNs == 0) _idleSinceNs = now;
+                else if (now - _idleSinceNs >= IdleCaptureNs)
+                {
+                    LinkLog.Info($"capture  : let go, nobody has watched for {IdleCaptureNs / 1_000_000_000} s");
+                    ReleaseCapture();
+                    _idleSinceNs = 0;
+                    changed = true;
+                }
+            }
+            else _idleSinceNs = 0;
 
             if (_leaving is not null && now - _leavingSinceNs >= ICaptureSource.SettleMs * 1_000_000L)
             {
