@@ -260,16 +260,17 @@ and why.
   and it smears where the estimate is wrong.
 - **A better estimate of motion buys little.** The estimate has three settings (**…** →
   motion vectors): one vector for every 4x4 block, for every 2x2, or for every pixel. On
-  clips whose motion is known the finer two are two to three times as exact where there is
-  detail (a median error of 0.03-0.06 px against 0.11-0.14) and cost two to three times
-  as much (0.33, 0.74 and 0.93 ms a 1280x800 frame on an RTX 5080). What DLSS and FSR make
-  of it changes far less: about +0.5 dB on moving detail, anything from +1 to -1 dB on
-  things that cross the picture depending on what is behind them, nothing measurable on a
-  clip of real video, and still text over a moving picture comes out a little worse than
-  with the coarse estimate. With the true
-  vectors in place of any estimate the same clips gain 1 to 3 dB on moving things, so what
-  is left to win is at the outlines of things, where no estimate here knows which of two
-  is in front.
+  clips whose motion is known the finer two are three times as exact where there is detail
+  (a median error of 0.03-0.05 px against 0.11-0.14) and cost about three times as much
+  (0.33, 0.85 and 1.05 ms a 1280x800 frame on an RTX 5080). What DLSS and FSR make of it
+  changes far less: with the 2x2 setting about +0.4 dB on moving detail and +0.4 to +1 dB
+  on things that cross the picture, nothing measurable on a clip of real video, and still
+  text over a moving picture comes out a little worse than with the coarse estimate. The
+  per-pixel setting is closer at the outlines of things and gives no better a picture than
+  the 2x2 one. With the true vectors in place of any estimate the same clips gain 1 to 3
+  dB more on moving things - most of it lost to errors of under a quarter of a pixel,
+  which is about as close as this way of estimating gets, and the rest at outlines, where
+  nothing here knows which of two things is in front.
 - **DLSS needs an NVIDIA RTX card and a copy of `nvngx_dlss.dll`,** which is not part of
   Rayxel. The driver uses one placed beside `Rayxel.exe` (it comes with NVIDIA's DLSS SDK),
   or its own copy - which it only lends to a program it does not know while DLSS override
