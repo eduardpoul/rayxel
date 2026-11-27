@@ -84,3 +84,32 @@ vectors in one place at a time (`mix_truth.py`):
   something in front; and letting only blocks found without a doubt answer for flat ones.
   Which of two moving things is in front is still not known; telling it would take the
   estimate run backwards as well, to see what each frame hides of the other.
+
+## DLSS's networks, and how little there is to do at a small enlargement
+
+With the driver leaving the choice to the application (it had forced M on every run above),
+the same clips through each network DLSS offers, the medium estimate throughout, in dB
+against the reference:
+
+| clip | plain scaling | K | L | M |
+|---|---|---|---|---|
+| layers, doubled: the whole picture | - | 31.65 | 33.36 | 34.03 |
+| layers, doubled: the things crossing it | - | 33.61 | 38.81 | 39.28 |
+| still background, doubled: the whole picture | - | 32.31 | 33.17 | 33.09 |
+| zoom, doubled: the whole picture | - | 32.46 | 33.34 | 34.05 |
+| real video, doubled: the whole picture | - | 32.55 | 34.10 | 34.22 |
+| layers, 1440x810 to 1920x1080: the whole picture | 37.85 | 36.49 | 35.27 | 37.01 |
+| the same: the things crossing it | 37.43 | 35.68 | 39.32 | 39.64 |
+| the same: still text over it | 19.97 | 18.82 | 19.88 | 21.16 |
+| still background, 1440x810 to 1920x1080: the whole picture | 37.88 | 36.99 | 36.92 | 38.29 |
+
+M is the closest nearly everywhere and K the furthest, at both enlargements - the other way
+round from NVIDIA's advice for a game, which is K for anything short of doubling. K is also
+the cheapest: 0.9 ms a frame of 1920x1080 made 2560x1440 on an RTX 5080, against 1.25 for M
+and 1.55 for L. At a third as large again there is little left for any of them to do: the
+picture merely scaled is as close to the reference as M's, and what M adds is edge - 97 to
+103 % of the reference's fine detail where scaling leaves 77 % - and steadier text.
+`make_clips.py --size 1440x810 --ref=4/3` makes the clips for that.
+
+The mode DLSS is told it is in (quality, DLAA, "ultra quality") changes nothing by itself:
+see `--dlss-mode` in the main README.

@@ -17,10 +17,11 @@ For each scene it writes
                  two of them); `hidden` - pixels that were not in the
                  frame before at all: behind something, or outside the picture
   NAME-ref.y4m   with --ref: the same clip at twice the size, which is what an upscaler
-                 doubling it ought to arrive at
+                 doubling it ought to arrive at; with --ref=4/3 a third as large again, for
+                 an upscaler that has that little to do (the size is then to divide by 3)
 
 Usage: make_clips.py OUTDIR --bg PICTURE --cut PICTURE [--cut-at X,Y;X,Y;X,Y] [--size 960x540]
-                     [--scenes a,b] [--frames N] [--truth N] [--ref]
+                     [--scenes a,b] [--frames N] [--truth N] [--ref[=2|4/3|4]]
 It needs Pillow, numpy, and ffmpeg on the path.
 """
 import argparse
@@ -130,7 +131,8 @@ def render(name, spec, out_dir, bg_big, cut_src, cut_at, w, h, frames, truth, re
         hud_label.paste(5, (0, 0), text.point(lambda a: 255 if a >= 128 else 0))
 
     clip = writer(os.path.join(out_dir, name + ".y4m"), w, h)
-    clip_ref = writer(os.path.join(out_dir, name + "-ref.y4m"), w * 2, h * 2) if ref else None
+    # ref is what the big picture is reduced by for the reference: S / the enlargement.
+    clip_ref = writer(os.path.join(out_dir, name + "-ref.y4m"), w * S // ref, h * S // ref) if ref else None
 
     # Pixel centres of the written picture, in the big picture's coordinates.
     grid_x, grid_y = np.meshgrid((np.arange(w) + 0.5) * S, (np.arange(h) + 0.5) * S)
@@ -186,7 +188,7 @@ def render(name, spec, out_dir, bg_big, cut_src, cut_at, w, h, frames, truth, re
 
         clip.stdin.write(canvas.reduce(S).convert("RGB").tobytes())
         if clip_ref is not None:
-            clip_ref.stdin.write(canvas.reduce(S // 2).convert("RGB").tobytes())
+            clip_ref.stdin.write(canvas.reduce(ref).convert("RGB").tobytes())
 
         label = consensus(np.asarray(label_big), w, h)
         if 0 < t <= truth:
@@ -234,10 +236,13 @@ def main():
     ap.add_argument("--scenes", default=",".join(SCENES))
     ap.add_argument("--frames", type=int, default=0)
     ap.add_argument("--truth", type=int, default=8)
-    ap.add_argument("--ref", action="store_true")
+    ap.add_argument("--ref", nargs="?", const="2", default="", choices=["", "2", "4/3", "4"])
     args = ap.parse_args()
 
     w, h = (int(v) for v in args.size.lower().split("x"))
+    reduce_by = {"": 0, "2": S // 2, "4/3": 3, "4": 1}[args.ref]
+    if reduce_by and (w * S % reduce_by or h * S % reduce_by):
+        ap.error(f"--ref={args.ref} needs a size that divides by {reduce_by}")
     os.makedirs(args.out, exist_ok=True)
     bg = Image.open(args.bg).convert("RGB")
     # Large enough for the window and its travel: at least twice the window each way.
@@ -250,7 +255,7 @@ def main():
         cut_at = [(int(cut.width * fx), int(cut.height * fy)) for fx, fy in ((0.62, 0.28), (0.78, 0.31), (0.20, 0.35))]
     for name in args.scenes.split(","):
         spec = SCENES[name]
-        render(name, spec, args.out, bg_big, cut, cut_at, w, h, args.frames or spec["frames"], args.truth, args.ref)
+        render(name, spec, args.out, bg_big, cut, cut_at, w, h, args.frames or spec["frames"], args.truth, reduce_by)
 
 
 if __name__ == "__main__":
