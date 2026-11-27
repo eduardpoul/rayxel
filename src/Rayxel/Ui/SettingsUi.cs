@@ -80,6 +80,7 @@ internal static class SettingsUi
                 if (model.ScalerInert && model.Upscaler.Index != 0)
                     Note(string.Format(Strings.T("scaleInert"), model.Upscaler.Short()), Theme.Caution);
                 TechniqueRows(model, "##fg", model.FrameGenerators, model.FrameGenerator, "", t => model.SelectFrameGen(t.Index));
+                MotionRow(model, "##flow");
                 HdrRow(model);
                 if (model.Renderer.SwapChainIsPq) BrightnessRows(model);
 
@@ -149,6 +150,7 @@ internal static class SettingsUi
             if (model.ScalerInert && model.Upscaler.Index != 0)
                 Note(string.Format(Strings.T("scaleInert"), model.Upscaler.Short()), Theme.Caution);
             TechniqueRows(model, "##pfg", model.FrameGenerators, model.FrameGenerator, "", t => model.SelectFrameGen(t.Index));
+            MotionRow(model, "##pflow");
             HdrRow(model);
             if (model.Renderer.SwapChainIsPq) BrightnessRows(model);
         });
@@ -316,6 +318,31 @@ internal static class SettingsUi
         float width = BeginRow(Strings.T("sMode"));
         if (Widgets.Combo("##mode", items[current].Text, items, current, out int chosen, width) && chosen != current)
             model.SelectMode(modes[chosen], modes[chosen].MaxFps);
+    }
+
+    /// <summary>
+    /// How much work goes into the estimate of motion. It is there while something goes by
+    /// that estimate - DLSS, FSR, frame generation - and not otherwise: with nothing using
+    /// it, it is not worked out at all.
+    /// </summary>
+    private static void MotionRow(AppModel model, string id)
+    {
+        if (model.Renderer.Flow is not { } flow) return;
+        if (model.Upscaler.Index is not (1 or 2) && model.FrameGenerator.Index == 0) return;
+
+        var items = new Widgets.ComboItem[]
+        {
+            new(Strings.T("flowFast"), "", true, Strings.T("flowFastInfo")),
+            new(Strings.T("flowMedium"), "", true, Strings.T("flowMediumInfo")),
+            new(Strings.T("flowMax"), "", true, Strings.T("flowMaxInfo"))
+        };
+        int current = Math.Clamp((int)flow.Quality, 0, items.Length - 1);
+        float width = BeginRow(Strings.T("flowTitle"));
+        if (Widgets.Combo(id, items[current].Text, items, current, out int chosen, width) && chosen != current)
+        {
+            flow.Quality = (Render.FlowQuality)chosen;
+            model.Touch();
+        }
     }
 
     /// <summary>How much enlarging there is to do at all, which decides whether an upscaler matters.</summary>

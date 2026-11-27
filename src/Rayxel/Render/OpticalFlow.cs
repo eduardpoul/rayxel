@@ -19,6 +19,19 @@ public enum FlowView
     Only
 }
 
+/// <summary>How much work goes into the estimate of motion; see <see cref="OpticalFlow"/>.</summary>
+public enum FlowQuality
+{
+    /// <summary>One vector for every 4x4 block of the picture, worked out on reduced copies of it.</summary>
+    Fast,
+
+    /// <summary>One for every 2x2 block, the last correction made on the picture itself.</summary>
+    Medium,
+
+    /// <summary>One for every pixel.</summary>
+    Max
+}
+
 /// <summary>
 /// Motion between one frame and the next, estimated from the pictures themselves.
 /// <para>
@@ -57,6 +70,19 @@ public enum FlowView
 /// numbers beside its picture, and <c>src/rayxel-send/test/flowtest-*</c> is a picture
 /// with known movement to check them against.
 /// </para>
+/// <para>
+/// That is the fast estimate. <see cref="FlowQuality.Medium"/> does the same on copies
+/// twice the size - one vector for every 2x2 block, the last corrections made on the
+/// picture itself, over a wider patch - offers each patch what its neighbours a level up
+/// found as well as their blend, and lets a flat patch with a knowing neighbour on one
+/// side only go with it. It knows a patch of slanting lines for what it is: along its
+/// lines such a patch has its neighbours' answer, and its own only across them. And each
+/// vector is steadied at the end by those around it that say the same.
+/// <see cref="FlowQuality.Max"/> then has every pixel choose for itself among the vectors
+/// of the blocks around it. <c>tools/flow</c> renders clips whose motion is known exactly
+/// and measures all three against them, and what an upscaler makes of each - which is
+/// that medium gives a slightly better picture than fast, and max no better than medium.
+/// </para>
 /// </summary>
 public sealed class OpticalFlow : IDisposable
 {
@@ -70,9 +96,11 @@ public sealed class OpticalFlow : IDisposable
     private readonly ID3D11Device _device;
     private ID3D11VertexShader? _vs;
     private ID3D11PixelShader? _reducePs, _matchPs, _refinePs, _finerPs, _resolvePs, _medianPs, _showPs, _spreadPs;
+    private ID3D11PixelShader? _densePs, _denseMedianPs, _polishPs, _acrossPs, _steadyPs;
     private ID3D11Buffer? _constants;
     private ID3D11SamplerState? _point;
     private bool _compiled, _failed;
+    private FlowQuality _compiledFor;
 
     // Two luma pyramids, swapped every frame: the newest and the one before it.
     private readonly ID3D11Texture2D?[] _pyramid = new ID3D11Texture2D?[2];
@@ -96,9 +124,92 @@ public sealed class OpticalFlow : IDisposable
     private ID3D11Texture2D? _perPixel;
     private ID3D11RenderTargetView? _perPixelTarget;
 
+    // At the highest quality every pixel chooses its own vector, here, before the strays
+    // among them are removed into _perPixel.
+    private ID3D11Texture2D? _dense;
+    private ID3D11RenderTargetView? _denseTarget;
+    private ID3D11ShaderResourceView? _denseView;
+
     private int _videoWidth, _videoHeight;
+    private int _topWidth, _topHeight;
+    private FlowQuality _quality = FlowQuality.Medium;
 
     public FlowView View { get; set; } = FlowView.Off;
+
+    /// <summary>
+    /// How much work goes into it. Changing it starts the estimate afresh: the next frame
+    /// has nothing before it.
+    /// </summary>
+    public FlowQuality Quality
+    {
+        get => _quality;
+        set
+        {
+            if (value == _quality) return;
+            _quality = value;
+            // Everything is sized by it, so it is all built again at the next frame.
+            _videoWidth = _videoHeight = 0;
+            Ready = false;
+            _failed = false;
+        }
+    }
+
+    /// <summary>
+    /// Diagnostic: the vectors are worked out as ever and "nothing moved" handed out in
+    /// their place by <see cref="PerPixel"/> - what an upscaler makes of a picture with no
+    /// motion given, to set beside what it makes of it with.
+    /// </summary>
+    public bool Withheld { get; set; }
+
+    // Vectors read from a file, handed out by PerPixel in place of the estimate; see Supply.
+    private ID3D11Texture2D? _supplied;
+    private bool _suppliedNow;
+
+    /// <summary>
+    /// Diagnostic: vectors from a file, as <see cref="SavePerPixel"/> writes them, handed
+    /// out by <see cref="PerPixel"/> in place of the estimate until the next call - or, with
+    /// null, the estimate again. With a clip whose motion is known this is the truth itself,
+    /// which shows what an upscaler makes of a picture when its vectors could not be better:
+    /// the most there is to be had from improving the estimate.
+    /// </summary>
+    public bool Supply(ID3D11DeviceContext context, string? path)
+    {
+        _suppliedNow = false;
+        if (path is null || _videoWidth <= 0) return false;
+
+        using var file = new BinaryReader(File.OpenRead(path));
+        if (!file.ReadBytes(4).AsSpan().SequenceEqual("RXFP"u8)) return false;
+        int width = file.ReadInt32(), height = file.ReadInt32();
+        if (width != _videoWidth || height != _videoHeight) return false;
+        byte[] vectors = file.ReadBytes(width * height * 4);
+        if (vectors.Length != width * height * 4) return false;
+
+        if (_supplied is null || _supplied.Description.Width != width || _supplied.Description.Height != height)
+        {
+            _supplied?.Dispose();
+            _supplied = _device.CreateTexture2D(new Texture2DDescription
+            {
+                Width = (uint)width,
+                Height = (uint)height,
+                MipLevels = 1,
+                ArraySize = 1,
+                Format = Format.R16G16_Float,
+                SampleDescription = new SampleDescription(1, 0),
+                Usage = ResourceUsage.Default,
+                BindFlags = BindFlags.ShaderResource
+            });
+        }
+        unsafe
+        {
+            fixed (byte* data = vectors)
+                context.UpdateSubresource(_supplied, 0, null, (IntPtr)data, (uint)(width * 4), 0);
+        }
+        _suppliedNow = true;
+        return true;
+    }
+
+    // The pyramid's largest copy is the picture halved this many times.
+    private int TopShift => _quality == FlowQuality.Fast ? 1 : 0;
 
     /// <summary>True once there is a vector field to show: two frames have been seen.</summary>
     public bool Ready { get; private set; }
@@ -107,17 +218,21 @@ public sealed class OpticalFlow : IDisposable
     public string? LastError { get; private set; }
 
     /// <summary>Vectors per frame, as columns by rows.</summary>
-    public (int Width, int Height) FieldSize => _levelSize.Length > 0 ? _levelSize[0] : (0, 0);
+    public (int Width, int Height) FieldSize =>
+        _levelSize.Length == 0 ? (0, 0) : _quality == FlowQuality.Max ? (_videoWidth, _videoHeight) : _levelSize[0];
 
     public OpticalFlow(ID3D11Device device) => _device = device;
 
     private bool Compile()
     {
-        if (_compiled) return true;
+        if (_compiled && _compiledFor == _quality) return true;
         if (_failed) return false;
 
         try
         {
+            // The passes differ with the quality, so they are built for it, and again when it changes.
+            ReleaseShaders();
+            _compiled = false;
             _vs = _device.CreateVertexShader(Build("VS", "vs_5_0"));
             _reducePs = _device.CreatePixelShader(Build("ReducePS", "ps_5_0"));
             _matchPs = _device.CreatePixelShader(Build("MatchPS", "ps_5_0"));
@@ -127,10 +242,21 @@ public sealed class OpticalFlow : IDisposable
             _medianPs = _device.CreatePixelShader(Build("MedianPS", "ps_5_0"));
             _showPs = _device.CreatePixelShader(Build("ShowPS", "ps_5_0"));
             _spreadPs = _device.CreatePixelShader(Build("SpreadPS", "ps_5_0"));
+            if (_quality != FlowQuality.Fast)
+            {
+                _polishPs = _device.CreatePixelShader(Build("PolishPS", "ps_5_0"));
+                _acrossPs = _device.CreatePixelShader(Build("AcrossPS", "ps_5_0"));
+                _steadyPs = _device.CreatePixelShader(Build("SteadyPS", "ps_5_0"));
+            }
+            if (_quality == FlowQuality.Max)
+            {
+                _densePs = _device.CreatePixelShader(Build("DensePS", "ps_5_0"));
+                _denseMedianPs = _device.CreatePixelShader(Build("DenseMedianPS", "ps_5_0"));
+            }
 
-            _constants = _device.CreateBuffer(new BufferDescription(64, BindFlags.ConstantBuffer,
+            _constants ??= _device.CreateBuffer(new BufferDescription(80, BindFlags.ConstantBuffer,
                 ResourceUsage.Dynamic, CpuAccessFlags.Write));
-            _point = _device.CreateSamplerState(new SamplerDescription
+            _point ??= _device.CreateSamplerState(new SamplerDescription
             {
                 Filter = Filter.MinMagMipPoint,
                 AddressU = TextureAddressMode.Clamp,
@@ -140,7 +266,8 @@ public sealed class OpticalFlow : IDisposable
             });
 
             _compiled = true;
-            Log.Info("optical flow: shaders ready");
+            _compiledFor = _quality;
+            Log.Info($"optical flow: shaders ready ({_quality})");
             return true;
         }
         catch (Exception ex)
@@ -151,9 +278,10 @@ public sealed class OpticalFlow : IDisposable
             return false;
         }
 
-        static ReadOnlySpan<byte> Build(string entry, string profile)
+        ReadOnlySpan<byte> Build(string entry, string profile)
         {
-            Compiler.Compile(ShaderSource, [], null, entry, "flow.hlsl", profile, out var blob, out var errors);
+            Compiler.Compile(ShaderSource, [new ShaderMacro("QUALITY", ((int)_quality).ToString())], null, entry, "flow.hlsl",
+                             profile, out var blob, out var errors);
             if (blob is null) throw new InvalidOperationException($"{entry} did not compile: {errors?.AsString()}");
             // Copied out because the blob is released here and the span must outlive it.
             byte[] code = blob.AsSpan().ToArray();
@@ -169,7 +297,9 @@ public sealed class OpticalFlow : IDisposable
         _videoWidth = videoWidth;
         _videoHeight = videoHeight;
 
-        int topWidth = Math.Max(1, videoWidth / 2), topHeight = Math.Max(1, videoHeight / 2);
+        int topWidth = Math.Max(1, videoWidth >> TopShift), topHeight = Math.Max(1, videoHeight >> TopShift);
+        _topWidth = topWidth;
+        _topHeight = topHeight;
 
         for (int i = 0; i < 2; i++)
         {
@@ -223,12 +353,19 @@ public sealed class OpticalFlow : IDisposable
         });
         _perPixelTarget = _device.CreateRenderTargetView(_perPixel);
 
+        if (_quality == FlowQuality.Max)
+        {
+            _dense = _device.CreateTexture2D(_perPixel.Description);
+            _denseTarget = _device.CreateRenderTargetView(_dense);
+            _denseView = _device.CreateShaderResourceView(_dense);
+        }
+
         _havePrevious = false;
         Ready = false;
 
         int reach = 0;
-        for (int i = 0; i < _levelSize.Length; i++) reach += SearchRadius << (FinestMip + 1 + i);
-        Log.Info($"optical flow: {_levelSize[0].Width}x{_levelSize[0].Height} vectors for {videoWidth}x{videoHeight}, " +
+        for (int i = 0; i < _levelSize.Length; i++) reach += SearchRadius << (FinestMip + TopShift + i);
+        Log.Info($"optical flow ({_quality}): {_levelSize[0].Width}x{_levelSize[0].Height} vectors for {videoWidth}x{videoHeight}, " +
                  $"{_levelSize.Length} levels, movement of up to about {reach} px a frame");
     }
 
@@ -276,10 +413,10 @@ public sealed class OpticalFlow : IDisposable
         context.PSSetSampler(1, _point);
         context.OMSetBlendState(null);
 
-        // The new frame's brightness at half size, and from that every smaller copy.
+        // The new frame's brightness, at half size or its own, and from that every smaller copy.
         Unbind(context);
         context.OMSetRenderTargets(_pyramidTop[_current]!);
-        context.RSSetViewport(0, 0, Math.Max(1, videoWidth / 2), Math.Max(1, videoHeight / 2));
+        context.RSSetViewport(0, 0, _topWidth, _topHeight);
         SetConstants(context, 0, 0, 0, hasParent: false);
         context.PSSetShader(_reducePs);
         context.PSSetShaderResource(0, luma);
@@ -302,7 +439,12 @@ public sealed class OpticalFlow : IDisposable
             Unbind(context);
             context.OMSetRenderTargets(_fieldTarget[i]!);
             context.RSSetViewport(0, 0, _levelSize[i].Width, _levelSize[i].Height);
-            SetConstants(context, _levelSize[i].Width, _levelSize[i].Height, FinestMip + i, hasParent);
+            // Above the fast estimate the finest level, where most of the vectors are, looks
+            // one pixel either side and no further: it is also offered what its neighbours
+            // above found, which is where an answer far from its own would come from.
+            int radius = _quality != FlowQuality.Fast && i == 0 && hasParent ? 1 : SearchRadius;
+            var above = hasParent ? _levelSize[i + 1] : (0, 0);
+            SetConstants(context, _levelSize[i].Width, _levelSize[i].Height, FinestMip + i, hasParent, above, radius);
             context.PSSetShaderResource(0, _pyramidView[_current]!);
             context.PSSetShaderResource(1, _pyramidView[previous]!);
             if (hasParent) context.PSSetShaderResource(2, _fieldView[i + 1]!);
@@ -322,14 +464,29 @@ public sealed class OpticalFlow : IDisposable
 
         // And once more against the copy of the picture one step finer than the vectors.
         int finerMip = FinestMip - 1;
+        var refined = _refinedView!;
+        if (_polishPs is not null)
+        {
+            // Above the fast estimate that copy is the picture itself, and the correction
+            // is made on it twice: first over a wider patch, which steadies it. The field
+            // it is written into is free until the vectors are settled.
+            Unbind(context);
+            context.OMSetRenderTargets(_settledTarget!);
+            SetConstants(context, _topWidth >> finerMip, _topHeight >> finerMip, finerMip, hasParent: true);
+            context.PSSetShader(_polishPs);
+            context.PSSetShaderResource(0, _pyramidView[_current]!);
+            context.PSSetShaderResource(1, _pyramidView[previous]!);
+            context.PSSetShaderResource(2, _refinedView!);
+            context.Draw(4, 0);
+            refined = _settledView!;
+        }
         Unbind(context);
         context.OMSetRenderTargets(_finerTarget!);
-        SetConstants(context, Math.Max(1, _videoWidth / 2) >> finerMip, Math.Max(1, _videoHeight / 2) >> finerMip,
-                     finerMip, hasParent: true);
+        SetConstants(context, _topWidth >> finerMip, _topHeight >> finerMip, finerMip, hasParent: true);
         context.PSSetShader(_finerPs);
         context.PSSetShaderResource(0, _pyramidView[_current]!);
         context.PSSetShaderResource(1, _pyramidView[previous]!);
-        context.PSSetShaderResource(2, _refinedView!);
+        context.PSSetShaderResource(2, refined);
         context.Draw(4, 0);
 
         // The vectors that are not measurements settled from those that are.
@@ -341,12 +498,62 @@ public sealed class OpticalFlow : IDisposable
         context.PSSetShaderResource(2, _finerView!);
         context.Draw(4, 0);
 
+        var settled = _settledView!;
+        if (_acrossPs is not null)
+        {
+            // Above the fast estimate, what a settled patch can tell for itself is put back:
+            // on the picture, into the field the first corrections were made in.
+            Unbind(context);
+            context.OMSetRenderTargets(_refinedTarget!);
+            SetConstants(context, _topWidth >> finerMip, _topHeight >> finerMip, finerMip, hasParent: true);
+            context.PSSetShader(_acrossPs);
+            context.PSSetShaderResource(0, _pyramidView[_current]!);
+            context.PSSetShaderResource(1, _pyramidView[previous]!);
+            context.PSSetShaderResource(2, _settledView!);
+            context.Draw(4, 0);
+            settled = _refinedView!;
+            SetConstants(context, _levelSize[0].Width, _levelSize[0].Height, FinestMip, hasParent: true);
+        }
+
         // And the strays among them removed.
         Unbind(context);
-        context.OMSetRenderTargets(_resultTarget!);
+        context.OMSetRenderTargets(_steadyPs is not null ? _settledTarget! : _resultTarget!);
         context.PSSetShader(_medianPs);
-        context.PSSetShaderResource(2, _settledView!);
+        context.PSSetShaderResource(2, settled);
         context.Draw(4, 0);
+
+        if (_steadyPs is not null)
+        {
+            // Above the fast estimate, each vector is then steadied by those around it that
+            // say the same within a fraction of a pixel: what is left of the picture's noise
+            // in them is not the same from one block to the next, and the movement is.
+            Unbind(context);
+            context.OMSetRenderTargets(_resultTarget!);
+            context.PSSetShader(_steadyPs);
+            context.PSSetShaderResource(2, _settledView!);
+            context.Draw(4, 0);
+        }
+
+        if (_quality == FlowQuality.Max && _denseTarget is not null)
+        {
+            // Every pixel of the picture then chooses for itself among the vectors of the
+            // blocks around it, by which of them its own surroundings were found at.
+            Unbind(context);
+            context.OMSetRenderTargets(_denseTarget);
+            context.RSSetViewport(0, 0, _videoWidth, _videoHeight);
+            SetConstants(context, _topWidth, _topHeight, 0, hasParent: true, _levelSize[0], 0);
+            context.PSSetShader(_densePs);
+            context.PSSetShaderResource(0, _pyramidView[_current]!);
+            context.PSSetShaderResource(1, _pyramidView[previous]!);
+            context.PSSetShaderResource(2, _resultView!);
+            context.Draw(4, 0);
+
+            Unbind(context);
+            context.OMSetRenderTargets(_perPixelTarget!);
+            context.PSSetShader(_denseMedianPs);
+            context.PSSetShaderResource(2, _denseView!);
+            context.Draw(4, 0);
+        }
 
         Unbind(context);
         context.OMSetRenderTargets((ID3D11RenderTargetView?)null);
@@ -378,7 +585,7 @@ public sealed class OpticalFlow : IDisposable
             p[11] = View == FlowView.Only ? 1f : 0f;
             p[12] = pq ? 1f : 0f;
             p[13] = nits;
-            p[14] = 0; p[15] = 0;
+            for (int i = 14; i < 20; i++) p[i] = 0;
         }
         context.Unmap(_constants!, 0);
 
@@ -412,13 +619,20 @@ public sealed class OpticalFlow : IDisposable
     public ID3D11Texture2D? PerPixel(ID3D11DeviceContext context, ID3D11SamplerState linear)
     {
         if (!Ready || _resultView is null || _perPixelTarget is null) return null;
+        if (_suppliedNow && _supplied is not null) return _supplied;
+        // At the highest quality it is already there: Estimate left it.
+        if (_quality == FlowQuality.Max && _dense is not null)
+        {
+            if (Withheld) context.ClearRenderTargetView(_perPixelTarget, new Vortice.Mathematics.Color4(0f, 0f, 0f, 0f));
+            return _perPixel;
+        }
 
         var mapped = context.Map(_constants!, 0, MapMode.WriteDiscard);
         unsafe
         {
             var p = (float*)mapped.DataPointer;
             p[0] = -1f; p[1] = 1f; p[2] = 2f; p[3] = -2f;
-            for (int i = 4; i < 16; i++) p[i] = 0;
+            for (int i = 4; i < 20; i++) p[i] = 0;
             // One vector unit is one pixel of the quarter-size picture; this many of the picture's own.
             p[10] = _videoWidth / (float)_levelSize[0].Width;
         }
@@ -439,7 +653,51 @@ public sealed class OpticalFlow : IDisposable
         context.Draw(4, 0);
         Unbind(context);
         context.OMSetRenderTargets((ID3D11RenderTargetView?)null);
+        if (Withheld) context.ClearRenderTargetView(_perPixelTarget, new Vortice.Mathematics.Color4(0f, 0f, 0f, 0f));
         return _perPixel;
+    }
+
+    /// <summary>
+    /// Writes out what <see cref="PerPixel"/> gives - the vectors as an upscaler is handed
+    /// them - so that every quality can be checked against a picture with known motion on
+    /// the same terms, whatever its own grid. Diagnostic only: it waits for the GPU.
+    /// <para>
+    /// The file is "RXFP", then as int32 the picture's width and height, then two float16
+    /// per pixel, row by row: x and y in picture pixels, where that pixel was in the frame
+    /// before relative to where it is now.
+    /// </para>
+    /// </summary>
+    public bool SavePerPixel(ID3D11DeviceContext context, ID3D11SamplerState linear, string path)
+    {
+        if (PerPixel(context, linear) is not { } vectors) return false;
+
+        using var staging = _device.CreateTexture2D(new Texture2DDescription
+        {
+            Width = (uint)_videoWidth,
+            Height = (uint)_videoHeight,
+            MipLevels = 1,
+            ArraySize = 1,
+            Format = Format.R16G16_Float,
+            SampleDescription = new SampleDescription(1, 0),
+            Usage = ResourceUsage.Staging,
+            CPUAccessFlags = CpuAccessFlags.Read
+        });
+        context.CopyResource(staging, vectors);
+
+        var map = context.Map(staging, 0, MapMode.Read);
+        try
+        {
+            using var file = new BinaryWriter(File.Create(path));
+            file.Write("RXFP"u8);
+            file.Write(_videoWidth); file.Write(_videoHeight);
+            unsafe
+            {
+                for (int y = 0; y < _videoHeight; y++)
+                    file.Write(new ReadOnlySpan<byte>((byte*)map.DataPointer + y * (long)map.RowPitch, _videoWidth * 4));
+            }
+        }
+        finally { context.Unmap(staging, 0); }
+        return true;
     }
 
     /// <summary>
@@ -499,7 +757,8 @@ public sealed class OpticalFlow : IDisposable
         return true;
     }
 
-    private void SetConstants(ID3D11DeviceContext context, int width, int height, int mip, bool hasParent)
+    private void SetConstants(ID3D11DeviceContext context, int width, int height, int mip, bool hasParent,
+                              (int Width, int Height) above = default, int radius = SearchRadius)
     {
         var mapped = context.Map(_constants!, 0, MapMode.WriteDiscard);
         unsafe
@@ -510,7 +769,9 @@ public sealed class OpticalFlow : IDisposable
             p[4] = width; p[5] = height;
             p[6] = mip;
             p[7] = hasParent ? 1f : 0f;
-            for (int i = 8; i < 16; i++) p[i] = 0;
+            for (int i = 8; i < 20; i++) p[i] = 0;
+            p[16] = above.Width; p[17] = above.Height;
+            p[18] = radius;
         }
         context.Unmap(_constants!, 0);
     }
@@ -556,15 +817,30 @@ public sealed class OpticalFlow : IDisposable
         _result?.Dispose(); _result = null;
         _perPixelTarget?.Dispose(); _perPixelTarget = null;
         _perPixel?.Dispose(); _perPixel = null;
+        _denseView?.Dispose(); _denseView = null;
+        _denseTarget?.Dispose(); _denseTarget = null;
+        _dense?.Dispose(); _dense = null;
         _videoWidth = _videoHeight = 0;
+        _topWidth = _topHeight = 0;
         Ready = false;
+    }
+
+    private void ReleaseShaders()
+    {
+        _spreadPs?.Dispose(); _showPs?.Dispose(); _medianPs?.Dispose(); _resolvePs?.Dispose(); _finerPs?.Dispose();
+        _refinePs?.Dispose(); _matchPs?.Dispose(); _reducePs?.Dispose(); _vs?.Dispose();
+        _spreadPs = _showPs = _medianPs = _resolvePs = _finerPs = _refinePs = _matchPs = _reducePs = null;
+        _denseMedianPs?.Dispose(); _densePs?.Dispose(); _polishPs?.Dispose(); _acrossPs?.Dispose(); _steadyPs?.Dispose();
+        _denseMedianPs = _densePs = _polishPs = _acrossPs = _steadyPs = null;
+        _vs = null;
     }
 
     public void Dispose()
     {
         Release();
         _point?.Dispose(); _constants?.Dispose();
-        _spreadPs?.Dispose(); _showPs?.Dispose(); _medianPs?.Dispose(); _resolvePs?.Dispose(); _finerPs?.Dispose(); _refinePs?.Dispose(); _matchPs?.Dispose(); _reducePs?.Dispose(); _vs?.Dispose();
+        _supplied?.Dispose();
+        ReleaseShaders();
     }
 
     // NOTE: keep this shader pure ASCII. Non-ASCII bytes truncate the source.
@@ -581,6 +857,9 @@ public sealed class OpticalFlow : IDisposable
             float  IsPq;       // show: 1 when the swapchain is PQ
             float  Nits;       // show: level to encode at for PQ
             float2 _pad;
+            float2 AboveSize;  // match: the field one level up; dense: the field being spread
+            float  Radius;     // match: how far either side of its start a level looks
+            float  _pad2;
         };
 
         Texture2D<float>  Current  : register(t0);
@@ -710,6 +989,38 @@ public sealed class OpticalFlow : IDisposable
 
             float  best = 1e9, bestRaw = 0.0;
             float2 bestD = start;
+        #if QUALITY >= 1
+            // A patch at the edge of something has, in the level above, neighbours on both
+            // sides of that edge, and the blend of their answers is neither's. So each of
+            // the four around it is tried as it stands, and the search starts from the one
+            // this patch is found at best - the blend unless one of them clearly beats it.
+            if (HasParent > 0.5)
+            {
+                float2 corner = floor(i.uv * AboveSize - 0.5);
+                float startCost = PatchCost(at, start) - Noise * 25.0;
+                float2 blend = start;
+                [loop] for (int k = 0; k < 4; k++)
+                {
+                    float2 uv = (corner + float2(k & 1, k >> 1) + 0.5) / AboveSize;
+                    float2 theirs = Field.SampleLevel(Point, uv, 0).xy * 2.0;
+                    // One the search around the blend reaches anyway is not worth the asking.
+                    float2 apart = abs(theirs - blend);
+                    if (max(apart.x, apart.y) <= Radius) continue;
+                    float cost = PatchCost(at, theirs);
+                    if (cost < startCost) { startCost = cost; start = theirs; }
+                }
+            }
+
+            int radius = (int)(Radius + 0.5);
+            [loop] for (int y = -radius; y <= radius; y++)
+            [loop] for (int x = -radius; x <= radius; x++)
+            {
+                float2 delta = float2(x, y);
+                float raw = PatchCost(at, start + delta);
+                float cost = raw + Reluctance * 25.0 * length(delta);
+                if (cost < best) { best = cost; bestRaw = raw; bestD = start + delta; }
+            }
+        #else
             for (int y = -2; y <= 2; y++)
             for (int x = -2; x <= 2; x++)
             {
@@ -718,6 +1029,7 @@ public sealed class OpticalFlow : IDisposable
                 float cost = raw + Reluctance * 25.0 * length(delta);
                 if (cost < best) { best = cost; bestRaw = raw; bestD = start + delta; }
             }
+        #endif
 
             float sure = Surely(bestRaw, PatchCost(at, float2(0.0, 0.0)));
 
@@ -752,6 +1064,93 @@ public sealed class OpticalFlow : IDisposable
             return float4(d, coarse.z, (grip.x >= Grip ? 4.0 : 0.0) + (grip.y >= Grip ? 8.0 : 0.0));
         }
 
+        #if QUALITY >= 1
+        // Grip, for a patch of seven by seven.
+        static const float GripWide = 0.0025;
+
+        // Detail this many times weaker one way than the other is a patch of lines.
+        static const float Lines = 0.06;
+
+        // The same correction as Slopes makes, over a patch seven pixels across instead of
+        // five: twice the pixels to average the picture's own noise over, for an answer
+        // that is already within a pixel and only wants steadying.
+        // `across` is the direction the patch's detail changes in most, and `run` whether
+        // it changes in that one alone: a patch of lines, level, upright or slanting. Along
+        // its lines such a patch looks the same wherever it is put, so nothing it says of
+        // movement that way is a measurement, and the correction is made across them only.
+        float2 SlopesWide(float2 at, float2 d, out float2 grip, out float2 across, out bool run)
+        {
+            float2 back = Shared(d);
+            float gxx = 0.0, gxy = 0.0, gyy = 0.0, bx = 0.0, by = 0.0;
+            for (int y = -3; y <= 3; y++)
+            for (int x = -3; x <= 3; x++)
+            {
+                float2 q = at + float2(x, y) - back;
+                float c  = Current.SampleLevel(Linear, q / LevelSize, Mip);
+                float ix = 0.5 * (Current.SampleLevel(Linear, (q + float2(1.0, 0.0)) / LevelSize, Mip)
+                                - Current.SampleLevel(Linear, (q - float2(1.0, 0.0)) / LevelSize, Mip));
+                float iy = 0.5 * (Current.SampleLevel(Linear, (q + float2(0.0, 1.0)) / LevelSize, Mip)
+                                - Current.SampleLevel(Linear, (q - float2(0.0, 1.0)) / LevelSize, Mip));
+                float it = Previous.SampleLevel(Linear, (q + d) / LevelSize, Mip) - c;
+                gxx += ix * ix; gxy += ix * iy; gyy += iy * iy;
+                bx  += ix * it; by  += iy * it;
+            }
+
+            grip = float2(gxx, gyy);
+
+            // The two strengths of the patch's detail, across its lines and along them.
+            float spread = sqrt((gxx - gyy) * (gxx - gyy) + 4.0 * gxy * gxy);
+            float most = 0.5 * (gxx + gyy + spread), least = 0.5 * (gxx + gyy - spread);
+            across = abs(gxy) > 1e-7 ? normalize(float2(gxy, most - gxx))
+                                     : (gxx >= gyy ? float2(1.0, 0.0) : float2(0.0, 1.0));
+            run = least < max(GripWide, Lines * most);
+
+            const float Damping = 0.006;
+            float2 delta;
+            if (run)
+            {
+                delta = -across * (across.x * bx + across.y * by) / (most + Damping);
+            }
+            else
+            {
+                gxx += Damping; gyy += Damping;
+                float det = gxx * gyy - gxy * gxy;
+                delta = -float2(gyy * bx - gxy * by, gxx * by - gxy * bx) / det;
+            }
+            return clamp(delta, -1.0, 1.0);
+        }
+
+        // The correction on the picture itself, ahead of FinerPS, which makes it once more
+        // and gives the verdict. LevelSize and Mip are the picture's; a vector is two of
+        // its pixels. A patch that surely stood still is left exactly still.
+        float4 PolishPS(VSOut i) : SV_Target
+        {
+            float4 f = Field.SampleLevel(Point, i.uv, 0);
+            if (f.z < -Settled) return f;
+            float2 there = f.xy * 2.0;
+            float2 grip, across;
+            bool run;
+            there += SlopesWide(i.uv * LevelSize, there, grip, across, run);
+            return float4(there * 0.5, f.zw);
+        }
+
+        // And once more after the vectors have been settled. A patch of slanting lines
+        // was given its movement along them by its neighbours there; across them it can
+        // tell for itself, and this puts that back. LevelSize and Mip are the picture's.
+        float4 AcrossPS(VSOut i) : SV_Target
+        {
+            float4 f = Field.SampleLevel(Point, i.uv, 0);
+            if (f.z < -Settled || ((int)(f.w + 0.5) & 3) == 3) return f;
+            float2 there = f.xy * 2.0;
+            float2 grip, across;
+            bool run;
+            float2 delta = SlopesWide(i.uv * LevelSize, there, grip, across, run);
+            // Only across lines: a patch with nothing in it stays as it was settled.
+            if (run && max(grip.x, grip.y) >= GripWide) there += delta;
+            return float4(there * 0.5, f.zw);
+        }
+        #endif
+
         // The correction once more, on the copy of the picture with twice the detail. The
         // vectors are worked out on a quarter-size copy, where a quarter of a pixel is a
         // whole pixel of the picture; this halves what is left over. The patch is smaller
@@ -769,6 +1168,7 @@ public sealed class OpticalFlow : IDisposable
             int held = (int)(f.w + 0.5);
             float2 d = f.xy;
             float sure = f.z;
+            bool slanting = false;
 
             if (sure >= -Settled)
             {
@@ -776,15 +1176,34 @@ public sealed class OpticalFlow : IDisposable
                 float2 at = i.uv * LevelSize;
                 float2 grip;
                 float2 there = d * 2.0;
+            #if QUALITY >= 1
+                // Over the wider patch again: the last correction is the one that stands.
+                float2 across;
+                bool run;
+                there += SlopesWide(at, there, grip, across, run);
+                sure = Surely(PatchCost(at, there), PatchCost(at, float2(0.0, 0.0)));
+                d = sure < -Settled ? float2(0.0, 0.0) : there * 0.5;
+
+                // Lines that run level or upright are what the two halves of the verdict
+                // are for: one half is a measurement, the other is not. Slanting ones give
+                // neither half - each is part movement across the lines, part along - so
+                // both are left to be settled, and AcrossPS puts the measured part back.
+                slanting = run && abs(across.x) < 0.94 && abs(across.y) < 0.94 && sure >= -Settled;
+
+            #else
                 there += Slopes(at, there, grip);
                 sure = Surely(PatchCost(at, there), PatchCost(at, float2(0.0, 0.0)));
                 d = sure < -Settled ? float2(0.0, 0.0) : there * 0.5;
+            #endif
             }
 
             bool settled = abs(sure) > Settled;
             float verdict = held;
-            if ((held & 4) != 0 && (settled || abs(d.x) < Same)) verdict += 1.0;
-            if ((held & 8) != 0 && (settled || abs(d.y) < Same)) verdict += 2.0;
+            if (!slanting)
+            {
+                if ((held & 4) != 0 && (settled || abs(d.x) < Same)) verdict += 1.0;
+                if ((held & 8) != 0 && (settled || abs(d.y) < Same)) verdict += 2.0;
+            }
             return float4(d, sure, verdict);
         }
 
@@ -795,8 +1214,13 @@ public sealed class OpticalFlow : IDisposable
         // How far, in vectors, a patch with nothing to match by looks along its surface for
         // one that knows, and how far a patch that had something but came to no verdict
         // looks around itself.
+        #if QUALITY >= 1
+        static const int Reach = 128;
+        static const int Near = 16;
+        #else
         static const int Reach = 64;
         static const int Near = 8;
+        #endif
 
         // Walks from a patch in one direction to the first patch whose vector is a
         // measurement in the half asked about (`bit` 1 sideways, 2 up-and-down). With
@@ -844,8 +1268,16 @@ public sealed class OpticalFlow : IDisposable
             float vb = bit == 1 ? b.x : b.y;
 
             if (ha && hb) return (va * db + vb * da) / (da + db);
+        #if QUALITY >= 1
+            // With one side only it goes with that side, and with neither it keeps what the
+            // levels above made of it: under a camera that is turning, a shadow at the
+            // picture's edge moves with the rest, and a wrong guess on a flat thing shows
+            // nowhere - it looks the same wherever it is taken from.
+            return ha ? va : hb ? vb : own;
+        #else
             if (flat) return 0.0;
             return ha ? va : hb ? vb : own;
+        #endif
         }
 
         // The last word on each vector: its measured halves stand, the others are settled.
@@ -871,23 +1303,19 @@ public sealed class OpticalFlow : IDisposable
             a = low;
         }
 
-        // A match can simply be wrong - a dark, noisy corner finds itself somewhere else -
-        // and a wrong vector stands alone among right ones. Each vector is replaced by the
-        // middle one of itself and its eight neighbours, each half apart, which removes a
-        // lone stray and leaves an edge between two movements where it was.
-        float4 MedianPS(VSOut i) : SV_Target
+        // The middle one of a vector and its eight neighbours, each half apart; `px` is
+        // one step of the field in texture coordinates.
+        float2 Middle(float2 uv, float2 px)
         {
-            float2 px = 1.0 / LevelSize;
-            float4 own = Field.SampleLevel(Point, i.uv, 0);
-            float2 v0 = Field.SampleLevel(Point, i.uv + px * float2(-1.0, -1.0), 0).xy;
-            float2 v1 = Field.SampleLevel(Point, i.uv + px * float2( 0.0, -1.0), 0).xy;
-            float2 v2 = Field.SampleLevel(Point, i.uv + px * float2( 1.0, -1.0), 0).xy;
-            float2 v3 = Field.SampleLevel(Point, i.uv + px * float2(-1.0,  0.0), 0).xy;
-            float2 v4 = own.xy;
-            float2 v5 = Field.SampleLevel(Point, i.uv + px * float2( 1.0,  0.0), 0).xy;
-            float2 v6 = Field.SampleLevel(Point, i.uv + px * float2(-1.0,  1.0), 0).xy;
-            float2 v7 = Field.SampleLevel(Point, i.uv + px * float2( 0.0,  1.0), 0).xy;
-            float2 v8 = Field.SampleLevel(Point, i.uv + px * float2( 1.0,  1.0), 0).xy;
+            float2 v0 = Field.SampleLevel(Point, uv + px * float2(-1.0, -1.0), 0).xy;
+            float2 v1 = Field.SampleLevel(Point, uv + px * float2( 0.0, -1.0), 0).xy;
+            float2 v2 = Field.SampleLevel(Point, uv + px * float2( 1.0, -1.0), 0).xy;
+            float2 v3 = Field.SampleLevel(Point, uv + px * float2(-1.0,  0.0), 0).xy;
+            float2 v4 = Field.SampleLevel(Point, uv, 0).xy;
+            float2 v5 = Field.SampleLevel(Point, uv + px * float2( 1.0,  0.0), 0).xy;
+            float2 v6 = Field.SampleLevel(Point, uv + px * float2(-1.0,  1.0), 0).xy;
+            float2 v7 = Field.SampleLevel(Point, uv + px * float2( 0.0,  1.0), 0).xy;
+            float2 v8 = Field.SampleLevel(Point, uv + px * float2( 1.0,  1.0), 0).xy;
 
             // The shortest known sequence of comparisons that leaves the middle of nine in
             // the middle.
@@ -898,8 +1326,92 @@ public sealed class OpticalFlow : IDisposable
             Order(v3, v6); Order(v1, v4); Order(v2, v5);
             Order(v4, v7); Order(v4, v2); Order(v6, v4);
             Order(v4, v2);
-            return float4(v4, own.zw);
+            return v4;
         }
+
+        // A match can simply be wrong - a dark, noisy corner finds itself somewhere else -
+        // and a wrong vector stands alone among right ones. Each vector is replaced by the
+        // middle one of itself and its eight neighbours, each half apart, which removes a
+        // lone stray and leaves an edge between two movements where it was.
+        float4 MedianPS(VSOut i) : SV_Target
+        {
+            float4 own = Field.SampleLevel(Point, i.uv, 0);
+            return float4(Middle(i.uv, 1.0 / LevelSize), own.zw);
+        }
+
+        #if QUALITY >= 1
+        // Vectors no further apart than this, in the field's pixels, are the same movement
+        // measured twice.
+        static const float Alike = 0.25;
+
+        // Each vector replaced by the average of itself and those of the blocks around it
+        // that agree with it: the same movement measured many times over is known better
+        // than measured once. One that differs by more is another thing's, or the edge of
+        // this one, and has no say. A patch that surely stood still stays exactly still.
+        float4 SteadyPS(VSOut i) : SV_Target
+        {
+            float2 px = 1.0 / LevelSize;
+            float4 own = Field.SampleLevel(Point, i.uv, 0);
+            if (own.z < -Settled) return own;
+
+            float2 sum = float2(0.0, 0.0);
+            float weight = 0.0;
+            for (int y = -2; y <= 2; y++)
+            for (int x = -2; x <= 2; x++)
+            {
+                float2 theirs = Field.SampleLevel(Point, i.uv + px * float2(x, y), 0).xy;
+                float2 apart = theirs - own.xy;
+                float w = saturate(1.0 - dot(apart, apart) / (Alike * Alike));
+                sum += theirs * w;
+                weight += w;
+            }
+            return float4(sum / weight, own.zw);
+        }
+        #endif
+
+        #if QUALITY >= 2
+        // One vector for every pixel of the picture, out of the field of one for every 2x2
+        // block. Between blocks that moved alike the blend of them is the answer already.
+        // Where they did not - the edge of one thing over another - the blend is nobody's,
+        // and the pixel takes the vector of whichever block around it its own surroundings
+        // are found at best. Those surroundings are five pixels across, so what is strongly
+        // drawn carries its vector a pixel or two past its own edge: an outline, a thin
+        // line, a letter goes with the thing it belongs to, which is what an upscaler wants
+        // of vectors - and no further, or the thing would be drawn over what is behind it.
+        //
+        // LevelSize and Mip are the picture's own here, AboveSize the field's; a vector of
+        // the field is two of the picture's pixels. Out: the vector in the picture's pixels.
+        float2 DensePS(VSOut i) : SV_Target
+        {
+            float2 at = i.uv * LevelSize;
+            float2 corner = floor(i.uv * AboveSize - 0.5);
+            float2 blend = Field.SampleLevel(Linear, i.uv, 0).xy * 2.0;
+            float2 d = blend;
+
+            float2 c0 = Field.SampleLevel(Point, (corner + float2(0.5, 0.5)) / AboveSize, 0).xy * 2.0;
+            float2 c1 = Field.SampleLevel(Point, (corner + float2(1.5, 0.5)) / AboveSize, 0).xy * 2.0;
+            float2 c2 = Field.SampleLevel(Point, (corner + float2(0.5, 1.5)) / AboveSize, 0).xy * 2.0;
+            float2 c3 = Field.SampleLevel(Point, (corner + float2(1.5, 1.5)) / AboveSize, 0).xy * 2.0;
+
+            // Blocks that agree to within half a pixel have nothing to choose between.
+            float2 low = min(min(c0, c1), min(c2, c3)), high = max(max(c0, c1), max(c2, c3));
+            if (max(high.x - low.x, high.y - low.y) > 0.5)
+            {
+                float best = PatchCost(at, blend) - Noise * 25.0 * 0.5;
+                float cost = PatchCost(at, c0); if (cost < best) { best = cost; d = c0; }
+                cost = PatchCost(at, c1); if (cost < best) { best = cost; d = c1; }
+                cost = PatchCost(at, c2); if (cost < best) { best = cost; d = c2; }
+                cost = PatchCost(at, c3); if (cost < best) { best = cost; d = c3; }
+            }
+            return d;
+        }
+
+        // The strays among the per-pixel vectors removed, as MedianPS does for the blocks'.
+        float2 DenseMedianPS(VSOut i) : SV_Target
+        {
+            return Middle(i.uv, 1.0 / LevelSize);
+        }
+        #endif
 
         // BT.709 primaries to the swapchain's BT.2020; see the renderer's SdrToPQ.
         static const float3x3 Rec709To2020 = {

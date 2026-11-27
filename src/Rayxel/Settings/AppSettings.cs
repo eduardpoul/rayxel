@@ -43,6 +43,14 @@ public sealed class AppSettings
     public bool HdrSourceAsIs { get; set; } = true;
 
     /// <summary>
+    /// How much work goes into the motion DLSS, FSR and frame generation go by: 0 fast,
+    /// 1 medium, 2 the most; see <see cref="Render.FlowQuality"/>. Medium until chosen
+    /// otherwise: where the three part it gives a better picture than fast, and the most
+    /// gives none better than it.
+    /// </summary>
+    public int FlowQuality { get; set; } = 1;
+
+    /// <summary>
     /// Which network DLSS is asked for: 11 = K, 12 = L, 13 = M. L to begin with;
     /// <see cref="Render.DlssScaler.Model"/> says why.
     /// </summary>

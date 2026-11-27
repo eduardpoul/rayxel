@@ -373,6 +373,7 @@ public sealed class AppModel
         s.HdrSourceAsIs = Renderer.HdrAsIs;
         s.SourceRange = Renderer.SourceRange;
         s.DlssModel = (int)(Renderer.Dlss?.Model ?? (DlssModel)s.DlssModel);
+        if (Renderer.Flow is { } flow) s.FlowQuality = (int)flow.Quality;
         if (Renderer.Fsr is { } fsr) { s.FsrVersion = fsr.Version; s.FsrModel = (int)fsr.Model; }
         s.OverlayNits = OverlayNits;
         s.NetAdaptive = NetDevice.Adaptive;

@@ -19,7 +19,7 @@ namespace Rayxel.Render;
 /// composition of any kind over the window so DXGI can reach independent flip.
 /// </para>
 /// </summary>
-public sealed class Renderer : IDisposable
+public sealed partial class Renderer : IDisposable
 {
     // 10-bit throughout. It costs nothing in SDR — the colour space, not the format, is
     // what switches the output between sRGB and PQ — and it is the only way RTX Video HDR
@@ -657,6 +657,9 @@ public sealed class Renderer : IDisposable
     public void Resize(int width, int height)
     {
         if (width <= 0 || height <= 0 || (width == Width && height == Height)) return;
+        // A clip going through the ways holds the back buffer, and its pictures are all to
+        // be one size.
+        if (_clipGoing) return;
 
         lock (_context)
         {
@@ -1749,6 +1752,12 @@ public sealed class Renderer : IDisposable
     private ID3D11Texture2D[]? _clip;
     private volatile int _clipCount;
 
+    // True while SaveClip has the clip going through the ways, on the window's own thread.
+    private bool _clipGoing;
+
+    // The work on a clip takes the window's thread for a good while; see Win32.StillHere.
+    private static void StillHere() => Native.Win32.StillHere();
+
     /// <summary>
     /// Frames kept for <see cref="SaveClip"/> so far, and how many it is to hold. Wanted
     /// falls back to 0 when the clip had to be dropped: the source changed size on the way.
@@ -1818,8 +1827,14 @@ public sealed class Renderer : IDisposable
     /// part - what smears, what flickers, what is drawn that was never sent - and here each
     /// is given the same movement, from the same start.
     /// </para>
+    /// <para>
+    /// <paramref name="options"/> narrows it to some of the ways, and has those that go by
+    /// motion run once for each of several estimates of it, into "dlss-L-fast",
+    /// "dlss-L-max" and so on; the vectors themselves can be written out beside them, into
+    /// "flow-fast" and on, and what each estimate costs measured.
+    /// </para>
     /// </summary>
-    public bool SaveClip(string path)
+    public bool SaveClip(string path, ClipOptions? options = null)
     {
         string root = Path.Combine(Path.GetDirectoryName(path) ?? "", Path.GetFileNameWithoutExtension(path) + "-clip");
 
@@ -1836,6 +1851,8 @@ public sealed class Renderer : IDisposable
             bool dlssWas = DlssEnabled, fsrWas = FsrEnabled, compareWas = CompareScalers;
             bool vsrWas = Processor?.SuperResolutionEnabled == true;
             var modelWas = Dlss?.Model;
+            var qualityWas = Flow?.Quality ?? FlowQuality.Fast;
+            var flows = ClipFlows(options);
             if (Processor is { HdrEnabled: true })
                 Log.Warn("clip: RTX Video HDR is on and takes the picture from DLSS and FSR; run with --no-auto-hdr");
 
@@ -1868,8 +1885,37 @@ public sealed class Renderer : IDisposable
             else if (Fsr is { Possible: true })
                 Log.Warn("clip: FSR is still being built, so it is left out");
 
+            if (options?.Ways is { } only)
+            {
+                foreach (string asked in only)
+                    if (!ways.Exists(w => w.Name.Equals(asked.Trim(), StringComparison.OrdinalIgnoreCase)))
+                        Log.Warn($"clip: there is no way called '{asked}' here");
+                ways.RemoveAll(w => !only.Any(o => o.Trim().Equals(w.Name, StringComparison.OrdinalIgnoreCase)));
+            }
+
             // The other temporal one is not to be fed alongside: each way stands alone.
             CompareScalers = false;
+            _clipGoing = true;
+
+            // The motion by itself first: its numbers, and what it costs.
+            if (Flow is { } measured && _lumaView is not null && (options?.Vectors == true || options?.Timed == true))
+            {
+                foreach (var (flowName, quality, withheld) in flows)
+                {
+                    if (withheld) continue;
+                    measured.Quality = quality;
+                    measured.Withheld = false;
+                    if (options.Vectors)
+                        SaveClipVectors(Path.Combine(root, "flow-" + flowName), clip, frames, measured, options.VectorsEvery);
+                    if (options.Timed)
+                    {
+                        double ms = TimeFlow(clip, frames, measured);
+                        Log.Info($"clip: motion {flowName}: {ms:F3} ms a frame of {_videoWidth}x{_videoHeight} with the card at full load, " +
+                                 $"{measured.FieldSize.Width}x{measured.FieldSize.Height} vectors");
+                    }
+                }
+                measured.Quality = qualityWas;
+            }
 
             void Feed(ID3D11Texture2D frame)
             {
@@ -1897,15 +1943,32 @@ public sealed class Renderer : IDisposable
             bool ok = true;
             var started = System.Diagnostics.Stopwatch.StartNew();
 
+            // A way that goes by motion is run once for each estimate asked for; the others once.
+            var runs = new List<(string Name, Func<bool> On, string? FlowName, FlowQuality Quality, bool Withheld)>();
+            foreach (var (name, on) in ways)
+            {
+                bool byMotion = name.StartsWith("dlss-", StringComparison.Ordinal) || name == "fsr";
+                if (byMotion && flows.Count > 0)
+                    foreach (var (flowName, quality, withheld) in flows) runs.Add((name, on, flowName, quality, withheld));
+                else
+                    runs.Add((name, on, null, qualityWas, false));
+            }
+
             try
             {
-                foreach (var (name, on) in ways)
+                foreach (var (name, on, flowName, quality, withheld) in runs)
                 {
                     if (!on())
                     {
                         Log.Warn($"clip: {name} could not be switched on, so it is left out");
                         ok = false;
                         continue;
+                    }
+                    if (Flow is { } flow)
+                    {
+                        flow.Quality = quality;
+                        flow.Withheld = withheld;
+                        flow.Supply(_context, null);
                     }
 
                     // The first frame shown a few times before the run: DLSS and FSR are built
@@ -1926,12 +1989,20 @@ public sealed class Renderer : IDisposable
                     string folder = name;
                     if (name.StartsWith("dlss-", StringComparison.Ordinal) && Dlss?.ModelInUse is { } used && "dlss-" + used != name)
                         folder = name + "-ran-" + used;
+                    if (flowName is not null) folder += "-" + flowName;
                     string dir = Path.Combine(root, folder);
                     Directory.CreateDirectory(dir);
 
                     for (int i = 0; i < frames; i++)
                     {
+                        StillHere();
                         Feed(clip[i]);
+                        // The frame's real motion in place of the estimate, where there is a file of it.
+                        if (flowName == "truth" && Flow is { } told)
+                        {
+                            string known = Path.Combine(options!.TruthFolder!, $"{i:D4}.flow");
+                            told.Supply(_context, File.Exists(known) ? known : null);
+                        }
                         Render();
                         _context.CopySubresourceRegion(staging, 0, 0, 0, 0, back, 0, area);
                         var pixels = new byte[pw * ph * 4];
@@ -1957,14 +2028,21 @@ public sealed class Renderer : IDisposable
             }
             finally
             {
+                _clipGoing = false;
                 CompareScalers = compareWas;
                 DlssEnabled = dlssWas;
                 FsrEnabled = fsrWas;
                 if (Dlss is { } d && modelWas is { } m) d.Model = m;
                 if (vsrWas != (Processor?.SuperResolutionEnabled == true)) Processor?.ToggleSuperResolution();
+                if (Flow is { } flow)
+                {
+                    flow.Quality = qualityWas;
+                    flow.Withheld = false;
+                    flow.Supply(_context, null);
+                }
             }
 
-            Log.Info($"clip: {frames} frames of {pw}x{ph}, {ways.Count} ways, written to {root} in {started.Elapsed.TotalSeconds:F1} s");
+            Log.Info($"clip: {frames} frames of {pw}x{ph}, {runs.Count} runs, written to {root} in {started.Elapsed.TotalSeconds:F1} s");
             return ok && failed == 0;
         }
     }

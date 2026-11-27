@@ -46,6 +46,15 @@ public static unsafe class Win32
 
     public const int PM_REMOVE = 0x0001;
 
+    /// <summary>
+    /// Tells Windows the calling thread is alive, taking nothing from its queue. A window
+    /// whose thread has not looked at its messages for five seconds is called hung: it is
+    /// shown as a ghost, and ended at the first attempt to close it. A long piece of work
+    /// done on the window's own thread calls this as it goes; what arrived meanwhile is
+    /// dealt with when the work is done.
+    /// </summary>
+    public static void StillHere() => PeekMessageW(out _, IntPtr.Zero, 0, 0, 0);
+
     [StructLayout(LayoutKind.Sequential)]
     public struct POINT { public int X, Y; }
 
