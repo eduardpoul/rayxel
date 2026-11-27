@@ -136,14 +136,17 @@ public sealed unsafe class DlssScaler : IDisposable
     /// The network asked for. Changing it takes effect with the next frame, which is the
     /// first of a new history: what one network accumulated is no use to another.
     /// <para>
-    /// L unless told otherwise, and not DLSS's own pick. For the enlargements a video
+    /// M unless told otherwise, and not DLSS's own pick. For the enlargements a video
     /// usually gets, DLSS would take K, and K leaves a compressed picture much as it came:
     /// the codec's blocks and the stair-steps are still there. L and M both clear them; M
-    /// smooths fine regular detail away with them, L keeps it. On an RTX 5080, taking
-    /// 1280x800 to 2304x1440, they cost 0.85 (K), 1.10 (M) and 1.30 ms (L) a frame.
+    /// smooths fine regular detail away with them, L keeps it. Against clips whose right
+    /// answer is known (tools/flow), M comes closest to it, at twice the size and at a
+    /// third as large again, and K furthest - which is why it is M and not L, the choice
+    /// until then. On an RTX 5080, taking 1280x800 to 2304x1440, they cost 0.85 (K),
+    /// 1.10 (M) and 1.30 ms (L) a frame.
     /// </para>
     /// </summary>
-    public DlssModel Model { get; set; } = DlssModel.L;
+    public DlssModel Model { get; set; } = DlssModel.M;
 
     /// <summary>
     /// The network in use, as a letter, by NGX's own account while it was being built;
@@ -406,11 +409,24 @@ public sealed unsafe class DlssScaler : IDisposable
     }
 
     /// <summary>
+    /// Diagnostic: the mode DLSS is told it is in, as an NVSDK_NGX_PerfQuality_Value,
+    /// whatever the sizes say; null leaves it to them. For seeing what the mode by itself
+    /// changes when the sizes stay as they are - which, with one network asked for under
+    /// every mode, is nothing. A clip of 1920x1080 came out at 2560x1440 the same to the
+    /// last bit as quality, as ultra quality and as DLAA, and one of 1280x800 at 2304x1440
+    /// the same as balanced, as quality and as performance (DLSS 310, the driver choosing
+    /// network M). Ultra quality is a name NVIDIA has never filled in, and DLAA is no more
+    /// than DLSS with nothing to enlarge.
+    /// </summary>
+    public static int? ForcedQuality { get; set; }
+
+    /// <summary>
     /// DLSS's name for how far it is enlarging, which also picks the network it uses.
     /// The values are NVSDK_NGX_PerfQuality_Value; the steps are 1.5, 1.72, 2 and 3 times.
     /// </summary>
     private static int Quality(int inWidth, int outWidth)
     {
+        if (ForcedQuality is { } forced) return forced;
         double scale = outWidth / (double)Math.Max(1, inWidth);
         return scale switch
         {
@@ -425,6 +441,7 @@ public sealed unsafe class DlssScaler : IDisposable
     private static string QualityName(int quality) => quality switch
     {
         5 => "DLAA",
+        4 => "ultra quality",
         2 => "quality",
         1 => "balanced",
         0 => "performance",
@@ -435,6 +452,7 @@ public sealed unsafe class DlssScaler : IDisposable
     private static string QualityInLog(int quality) => quality switch
     {
         5 => "DLAA",
+        4 => "UltraQuality",
         2 => "Quality",
         1 => "Balanced",
         0 => "Perf",

@@ -201,6 +201,14 @@ foreach (var arg in args)
     else if (arg.StartsWith("--dlss-model=", StringComparison.OrdinalIgnoreCase))
         forcedDlssModel = Enum.TryParse<DlssModel>(arg[13..], true, out var asked) && Enum.IsDefined(asked)
             ? asked : null;
+    // Diagnostic: the mode DLSS is told it is in, whatever the sizes say:
+    // --dlss-mode=dlaa|ultra-quality|quality|balanced|performance|ultra-performance.
+    else if (arg.StartsWith("--dlss-mode=", StringComparison.OrdinalIgnoreCase))
+        DlssScaler.ForcedQuality = arg[12..].ToLowerInvariant() switch
+        {
+            "dlaa" => 5, "ultra-quality" => 4, "quality" => 2, "balanced" => 1,
+            "performance" => 0, "ultra-performance" => 3, _ => null
+        };
     // And the upscaler FSR is asked for, by the name AMD's library offers it under or the
     // start of one: --fsr-version=4|3.1. What it offers depends on the card; with nothing
     // asked for it is the newest that runs there.
@@ -499,7 +507,7 @@ try
     model.AudioOutputId = settings.AudioOutputId;
     if (renderer.Dlss is { } dlssScaler)
         dlssScaler.Model = forcedDlssModel
-            ?? (Enum.IsDefined((DlssModel)settings.DlssModel) ? (DlssModel)settings.DlssModel : DlssModel.L);
+            ?? (Enum.IsDefined((DlssModel)settings.DlssModel) ? (DlssModel)settings.DlssModel : DlssModel.M);
     if (renderer.Fsr is { } fsrScaler)
     {
         fsrScaler.Version = fsrVersionForced ? forcedFsrVersion

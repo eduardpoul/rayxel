@@ -1,4 +1,4 @@
-"""How close each run of a clip through an upscaler came to the clip's double-size reference,
+"""How close each run of a clip through an upscaler came to the clip's larger reference,
 part of the picture by part: `Rayxel --clip-file=NAME.y4m --shot=OUT.png ...` writes the
 runs into OUT-clip/RUN/NNNN.png, and the same with NAME-ref.y4m and --clip-ways=none writes
 what they ought to have arrived at.
@@ -34,8 +34,12 @@ def load(path):
     return np.asarray(Image.open(path).convert("RGB"), np.float32)
 
 
-def double(mask):
-    return np.repeat(np.repeat(mask, 2, axis=0), 2, axis=1)
+def enlarge(mask, shape):
+    """A mask of the clip's pixels spread over a picture of another size, each pixel of
+    the picture taking the clip's pixel it lies in."""
+    rows = np.arange(shape[0]) * mask.shape[0] // shape[0]
+    columns = np.arange(shape[1]) * mask.shape[1] // shape[1]
+    return mask[rows][:, columns]
 
 
 def fine(picture):
@@ -86,10 +90,10 @@ def main():
                 "panel": lab == 4,
             }
             for p, m in masks.items():
-                m2 = double(m)
+                m2 = enlarge(m, err.shape)
                 squares[p] += float(err[m2].sum())
                 counts[p] += int(m2.sum())
-            d2 = double(masks["detail"])
+            d2 = enlarge(masks["detail"], err.shape)
             fine_run += float(fine(got)[d2].sum())
             fine_ref += float(fine(want)[d2].sum())
 
