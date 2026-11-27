@@ -132,7 +132,7 @@ public sealed class OpticalFlow : IDisposable
 
     private int _videoWidth, _videoHeight;
     private int _topWidth, _topHeight;
-    private FlowQuality _quality = FlowQuality.Fast;
+    private FlowQuality _quality = FlowQuality.Medium;
 
     public FlowView View { get; set; } = FlowView.Off;
 

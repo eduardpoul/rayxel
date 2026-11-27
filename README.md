@@ -162,7 +162,7 @@ Everything is optional; the app needs no arguments.
 | `--fsr-model=full\|lite\|rdna2` | the network of FSR 4 to run, whatever card it is |
 | `--fsr-version=<n>` | a version AMD's library offers by itself, e.g. `3.1` |
 | `--fsr-dir=<folder>` | where to look for AMD's library first |
-| `--flow-quality=fast\|medium\|max` | how much work goes into the motion DLSS, FSR and frame generation go by |
+| `--flow-quality=fast\|medium\|max` | how much work goes into the motion DLSS, FSR and frame generation go by (default medium) |
 | `--framegen=dlss\|off` | start with DLSS Frame Generation on or off |
 | `--fg=2\|3\|4\|auto` | frames shown for each real one; `auto` is the most the display can show |
 | `--fg-probe=<file.png>` | put frames through frame generation, write one set out, and exit (`--fg-probe-x=2\|3\|4`) |

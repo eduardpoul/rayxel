@@ -433,7 +433,7 @@ try
     {
         startingFlow.View = startFlow;
         startingFlow.Quality = forcedFlowQuality
-            ?? (Enum.IsDefined((FlowQuality)settings.FlowQuality) ? (FlowQuality)settings.FlowQuality : FlowQuality.Fast);
+            ?? (Enum.IsDefined((FlowQuality)settings.FlowQuality) ? (FlowQuality)settings.FlowQuality : FlowQuality.Medium);
     }
 
     pump = new FramePump(active.Device, renderer);
