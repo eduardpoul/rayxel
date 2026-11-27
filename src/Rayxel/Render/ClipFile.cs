@@ -104,6 +104,7 @@ public sealed partial class Renderer
                 {
                     while (frames.Count < most)
                     {
+                        StillHere();
                         string mark = Line(file);
                         if (mark.Length == 0) break;
                         if (!mark.StartsWith("FRAME", StringComparison.Ordinal)) throw new InvalidDataException("a frame was expected");
@@ -225,6 +226,7 @@ public sealed partial class Renderer
 
                 for (int i = 0; i < _clipCount; i++)
                 {
+                    StillHere();
                     _context.CopyResource(staging, clip[i]);
                     var map = _context.Map(staging, 0, MapMode.Read);
                     try
@@ -314,6 +316,7 @@ public sealed partial class Renderer
         // Twice the first frame, so that what the estimate saw last is the clip's own start.
         for (int i = -1; i < frames; i++)
         {
+            StillHere();
             _context.CopyResource(_videoTexture!, clip[Math.Max(i, 0)]);
             flow.Estimate(_context, _lumaView!, _videoWidth, _videoHeight, _sampler);
             if (i < 1 || (i - 1) % Math.Max(1, every) != 0) continue;
@@ -343,6 +346,7 @@ public sealed partial class Renderer
         {
             double Run(int rounds)
             {
+                StillHere();
                 long started = Stopwatch.GetTimestamp();
                 for (int i = 0; i < rounds; i++)
                 {

@@ -657,6 +657,9 @@ public sealed partial class Renderer : IDisposable
     public void Resize(int width, int height)
     {
         if (width <= 0 || height <= 0 || (width == Width && height == Height)) return;
+        // A clip going through the ways holds the back buffer, and its pictures are all to
+        // be one size.
+        if (_clipGoing) return;
 
         lock (_context)
         {
@@ -1749,6 +1752,12 @@ public sealed partial class Renderer : IDisposable
     private ID3D11Texture2D[]? _clip;
     private volatile int _clipCount;
 
+    // True while SaveClip has the clip going through the ways, on the window's own thread.
+    private bool _clipGoing;
+
+    // The work on a clip takes the window's thread for a good while; see Win32.StillHere.
+    private static void StillHere() => Native.Win32.StillHere();
+
     /// <summary>
     /// Frames kept for <see cref="SaveClip"/> so far, and how many it is to hold. Wanted
     /// falls back to 0 when the clip had to be dropped: the source changed size on the way.
@@ -1886,6 +1895,7 @@ public sealed partial class Renderer : IDisposable
 
             // The other temporal one is not to be fed alongside: each way stands alone.
             CompareScalers = false;
+            _clipGoing = true;
 
             // The motion by itself first: its numbers, and what it costs.
             if (Flow is { } measured && _lumaView is not null && (options?.Vectors == true || options?.Timed == true))
@@ -1985,6 +1995,7 @@ public sealed partial class Renderer : IDisposable
 
                     for (int i = 0; i < frames; i++)
                     {
+                        StillHere();
                         Feed(clip[i]);
                         // The frame's real motion in place of the estimate, where there is a file of it.
                         if (flowName == "truth" && Flow is { } told)
@@ -2017,6 +2028,7 @@ public sealed partial class Renderer : IDisposable
             }
             finally
             {
+                _clipGoing = false;
                 CompareScalers = compareWas;
                 DlssEnabled = dlssWas;
                 FsrEnabled = fsrWas;
