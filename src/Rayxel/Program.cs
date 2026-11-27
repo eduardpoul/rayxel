@@ -507,7 +507,7 @@ try
     model.AudioOutputId = settings.AudioOutputId;
     if (renderer.Dlss is { } dlssScaler)
         dlssScaler.Model = forcedDlssModel
-            ?? (Enum.IsDefined((DlssModel)settings.DlssModel) ? (DlssModel)settings.DlssModel : DlssModel.L);
+            ?? (Enum.IsDefined((DlssModel)settings.DlssModel) ? (DlssModel)settings.DlssModel : DlssModel.M);
     if (renderer.Fsr is { } fsrScaler)
     {
         fsrScaler.Version = fsrVersionForced ? forcedFsrVersion

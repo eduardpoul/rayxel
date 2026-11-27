@@ -51,10 +51,10 @@ public sealed class AppSettings
     public int FlowQuality { get; set; } = 1;
 
     /// <summary>
-    /// Which network DLSS is asked for: 11 = K, 12 = L, 13 = M. L to begin with;
+    /// Which network DLSS is asked for: 11 = K, 12 = L, 13 = M. M to begin with;
     /// <see cref="Render.DlssScaler.Model"/> says why.
     /// </summary>
-    public int DlssModel { get; set; } = (int)Render.DlssModel.L;
+    public int DlssModel { get; set; } = (int)Render.DlssModel.M;
 
     /// <summary>
     /// Which upscaler FSR is asked for, by the name AMD's library offers it under ("3.1.6").
