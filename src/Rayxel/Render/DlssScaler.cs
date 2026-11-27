@@ -406,11 +406,24 @@ public sealed unsafe class DlssScaler : IDisposable
     }
 
     /// <summary>
+    /// Diagnostic: the mode DLSS is told it is in, as an NVSDK_NGX_PerfQuality_Value,
+    /// whatever the sizes say; null leaves it to them. For seeing what the mode by itself
+    /// changes when the sizes stay as they are - which, with one network asked for under
+    /// every mode, is nothing. A clip of 1920x1080 came out at 2560x1440 the same to the
+    /// last bit as quality, as ultra quality and as DLAA, and one of 1280x800 at 2304x1440
+    /// the same as balanced, as quality and as performance (DLSS 310, the driver choosing
+    /// network M). Ultra quality is a name NVIDIA has never filled in, and DLAA is no more
+    /// than DLSS with nothing to enlarge.
+    /// </summary>
+    public static int? ForcedQuality { get; set; }
+
+    /// <summary>
     /// DLSS's name for how far it is enlarging, which also picks the network it uses.
     /// The values are NVSDK_NGX_PerfQuality_Value; the steps are 1.5, 1.72, 2 and 3 times.
     /// </summary>
     private static int Quality(int inWidth, int outWidth)
     {
+        if (ForcedQuality is { } forced) return forced;
         double scale = outWidth / (double)Math.Max(1, inWidth);
         return scale switch
         {
@@ -425,6 +438,7 @@ public sealed unsafe class DlssScaler : IDisposable
     private static string QualityName(int quality) => quality switch
     {
         5 => "DLAA",
+        4 => "ultra quality",
         2 => "quality",
         1 => "balanced",
         0 => "performance",
@@ -435,6 +449,7 @@ public sealed unsafe class DlssScaler : IDisposable
     private static string QualityInLog(int quality) => quality switch
     {
         5 => "DLAA",
+        4 => "UltraQuality",
         2 => "Quality",
         1 => "Balanced",
         0 => "Perf",

@@ -159,6 +159,7 @@ Everything is optional; the app needs no arguments.
 | `--mode=<w>x<h>@<fps>` | start in a specific mode, e.g. `--mode=1920x1080@120` |
 | `--scaler=none\|dlss\|fsr\|vsr` | start with a specific upscaler |
 | `--dlss-model=k\|l\|m` | the network DLSS is asked for |
+| `--dlss-mode=dlaa\|ultra-quality\|quality\|balanced\|performance\|ultra-performance` | diagnostic: the mode DLSS is told it is in, whatever the sizes say - which changes nothing while the sizes and the network stay the same |
 | `--fsr-model=full\|lite\|rdna2` | the network of FSR 4 to run, whatever card it is |
 | `--fsr-version=<n>` | a version AMD's library offers by itself, e.g. `3.1` |
 | `--fsr-dir=<folder>` | where to look for AMD's library first |
